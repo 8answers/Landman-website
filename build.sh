@@ -13,6 +13,9 @@ echo "Getting Flutter dependencies..."
 cd /opt/build/repo
 flutter pub get
 
+echo "Enabling web support..."
+flutter create . --platforms web
+
 echo "Building web..."
 flutter build web --release
 
