@@ -7,5 +7,5 @@ FLUTTER_CHANNEL = "stable"
 
 [[redirects]]
 from = "/*"
-to = "/index.html"
+to = "/main.dart"
 status = 200
