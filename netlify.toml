@@ -4,5 +4,5 @@ publish = "build/web"
 
 [[redirects]]
 from = "/*"
-to = "/main.dart"
+to = "/index.html"
 status = 200
