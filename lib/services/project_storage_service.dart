@@ -294,26 +294,13 @@ class ProjectStorageService {
       // Delete existing plots for this layout
       await _supabase.from('plots').delete().eq('layout_id', layoutId);
 
-      // Delete existing plot partners for plots in this layout
-      final existingPlots = await _supabase
-          .from('plots')
-          .select('id')
-          .eq('layout_id', layoutId);
-      final plotIds = existingPlots.map((p) => p['id']).toList();
-      if (plotIds.isNotEmpty) {
-        // Delete plot partners for each plot
-        for (var plotId in plotIds) {
-          await _supabase
-              .from('plot_partners')
-              .delete()
-              .eq('plot_id', plotId);
-        }
-      }
-
-      // Insert new plots
-      for (var plotData in plots) {
+      // Insert new plots with explicit timestamps to preserve order
+      final baseTime = DateTime.now();
+      int insertedPlotIndex = 0; // Track actual inserted plots for timestamp ordering
+      for (int plotIndex = 0; plotIndex < plots.length; plotIndex++) {
+        final plotData = plots[plotIndex];
         final plotNumber = (plotData['plotNumber'] ?? '').toString().trim();
-        if (plotNumber.isEmpty) continue;
+        if (plotNumber.isEmpty) continue; // Skip empty plots
 
         try {
           final purchaseRate = plotData['purchaseRate']?.toString() ?? '0.00';
@@ -321,9 +308,13 @@ class ProjectStorageService {
           final totalPlotCost = _parseDecimal(plotData['totalPlotCost']?.toString());
           
           // Debug logging for first plot only
-          if (plots.indexOf(plotData) == 0) {
+          if (insertedPlotIndex == 0) {
             print('Saving plot: plotNumber=$plotNumber, purchaseRate=$purchaseRate, allInCostPerSqft=$allInCostPerSqft, totalPlotCost=$totalPlotCost');
           }
+          
+          // Create sequential timestamps to preserve insertion order
+          // Each plot gets a timestamp slightly after the previous one
+          final plotTimestamp = baseTime.add(Duration(milliseconds: insertedPlotIndex * 10));
           
           final newPlot = await _supabase
               .from('plots')
@@ -346,14 +337,18 @@ class ProjectStorageService {
                 'agent_name': plotData['agent'] != null && plotData['agent'].toString().trim().isNotEmpty
                     ? plotData['agent'].toString().trim()
                     : null,
+                'created_at': plotTimestamp.toIso8601String(),
               })
               .select()
               .single();
+
+          insertedPlotIndex++; // Increment only for successfully inserted plots
 
           final plotId = newPlot['id'];
 
           // Save plot partners
           final plotPartners = plotData['partners'] as List<dynamic>? ?? [];
+          print('DEBUG ProjectStorageService: Saving partners for plot ${newPlot['plot_number']}: $plotPartners (${plotPartners.length} partners)');
           if (plotPartners.isNotEmpty) {
             final partnersToInsert = plotPartners
                 .where((p) => p.toString().trim().isNotEmpty)
@@ -364,6 +359,7 @@ class ProjectStorageService {
                 .toList();
 
             if (partnersToInsert.isNotEmpty) {
+              print('DEBUG ProjectStorageService: Inserting ${partnersToInsert.length} partners into plot_partners table');
               await _supabase.from('plot_partners').insert(partnersToInsert);
             }
           }
@@ -426,8 +422,14 @@ class ProjectStorageService {
         .where((e) => !currentLayoutNames.contains(e.key))
         .map((e) => e.value)
         .toList();
+    
+    print('_saveLayoutsAndPlots: Current layout names: $currentLayoutNames');
+    print('_saveLayoutsAndPlots: Existing layout map: $existingLayoutMap');
+    print('_saveLayoutsAndPlots: Layouts to delete: ${layoutsToDelete.length}');
+    
     if (layoutsToDelete.isNotEmpty) {
       for (var layoutId in layoutsToDelete) {
+        print('Deleting layout: $layoutId');
         await _supabase.from('layouts').delete().eq('id', layoutId);
       }
     }
@@ -437,29 +439,29 @@ class ProjectStorageService {
     String projectId,
     List<Map<String, dynamic>> projectManagers,
   ) async {
-    // Delete existing project managers and their blocks
+    print('_saveProjectManagers: Saving ${projectManagers.length} project managers for project $projectId');
+    
+    // Get existing project managers to determine which ones to delete later
     final existingManagers = await _supabase
         .from('project_managers')
         .select('id')
         .eq('project_id', projectId);
-    final managerIds = existingManagers.map((m) => m['id']).toList();
-    if (managerIds.isNotEmpty) {
-      for (var managerId in managerIds) {
-        await _supabase
-            .from('project_manager_blocks')
-            .delete()
-            .eq('project_manager_id', managerId);
-      }
-    }
-    await _supabase.from('project_managers').delete().eq('project_id', projectId);
+    final existingManagerIds = existingManagers.map((m) => m['id'] as String).toSet();
+    final processedManagerIds = <String>{};
 
-    // Insert new ones
+    // Upsert new/updated project managers
+    final errors = <String>[];
     for (var managerData in projectManagers) {
       final name = (managerData['name'] ?? '').toString().trim();
-      if (name.isEmpty) continue;
+      if (name.isEmpty) {
+        print('_saveProjectManagers: Skipping manager with empty name');
+        continue;
+      }
 
       final compensationType = managerData['compensation']?.toString();
       final earningType = managerData['earningType']?.toString();
+
+      print('_saveProjectManagers: Processing manager "$name": compensation="$compensationType", earningType="$earningType"');
 
       // Convert empty strings to null, but keep valid values (including 'None')
       final finalCompensationType = (compensationType == null || compensationType.trim().isEmpty) 
@@ -467,116 +469,162 @@ class ProjectStorageService {
           : compensationType.trim();
       
       // Map UI earning type values to database values
-      String? finalEarningType;
-      if (earningType == null || earningType.trim().isEmpty) {
-        finalEarningType = null;
-      } else {
-        final trimmed = earningType.trim();
-        // Map percentage bonus earning types to database values
-        if (trimmed == '% of Profit on Each Sold Plot' || trimmed == '% of Selling Price per Plot') {
-          finalEarningType = 'Per Plot';
-        } else if (trimmed == '% of Total Project Profit') {
-          finalEarningType = 'Lump Sum';
-        } else {
-          // Use as-is if it's already a valid database value
-          finalEarningType = trimmed;
-        }
+      // Map UI earning type values to DB allowed values (Per Plot, Per Square Foot, Lump Sum)
+      // Constraint requires earning_type to be null for non-percentage bonus rows
+      final String? finalEarningType =
+          finalCompensationType == 'Percentage Bonus'
+              ? _mapEarningType(earningType)
+              : null;
+
+      print('_saveProjectManagers: Mapped values: compensation_type="$finalCompensationType", earning_type="$finalEarningType"');
+
+      final dataToUpsert = {
+        'project_id': projectId,
+        'name': name,
+        'compensation_type': finalCompensationType,
+        'earning_type': finalEarningType,
+        'percentage': finalCompensationType == 'Percentage Bonus'
+            ? _parseDecimal(managerData['percentage']?.toString())
+            : null,
+        'fixed_fee': finalCompensationType == 'Fixed Fee'
+            ? _parseDecimal(managerData['fixedFee']?.toString())
+            : null,
+        'monthly_fee': finalCompensationType == 'Monthly Fee'
+            ? _parseDecimal(managerData['monthlyFee']?.toString())
+            : null,
+        'months': finalCompensationType == 'Monthly Fee'
+            ? _parseInt(managerData['months']?.toString())
+            : null,
+      };
+
+      print('_saveProjectManagers: Data to upsert: $dataToUpsert');
+
+      // If ID exists, add it to update existing record
+      if (managerData['id'] != null) {
+        dataToUpsert['id'] = managerData['id'];
       }
 
-      final newManager = await _supabase
-          .from('project_managers')
-          .insert({
-            'project_id': projectId,
-            'name': name,
-            'compensation_type': finalCompensationType,
-            'earning_type': finalEarningType,
-            'percentage': finalCompensationType == 'Percentage Bonus'
-                ? _parseDecimal(managerData['percentage']?.toString())
-                : null,
-            'fixed_fee': finalCompensationType == 'Fixed Fee'
-                ? _parseDecimal(managerData['fixedFee']?.toString())
-                : null,
-            'monthly_fee': finalCompensationType == 'Monthly Fee'
-                ? _parseDecimal(managerData['monthlyFee']?.toString())
-                : null,
-            'months': finalCompensationType == 'Monthly Fee'
-                ? _parseInt(managerData['months']?.toString())
-                : null,
-          })
-          .select()
-          .single();
+      try {
+        final upsertedManager = await _supabase
+            .from('project_managers')
+            .upsert(dataToUpsert)
+            .select()
+            .single();
+        print('_saveProjectManagers: Successfully upserted manager: $upsertedManager');
 
-      final managerId = newManager['id'];
+        final managerId = upsertedManager['id'] as String;
+        processedManagerIds.add(managerId);
 
-      // Save selected blocks/plots
-      final selectedBlocks = managerData['selectedBlocks'] as List<dynamic>? ?? [];
-      if (selectedBlocks.isNotEmpty) {
-        // Get all layouts and plots for this project to map block strings to plot IDs
-        final layouts = await _supabase
-            .from('layouts')
-            .select('id, name')
-            .eq('project_id', projectId);
-        
-        final plotIdsToInsert = <String>[];
-        for (var blockString in selectedBlocks) {
-          final block = blockString.toString().trim();
-          if (block.isEmpty) continue;
+        // Save selected blocks/plots (always delete existing blocks and re-insert for this manager)
+        // First delete existing blocks for this manager
+        await _supabase
+            .from('project_manager_blocks')
+            .delete()
+            .eq('project_manager_id', managerId);
+
+        final selectedBlocks = managerData['selectedBlocks'] as List<dynamic>? ?? [];
+        if (selectedBlocks.isNotEmpty) {
+          // Get all layouts and plots for this project to map block strings to plot IDs
+          final layouts = await _supabase
+              .from('layouts')
+              .select('id, name')
+              .eq('project_id', projectId);
           
-          // Parse block string: "Layout Name - Plot Number" or "Layout Name - Plot 1"
-          final parts = block.split(' - ');
-          if (parts.length != 2) continue;
-          
-          final layoutName = parts[0].trim();
-          final plotIdentifier = parts[1].trim();
-          
-          // Find layout by name
-          final layout = layouts.firstWhere(
-            (l) => (l['name'] ?? '').toString().trim() == layoutName,
-            orElse: () => <String, dynamic>{},
-          );
-          
-          if (layout.isEmpty || layout['id'] == null) continue;
-          final layoutId = layout['id'];
-          
-          // Find plot by layout ID and plot number
-          // Handle both "Plot 1" format and actual plot numbers
-          String? plotNumber;
-          if (plotIdentifier.startsWith('Plot ')) {
-            // Extract number from "Plot 1" format
-            final plotIndexStr = plotIdentifier.replaceAll('Plot ', '').trim();
-            final plotIndex = int.tryParse(plotIndexStr);
-            if (plotIndex != null) {
-              // Get all plots for this layout and find by index
+          final plotIdsToInsert = <String>[];
+          for (var blockString in selectedBlocks) {
+            final block = blockString.toString().trim();
+            if (block.isEmpty) continue;
+            
+            // Parse block string: "Layout Name - Plot Number" or "Layout Name - Plot 1"
+            final parts = block.split(' - ');
+            if (parts.length != 2) continue;
+            
+            final layoutName = parts[0].trim();
+            final plotIdentifier = parts[1].trim();
+            
+            // Find layout by name
+            final layout = layouts.firstWhere(
+              (l) => (l['name'] ?? '').toString().trim() == layoutName,
+              orElse: () => <String, dynamic>{},
+            );
+            
+            if (layout.isEmpty || layout['id'] == null) continue;
+            final layoutId = layout['id'];
+            
+            // Find plot by layout ID and plot number
+            // Handle both "Plot 1" format and actual plot numbers
+            String? plotNumber;
+            if (plotIdentifier.startsWith('Plot ')) {
+              // Extract number from "Plot 1" format
+              final plotIndexStr = plotIdentifier.replaceAll('Plot ', '').trim();
+              final plotIndex = int.tryParse(plotIndexStr);
+              if (plotIndex != null) {
+                // Get all plots for this layout and find by index
+                final plots = await _supabase
+                    .from('plots')
+                    .select('id')
+                    .eq('layout_id', layoutId)
+                    .order('plot_number');
+                if (plotIndex > 0 && plotIndex <= plots.length) {
+                  plotIdsToInsert.add(plots[plotIndex - 1]['id']);
+                }
+              }
+            } else {
+              // Use plot number directly
               final plots = await _supabase
                   .from('plots')
                   .select('id')
                   .eq('layout_id', layoutId)
-                  .order('plot_number');
-              if (plotIndex > 0 && plotIndex <= plots.length) {
-                plotIdsToInsert.add(plots[plotIndex - 1]['id']);
+                  .eq('plot_number', plotIdentifier);
+              if (plots.isNotEmpty) {
+                plotIdsToInsert.add(plots[0]['id']);
               }
             }
-          } else {
-            // Use plot number directly
-            final plots = await _supabase
-                .from('plots')
-                .select('id')
-                .eq('layout_id', layoutId)
-                .eq('plot_number', plotIdentifier);
-            if (plots.isNotEmpty) {
-              plotIdsToInsert.add(plots[0]['id']);
-            }
+          }
+          
+          // Insert block associations
+          if (plotIdsToInsert.isNotEmpty) {
+            final blocksToInsert = plotIdsToInsert.map((plotId) => {
+                  'project_manager_id': managerId,
+                  'plot_id': plotId,
+                }).toList();
+            await _supabase.from('project_manager_blocks').insert(blocksToInsert);
           }
         }
+      } catch (e) {
+        final errorMsg = '_saveProjectManagers: Error upserting manager "$name": $e';
+        print(errorMsg);
+        errors.add(errorMsg);
+        // Continue processing remaining managers instead of stopping
+        continue;
+      }
+    }
+    
+    // Log any errors that occurred
+    if (errors.isNotEmpty) {
+      print('_saveProjectManagers: ${errors.length} error(s) occurred while saving managers:');
+      for (var error in errors) {
+        print('  - $error');
+      }
+    }
+    
+    print('_saveProjectManagers: Successfully processed ${processedManagerIds.length} managers');
+
+    // Delete project managers that were removed (present in DB but not in processed list)
+    final idsToDelete = existingManagerIds.difference(processedManagerIds);
+    if (idsToDelete.isNotEmpty) {
+      for (var managerId in idsToDelete) {
+        // Delete blocks first
+        await _supabase
+            .from('project_manager_blocks')
+            .delete()
+            .eq('project_manager_id', managerId);
         
-        // Insert block associations
-        if (plotIdsToInsert.isNotEmpty) {
-          final blocksToInsert = plotIdsToInsert.map((plotId) => {
-                'project_manager_id': managerId,
-                'plot_id': plotId,
-              }).toList();
-          await _supabase.from('project_manager_blocks').insert(blocksToInsert);
-        }
+        // Delete manager
+        await _supabase
+            .from('project_managers')
+            .delete()
+            .eq('id', managerId);
       }
     }
   }
@@ -585,26 +633,34 @@ class ProjectStorageService {
     String projectId,
     List<Map<String, dynamic>> agents,
   ) async {
-    // Delete existing agents and their blocks
+    print('_saveAgents: Saving ${agents.length} agents for project $projectId');
+    
+    // Get existing agents to determine which ones to delete later
     final existingAgents = await _supabase
         .from('agents')
         .select('id')
         .eq('project_id', projectId);
-    final agentIds = existingAgents.map((a) => a['id']).toList();
-    if (agentIds.isNotEmpty) {
-      for (var agentId in agentIds) {
-        await _supabase.from('agent_blocks').delete().eq('agent_id', agentId);
-      }
-    }
-    await _supabase.from('agents').delete().eq('project_id', projectId);
+    final existingAgentIds = existingAgents.map((a) => a['id'] as String).toSet();
+    final processedAgentIds = <String>{};
 
-    // Insert new ones
+    // Upsert new/updated agents
+    final errors = <String>[];
     for (var agentData in agents) {
       final name = (agentData['name'] ?? '').toString().trim();
-      if (name.isEmpty) continue;
+      if (name.isEmpty) {
+        print('_saveAgents: Skipping agent with empty name');
+        continue;
+      }
 
       final compensationType = agentData['compensation']?.toString();
       final earningType = agentData['earningType']?.toString();
+      final percentage = agentData['percentage']?.toString();
+      final fixedFee = agentData['fixedFee']?.toString();
+      final monthlyFee = agentData['monthlyFee']?.toString();
+      final months = agentData['months']?.toString();
+      final perSqftFee = agentData['perSqftFee']?.toString();
+
+      print('_saveAgents: Processing agent "$name": compensation="$compensationType", earningType="$earningType", percentage="$percentage", fixedFee="$fixedFee", monthlyFee="$monthlyFee", months="$months", perSqftFee="$perSqftFee"');
 
       // Convert empty strings to null, but keep valid values (including 'None')
       final finalCompensationType = (compensationType == null || compensationType.trim().isEmpty) 
@@ -612,119 +668,156 @@ class ProjectStorageService {
           : compensationType.trim();
       
       // Map UI earning type values to database values
-      String? finalEarningType;
-      if (earningType == null || earningType.trim().isEmpty) {
-        finalEarningType = null;
-      } else {
-        final trimmed = earningType.trim();
-        // Map percentage bonus earning types to database values
-        if (trimmed == '% of Profit on Each Sold Plot' || trimmed == '% of Selling Price per Plot') {
-          finalEarningType = 'Per Plot';
-        } else if (trimmed == '% of Total Project Profit') {
-          finalEarningType = 'Lump Sum';
-        } else {
-          // Use as-is if it's already a valid database value
-          finalEarningType = trimmed;
-        }
+      // Map UI earning type values to DB allowed values (Per Plot, Per Square Foot, Lump Sum)
+      // Constraint requires earning_type to be null for non-percentage bonus rows
+      final String? finalEarningType =
+          finalCompensationType == 'Percentage Bonus'
+              ? _mapEarningType(earningType)
+              : null;
+
+      print('_saveAgents: Mapped values: compensation_type="$finalCompensationType", earning_type="$finalEarningType"');
+
+      final dataToUpsert = {
+        'project_id': projectId,
+        'name': name,
+        'compensation_type': finalCompensationType,
+        'earning_type': finalEarningType,
+        'percentage': finalCompensationType == 'Percentage Bonus'
+            ? _parseDecimal(percentage)
+            : null,
+        'fixed_fee': finalCompensationType == 'Fixed Fee'
+            ? _parseDecimal(fixedFee)
+            : null,
+        'monthly_fee': finalCompensationType == 'Monthly Fee'
+            ? _parseDecimal(monthlyFee)
+            : null,
+        'months': finalCompensationType == 'Monthly Fee'
+            ? _parseInt(months)
+            : null,
+        'per_sqft_fee': finalCompensationType == 'Per Sqft Fee'
+            ? _parseDecimal(perSqftFee)
+            : null,
+      };
+
+      print('_saveAgents: Data to upsert: $dataToUpsert');
+
+      // If ID exists, add it to update existing record
+      if (agentData['id'] != null) {
+        dataToUpsert['id'] = agentData['id'];
       }
 
-      final newAgent = await _supabase
-          .from('agents')
-          .insert({
-            'project_id': projectId,
-            'name': name,
-            'compensation_type': finalCompensationType,
-            'earning_type': finalEarningType,
-            'percentage': finalCompensationType == 'Percentage Bonus'
-                ? _parseDecimal(agentData['percentage']?.toString())
-                : null,
-            'fixed_fee': finalCompensationType == 'Fixed Fee'
-                ? _parseDecimal(agentData['fixedFee']?.toString())
-                : null,
-            'monthly_fee': finalCompensationType == 'Monthly Fee'
-                ? _parseDecimal(agentData['monthlyFee']?.toString())
-                : null,
-            'months': finalCompensationType == 'Monthly Fee'
-                ? _parseInt(agentData['months']?.toString())
-                : null,
-            'per_sqft_fee': finalCompensationType == 'Per Sqft Fee'
-                ? _parseDecimal(agentData['perSqftFee']?.toString())
-                : null,
-          })
-          .select()
-          .single();
+      try {
+        final upsertedAgent = await _supabase
+            .from('agents')
+            .upsert(dataToUpsert)
+            .select()
+            .single();
+        print('_saveAgents: Successfully upserted agent: $upsertedAgent');
 
-      final agentId = newAgent['id'];
+        final agentId = upsertedAgent['id'] as String;
+        processedAgentIds.add(agentId);
 
-      // Save selected blocks/plots
-      final selectedBlocks = agentData['selectedBlocks'] as List<dynamic>? ?? [];
-      if (selectedBlocks.isNotEmpty) {
-        // Get all layouts and plots for this project to map block strings to plot IDs
-        final layouts = await _supabase
-            .from('layouts')
-            .select('id, name')
-            .eq('project_id', projectId);
-        
-        final plotIdsToInsert = <String>[];
-        for (var blockString in selectedBlocks) {
-          final block = blockString.toString().trim();
-          if (block.isEmpty) continue;
+        // Save selected blocks/plots (always delete existing blocks and re-insert for this agent)
+        // First delete existing blocks for this agent
+        await _supabase.from('agent_blocks').delete().eq('agent_id', agentId);
+
+        final selectedBlocks = agentData['selectedBlocks'] as List<dynamic>? ?? [];
+        if (selectedBlocks.isNotEmpty) {
+          // Get all layouts and plots for this project to map block strings to plot IDs
+          final layouts = await _supabase
+              .from('layouts')
+              .select('id, name')
+              .eq('project_id', projectId);
           
-          // Parse block string: "Layout Name - Plot Number" or "Layout Name - Plot 1"
-          final parts = block.split(' - ');
-          if (parts.length != 2) continue;
-          
-          final layoutName = parts[0].trim();
-          final plotIdentifier = parts[1].trim();
-          
-          // Find layout by name
-          final layout = layouts.firstWhere(
-            (l) => (l['name'] ?? '').toString().trim() == layoutName,
-            orElse: () => <String, dynamic>{},
-          );
-          
-          if (layout.isEmpty || layout['id'] == null) continue;
-          final layoutId = layout['id'];
-          
-          // Find plot by layout ID and plot number
-          // Handle both "Plot 1" format and actual plot numbers
-          String? plotNumber;
-          if (plotIdentifier.startsWith('Plot ')) {
-            // Extract number from "Plot 1" format
-            final plotIndexStr = plotIdentifier.replaceAll('Plot ', '').trim();
-            final plotIndex = int.tryParse(plotIndexStr);
-            if (plotIndex != null) {
-              // Get all plots for this layout and find by index
+          final plotIdsToInsert = <String>[];
+          for (var blockString in selectedBlocks) {
+            final block = blockString.toString().trim();
+            if (block.isEmpty) continue;
+            
+            // Parse block string: "Layout Name - Plot Number" or "Layout Name - Plot 1"
+            final parts = block.split(' - ');
+            if (parts.length != 2) continue;
+            
+            final layoutName = parts[0].trim();
+            final plotIdentifier = parts[1].trim();
+            
+            // Find layout by name
+            final layout = layouts.firstWhere(
+              (l) => (l['name'] ?? '').toString().trim() == layoutName,
+              orElse: () => <String, dynamic>{},
+            );
+            
+            if (layout.isEmpty || layout['id'] == null) continue;
+            final layoutId = layout['id'];
+            
+            // Find plot by layout ID and plot number
+            // Handle both "Plot 1" format and actual plot numbers
+            String? plotNumber;
+            if (plotIdentifier.startsWith('Plot ')) {
+              // Extract number from "Plot 1" format
+              final plotIndexStr = plotIdentifier.replaceAll('Plot ', '').trim();
+              final plotIndex = int.tryParse(plotIndexStr);
+              if (plotIndex != null) {
+                // Get all plots for this layout and find by index
+                final plots = await _supabase
+                    .from('plots')
+                    .select('id')
+                    .eq('layout_id', layoutId)
+                    .order('plot_number');
+                if (plotIndex > 0 && plotIndex <= plots.length) {
+                  plotIdsToInsert.add(plots[plotIndex - 1]['id']);
+                }
+              }
+            } else {
+              // Use plot number directly
               final plots = await _supabase
                   .from('plots')
                   .select('id')
                   .eq('layout_id', layoutId)
-                  .order('plot_number');
-              if (plotIndex > 0 && plotIndex <= plots.length) {
-                plotIdsToInsert.add(plots[plotIndex - 1]['id']);
+                  .eq('plot_number', plotIdentifier);
+              if (plots.isNotEmpty) {
+                plotIdsToInsert.add(plots[0]['id']);
               }
             }
-          } else {
-            // Use plot number directly
-            final plots = await _supabase
-                .from('plots')
-                .select('id')
-                .eq('layout_id', layoutId)
-                .eq('plot_number', plotIdentifier);
-            if (plots.isNotEmpty) {
-              plotIdsToInsert.add(plots[0]['id']);
-            }
+          }
+          
+          // Insert block associations
+          if (plotIdsToInsert.isNotEmpty) {
+            final blocksToInsert = plotIdsToInsert.map((plotId) => {
+                  'agent_id': agentId,
+                  'plot_id': plotId,
+                }).toList();
+            await _supabase.from('agent_blocks').insert(blocksToInsert);
           }
         }
+      } catch (e) {
+        final errorMsg = '_saveAgents: Error upserting agent "$name": $e';
+        print(errorMsg);
+        errors.add(errorMsg);
+        // Continue processing remaining agents instead of stopping
+        continue;
+      }
+    }
+    
+    // Log any errors that occurred
+    if (errors.isNotEmpty) {
+      print('_saveAgents: ${errors.length} error(s) occurred while saving agents:');
+      for (var error in errors) {
+        print('  - $error');
+      }
+    }
+    
+    print('_saveAgents: Successfully processed ${processedAgentIds.length} agents');
+
+    // Delete agents that were removed (present in DB but not in processed list)
+    final idsToDelete = existingAgentIds.difference(processedAgentIds);
+    if (idsToDelete.isNotEmpty) {
+      for (var agentId in idsToDelete) {
+        // Delete blocks first
+        await _supabase.from('agent_blocks').delete().eq('agent_id', agentId);
         
-        // Insert block associations
-        if (plotIdsToInsert.isNotEmpty) {
-          final blocksToInsert = plotIdsToInsert.map((plotId) => {
-                'agent_id': agentId,
-                'plot_id': plotId,
-              }).toList();
-          await _supabase.from('agent_blocks').insert(blocksToInsert);
-        }
+        // Delete agent
+        await _supabase.from('agents').delete().eq('id', agentId);
       }
     }
   }
@@ -772,6 +865,45 @@ class ProjectStorageService {
     
     // If format is not recognized, return null to avoid database errors
     print('Warning: Could not parse date format: $trimmed');
+    return null;
+  }
+
+  // Map any UI earning type string to one of the allowed DB values.
+  // Allowed values per schema: Per Plot, Per Square Foot, Lump Sum.
+  // Note: We distinguish between "Profit Per Plot" and "Selling Price Per Plot" 
+  // by checking for "profit" vs "selling price" keywords.
+  static String? _mapEarningType(String? raw) {
+    if (raw == null) return null;
+    final cleaned = raw.trim();
+    if (cleaned.isEmpty) return null;
+
+    final lower = cleaned.toLowerCase();
+
+    // Check for "selling price per plot" first (more specific)
+    if (lower.contains('selling price') && lower.contains('plot')) {
+      return 'Selling Price Per Plot';
+    }
+
+    // Check for "profit per plot" or "% of profit on each sold plot"
+    if (lower.contains('profit') && (lower.contains('plot') || lower.contains('sold'))) {
+      return 'Profit Per Plot';
+    }
+
+    // Generic "per plot" (fallback)
+    if (lower.contains('per plot')) {
+      return 'Per Plot';
+    }
+
+    if (lower.contains('square foot') || lower.contains('sqft') || lower.contains('sq ft')) {
+      return 'Per Square Foot';
+    }
+
+    if (lower.contains('total project profit') || lower.contains('lump') || lower.contains('project profit')) {
+      return 'Lump Sum';
+    }
+
+    // If we don't recognize it, return null to avoid check constraint violations.
+    print('Warning: Unrecognized earning type "$cleaned", storing as null to satisfy DB constraint');
     return null;
   }
 }

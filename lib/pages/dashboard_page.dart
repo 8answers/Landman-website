@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math' as math;
-
+//
 enum DashboardTab {
   overview,
   site,
@@ -236,7 +236,7 @@ class _DashboardPageState extends State<DashboardPage> {
           _loadPartnersData(),
           _loadProjectManagersData(),
           _loadAgentsData(),
-          if (_activeTab == DashboardTab.site) _loadSiteData() else Future.value(),
+          _loadSiteData(), // Always load site data to support agent sold plot checking
         ]).timeout(
           const Duration(seconds: 30),
           onTimeout: () {
@@ -303,11 +303,12 @@ class _DashboardPageState extends State<DashboardPage> {
         return;
       }
 
-      // Optimize: Fetch all plots in one query
+      // Optimize: Fetch all plots in one query, ordered by creation time to maintain consistent order
       final allPlots = await _supabase
           .from('plots')
           .select('*')
-          .inFilter('layout_id', layoutIds);
+          .inFilter('layout_id', layoutIds)
+          .order('created_at', ascending: true);
 
       // Get all plot IDs to fetch partners in one query
       final plotIds = allPlots.map((p) => p['id'] as String).toList();
@@ -508,7 +509,8 @@ class _DashboardPageState extends State<DashboardPage> {
         final plots = await _supabase
             .from('plots')
             .select('*')
-            .eq('layout_id', layoutId);
+            .eq('layout_id', layoutId)
+            .order('created_at', ascending: true);
 
         // Load agent information for each plot
         final plotsWithCompensation = <Map<String, dynamic>>[];
@@ -1266,7 +1268,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       style: GoogleFonts.inter(
                         fontSize: 24,
                         fontWeight: FontWeight.normal,
-                        color: Colors.black,
+                        color: breakEvenAmount >= 0 ? const Color(0xFF4CAF50) : const Color(0xFFF44336),
                       ),
                     ),
                   ],
@@ -1326,8 +1328,9 @@ class _DashboardPageState extends State<DashboardPage> {
     final totalExpenses = _dashboardData!['totalExpenses'] as double;
     final salesTillDate = _dashboardData!['totalSalesValue'] as double;
     
-    // Calculate Gross Profit (Sales - Expenses)
-    final grossProfit = salesTillDate - totalExpenses;
+    // Calculate Gross Profit using the same logic as _calculateTotalGrossProfit()
+    // This only counts cost of sold plots, not all plots
+    final grossProfit = _calculateTotalGrossProfit();
     
     // Calculate Total Compensation (Project Managers + Agents)
     final totalCompensation = _calculateTotalProjectManagersCompensation() + _calculateTotalAgentsCompensation();
@@ -2801,7 +2804,7 @@ class _DashboardPageState extends State<DashboardPage> {
       width: width,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: const Color(0x70707070), // rgba(112,112,112,0.2)
+        color: const Color(0xFF707070).withOpacity(0.08),
         border: Border(
           top: const BorderSide(color: Colors.black, width: 1),
           bottom: const BorderSide(color: Colors.black, width: 1),
@@ -2946,7 +2949,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final earningType = manager['earning_type'] as String? ?? '';
     
     if (compensationType == 'Fixed Fee') {
-return manager['fixed_fee'] as double? ?? 0.0;
+      return manager['fixed_fee'] as double? ?? 0.0;
     } else if (compensationType == 'Monthly Fee') {
       final monthlyFee = manager['monthly_fee'] as double? ?? 0.0;
       final months = manager['months'] as int? ?? 0;
@@ -2954,9 +2957,61 @@ return manager['fixed_fee'] as double? ?? 0.0;
     } else if (compensationType == 'Percentage Bonus') {
       final percentage = manager['percentage'] as double? ?? 0.0;
       
-      // For percentage bonus, calculate as percentage of total gross profit
-      final totalGrossProfit = _calculateTotalGrossProfit();
-      return (totalGrossProfit * percentage) / 100;
+      // Check earning type to determine calculation method
+      final isLumpSum = earningType == 'Lump Sum' || 
+                        earningType == '% of Total Project Profit' ||
+                        (earningType.toLowerCase().contains('total project profit') || earningType.toLowerCase().contains('lump'));
+      
+      if (isLumpSum) {
+        // Calculate as percentage of total gross profit
+        final totalGrossProfit = _calculateTotalGrossProfit();
+        return (totalGrossProfit * percentage) / 100;
+      } else {
+        // For per-plot earnings (Profit Per Plot or Selling Price Per Plot), 
+        // calculate from individual plots assigned to this manager
+        double totalEarnings = 0.0;
+        final managerName = manager['name'] as String? ?? '';
+        final managerId = manager['id'] as String?;
+        
+        if (_siteLayouts.isNotEmpty && managerName.isNotEmpty) {
+          // Get plots assigned to this manager from project_manager_blocks
+          final allInCost = _dashboardData!['allInCost'] as double? ?? 0.0;
+          
+          for (var layout in _siteLayouts) {
+            final plots = layout['plots'] as List<dynamic>? ?? [];
+            for (var plot in plots) {
+              final status = (plot['status'] as String? ?? '').toLowerCase();
+              if (status == 'sold') {
+                // Check if this plot is assigned to this manager via project_manager_blocks
+                // Note: We'll need to load manager-block associations, but for now,
+                // we'll calculate based on all sold plots if manager has percentage bonus
+                // This is a simplified approach - you may need to load block associations
+                
+                // Calculate per-plot compensation
+                final salePrice = (plot['sale_price'] as num?)?.toDouble() ?? 0.0;
+                final area = (plot['area'] as num?)?.toDouble() ?? 0.0;
+                final saleValue = salePrice * area;
+                
+                // Check for "Selling Price Per Plot"
+                final isSellingPriceBased = earningType == 'Selling Price Per Plot' || 
+                                            earningType == '% of Selling Price per Plot' ||
+                                            (earningType.toLowerCase().contains('selling price') && earningType.toLowerCase().contains('plot'));
+                
+                if (isSellingPriceBased) {
+                  totalEarnings += (saleValue * percentage) / 100;
+                } else {
+                  // Profit Per Plot
+                  final plotCost = area * allInCost;
+                  final plotProfit = saleValue - plotCost;
+                  totalEarnings += (plotProfit * percentage) / 100;
+                }
+              }
+            }
+          }
+        }
+        
+        return totalEarnings;
+      }
     }
     
     return 0.0;
@@ -3112,10 +3167,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
                   }),
                 ],
               ),
-              // Compensation * column
+              // Compensation column
               Column(
                 children: [
-                  _buildProjectManagersTableHeaderCell('Compensation *', isFirst: false, isLast: false),
+                  _buildProjectManagersTableHeaderCell('Compensation ', isFirst: false, isLast: false),
                   ...managers.asMap().entries.map((entry) {
                     final index = entry.key;
                     final manager = entry.value;
@@ -3123,7 +3178,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
                     final isLastRow = index == managers.length - 1;
                     return _buildProjectManagersTableDataCell(
                       compensationType.isEmpty ? 'None' : compensationType,
-                      columnName: 'Compensation *',
+                      columnName: 'Compensation ',
                       isFirst: false,
                       isLastRow: isLastRow,
                       isLast: false,
@@ -3133,10 +3188,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
                   }),
                 ],
               ),
-              // Earning Type * column
+              // Earning Type column
               Column(
                 children: [
-                  _buildProjectManagersTableHeaderCell('Earning Type *', isFirst: false, isLast: false),
+                  _buildProjectManagersTableHeaderCell('Earning Type ', isFirst: false, isLast: false),
                   ...managers.asMap().entries.map((entry) {
                     final index = entry.key;
                     final manager = entry.value;
@@ -3195,7 +3250,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
       width: width,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: const Color(0x70707070), // rgba(112,112,112,0.2)
+        color: const Color(0xFF707070).withOpacity(0.08),
         border: Border(
           top: const BorderSide(color: Colors.black, width: 1),
           bottom: const BorderSide(color: Colors.black, width: 1),
@@ -3337,7 +3392,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
     int? months,
     required bool isLastRow,
   }) {
-    final width = _getProjectManagersColumnWidth('Earning Type *');
+    final width = _getProjectManagersColumnWidth('Earning Type ');
     return Container(
       height: 48,
       width: width,
@@ -3348,7 +3403,8 @@ return manager['fixed_fee'] as double? ?? 0.0;
           right: const BorderSide(color: Colors.black, width: 1),
         ),
       ),
-      child: Center(
+      child: Align(
+        alignment: Alignment.centerLeft,
         child: _buildEarningTypeContent(
           compensationType: compensationType,
           earningType: earningType,
@@ -3370,16 +3426,24 @@ return manager['fixed_fee'] as double? ?? 0.0;
     int? months,
   }) {
     if (compensationType == 'Percentage Bonus') {
-      // Map database earning type to UI display
+      // Map database earning type to UI display (same mapping as project_details_page)
       String displayEarningType = earningType;
-      if (earningType == 'Per Plot') {
+      final lowerEarningType = earningType.toLowerCase();
+      
+      if (lowerEarningType == 'profit per plot') {
         displayEarningType = '% of Profit on Each Sold Plot';
-      } else if (earningType == 'Lump Sum') {
+      } else if (lowerEarningType == 'selling price per plot' || lowerEarningType == '% of selling price per plot') {
+        displayEarningType = '% of Selling Price per Plot';
+      } else if (lowerEarningType == 'lump sum' || lowerEarningType == '% of total project profit') {
         displayEarningType = '% of Total Project Profit';
+      } else if (lowerEarningType == 'per plot') {
+        displayEarningType = '% of Profit on Each Sold Plot';
       }
       
       return Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             height: 32,
@@ -3414,14 +3478,15 @@ return manager['fixed_fee'] as double? ?? 0.0;
                 ),
               ],
             ),
+            constraints: const BoxConstraints(maxWidth: 350),
             child: Text(
               displayEarningType,
+              textAlign: TextAlign.left,
               style: GoogleFonts.inter(
                 fontSize: 16,
                 fontWeight: FontWeight.normal,
                 color: Colors.black,
               ),
-              textAlign: TextAlign.center,
             ),
           ),
         ],
@@ -3448,6 +3513,8 @@ return manager['fixed_fee'] as double? ?? 0.0;
     } else if (compensationType == 'Monthly Fee') {
       return Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             height: 32,
@@ -3533,10 +3600,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
         return 60;
       case 'Project Manager Name':
         return 320;
-      case 'Compensation *':
+      case 'Compensation ':
         return 176;
-      case 'Earning Type *':
-        return 337;
+      case 'Earning Type ':
+        return 340;
       case 'Earnings (₹)':
         return 215;
       default:
@@ -3649,7 +3716,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: const Color(0x70707070), // rgba(112,112,112,0.2)
+        color: const Color(0xFF707070).withOpacity(0.08),
         borderRadius: isFirst
             ? const BorderRadius.only(topLeft: Radius.circular(8))
             : isLast
@@ -4055,13 +4122,24 @@ return manager['fixed_fee'] as double? ?? 0.0;
       return perSqftFee * area;
     } else if (compensationType == 'Percentage Bonus') {
       final percentage = agent['percentage'] as double? ?? 0.0;
+      final salePrice = (plot['sale_price'] as num?)?.toDouble() ?? 0.0;
+      final area = (plot['area'] as num?)?.toDouble() ?? 0.0;
+      final saleValue = salePrice * area;
       
-      if (earningType == 'Per Plot' || earningType == '% of Profit on Each Sold Plot') {
+      // Check for "Selling Price Per Plot" - calculate percentage from sale value
+      if (earningType == 'Selling Price Per Plot' || 
+          earningType == '% of Selling Price per Plot' ||
+          (earningType.toLowerCase().contains('selling price') && earningType.toLowerCase().contains('plot'))) {
+        // Apply percentage to this plot's sale value
+        return (saleValue * percentage) / 100;
+      }
+      // Check for "Profit Per Plot" - calculate percentage from profit
+      else if (earningType == 'Profit Per Plot' || 
+               earningType == 'Per Plot' || 
+               earningType == '% of Profit on Each Sold Plot' ||
+               (earningType.toLowerCase().contains('profit') && earningType.toLowerCase().contains('plot'))) {
         // Calculate profit for this specific plot
         final allInCost = _dashboardData!['allInCost'] as double;
-        final salePrice = (plot['sale_price'] as num?)?.toDouble() ?? 0.0;
-        final area = (plot['area'] as num?)?.toDouble() ?? 0.0;
-        final saleValue = salePrice * area;
         final plotCost = area * allInCost;
         final plotProfit = saleValue - plotCost;
         
@@ -4100,9 +4178,46 @@ return manager['fixed_fee'] as double? ?? 0.0;
     );
   }
 
+  // Helper: check if an agent has at least one sold plot assigned in site layouts
+  bool _agentHasSoldPlot(String agentName) {
+    if (_siteLayouts.isEmpty || agentName.trim().isEmpty) {
+      print('_agentHasSoldPlot: Empty layouts or agent name - returning false');
+      return false;
+    }
+
+    print('_agentHasSoldPlot: Checking agent "$agentName" in ${_siteLayouts.length} layouts');
+    
+    for (var layout in _siteLayouts) {
+      final plots = layout['plots'] as List<dynamic>? ?? [];
+      print('  Layout "${layout['name']}": ${plots.length} plots');
+      for (var plot in plots) {
+        final status = (plot['status'] as String? ?? '').toLowerCase();
+        // Check both 'agent' and 'agent_name' fields for backward compatibility
+        final plotAgent = (plot['agent_name'] as String? ?? plot['agent'] as String? ?? '').trim();
+        if (status == 'sold') {
+          print('    Found sold plot with agent "$plotAgent" (looking for "$agentName")');
+          if (plotAgent == agentName.trim()) {
+            print('    -> MATCH! Agent has sold plot');
+            return true;
+          }
+        }
+      }
+    }
+
+    print('_agentHasSoldPlot: No sold plots found for agent "$agentName"');
+    return false;
+  }
+
   double _calculateAgentEarnings(Map<String, dynamic> agent) {
     final compensationType = agent['compensation_type'] as String? ?? '';
     final earningType = agent['earning_type'] as String? ?? '';
+    final agentName = agent['name'] as String? ?? '';
+
+    // Business rule: only show earnings for agents who have at least one sold plot.
+    // If the agent has no sold plots, their earnings should be treated as zero.
+    if (!_agentHasSoldPlot(agentName)) {
+      return 0.0;
+    }
     
     if (compensationType == 'Fixed Fee') {
       return agent['fixed_fee'] as double? ?? 0.0;
@@ -4132,10 +4247,72 @@ return manager['fixed_fee'] as double? ?? 0.0;
       return perSqftFee * totalSoldArea;
     } else if (compensationType == 'Percentage Bonus') {
       final percentage = agent['percentage'] as double? ?? 0.0;
+      final agentName = agent['name'] as String? ?? '';
       
-      // For percentage bonus, calculate as percentage of total gross profit
-      final totalGrossProfit = _calculateTotalGrossProfit();
-      return (totalGrossProfit * percentage) / 100;
+      // Check earning type to determine calculation method
+      final isSellingPriceBased = earningType == 'Selling Price Per Plot' || 
+                                   earningType == '% of Selling Price per Plot' ||
+                                   (earningType.toLowerCase().contains('selling price') && earningType.toLowerCase().contains('plot'));
+      
+      if (isSellingPriceBased) {
+        // Calculate agent earnings as percentage of selling price on each of their sold plots
+        double totalSaleValue = 0.0;
+        
+        if (_siteLayouts.isNotEmpty && agentName.isNotEmpty) {
+          for (var layout in _siteLayouts) {
+            final plots = layout['plots'] as List<dynamic>? ?? [];
+            for (var plot in plots) {
+              final status = (plot['status'] as String? ?? '').toLowerCase();
+              final plotAgentName = (plot['agent_name'] as String? ?? plot['agent'] as String? ?? '').trim();
+              
+              if (status == 'sold' && plotAgentName == agentName.trim()) {
+                final salePrice = ((plot['sale_price'] as num?)?.toDouble() ?? 0.0);
+                final area = ((plot['area'] as num?)?.toDouble() ?? 0.0);
+                final saleValue = salePrice * area;
+                totalSaleValue += saleValue;
+              }
+            }
+          }
+        }
+        
+        return (totalSaleValue * percentage) / 100;
+      } else {
+        // Check if it's Lump Sum / Total Project Profit
+        final isLumpSum = earningType == 'Lump Sum' || 
+                          earningType == '% of Total Project Profit' ||
+                          (earningType.toLowerCase().contains('total project profit') || earningType.toLowerCase().contains('lump'));
+        
+        if (isLumpSum) {
+          // Calculate as percentage of total gross profit
+          final totalGrossProfit = _calculateTotalGrossProfit();
+          return (totalGrossProfit * percentage) / 100;
+        } else {
+          // Calculate agent earnings as percentage of profit on each of their sold plots
+          double agentProfit = 0.0;
+          final allInCost = _dashboardData!['allInCost'] as double? ?? 0.0;
+          
+          if (_siteLayouts.isNotEmpty && agentName.isNotEmpty) {
+            for (var layout in _siteLayouts) {
+              final plots = layout['plots'] as List<dynamic>? ?? [];
+              for (var plot in plots) {
+                final status = (plot['status'] as String? ?? '').toLowerCase();
+                final plotAgentName = (plot['agent_name'] as String? ?? plot['agent'] as String? ?? '').trim();
+                
+                if (status == 'sold' && plotAgentName == agentName.trim()) {
+                  final salePrice = ((plot['sale_price'] as num?)?.toDouble() ?? 0.0);
+                  final area = ((plot['area'] as num?)?.toDouble() ?? 0.0);
+                  final saleValue = salePrice * area;
+                  final plotCost = area * allInCost;
+                  final plotProfit = saleValue - plotCost;
+                  agentProfit += plotProfit;
+                }
+              }
+            }
+          }
+          
+          return (agentProfit * percentage) / 100;
+        }
+      }
     }
     
     return 0.0;
@@ -4332,10 +4509,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
                   }),
                 ],
               ),
-              // Compensation * column
+              // Compensation column
               Column(
                 children: [
-                  _buildAgentsTableHeaderCell('Compensation *', isFirst: false, isLast: false),
+                  _buildAgentsTableHeaderCell('Compensation ', isFirst: false, isLast: false),
                   ...agents.asMap().entries.map((entry) {
                     final index = entry.key;
                     final agent = entry.value;
@@ -4343,7 +4520,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
                     final isLastRow = index == agents.length - 1;
                     return _buildAgentsTableDataCell(
                       compensationType.isEmpty ? 'None' : compensationType,
-                      columnName: 'Compensation *',
+                      columnName: 'Compensation ',
                       isFirst: false,
                       isLastRow: isLastRow,
                       isLast: false,
@@ -4353,10 +4530,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
                   }),
                 ],
               ),
-              // Earning Type * column
+              // Earning Type column
               Column(
                 children: [
-                  _buildAgentsTableHeaderCell('Earning Type *', isFirst: false, isLast: false),
+                  _buildAgentsTableHeaderCell('Earning Type ', isFirst: false, isLast: false),
                   ...agents.asMap().entries.map((entry) {
                     final index = entry.key;
                     final agent = entry.value;
@@ -4367,7 +4544,20 @@ return manager['fixed_fee'] as double? ?? 0.0;
                     final monthlyFee = agent['monthly_fee'] as double?;
                     final months = agent['months'] as int?;
                     final perSqftFee = agent['per_sqft_fee'] as double?;
+                    final hasSoldPlot = _agentHasSoldPlot(agent['name'] as String? ?? '');
                     final isLastRow = index == agents.length - 1;
+                    
+                    // Show earning type only if agent has sold plots
+                    if (!hasSoldPlot) {
+                      return _buildAgentsTableDataCell(
+                        '-',
+                        columnName: 'Earning Type ',
+                        isFirst: false,
+                        isLastRow: isLastRow,
+                        isLast: false,
+                      );
+                    }
+                    
                     return _buildAgentsEarningTypeCell(
                       agent: agent,
                       compensationType: compensationType,
@@ -4390,14 +4580,19 @@ return manager['fixed_fee'] as double? ?? 0.0;
                     final index = entry.key;
                     final agent = entry.value;
                     final earnings = agent['earnings'] as double? ?? 0.0;
+                    final hasSoldPlot = _agentHasSoldPlot(agent['name'] as String? ?? '');
                     final isLastRow = index == agents.length - 1;
+                    // Show earnings only if agent has at least one sold plot; otherwise display '-'
+                    final displayText = hasSoldPlot
+                        ? _formatCurrencyNumber(earnings)
+                        : '-';
                     return _buildAgentsTableDataCell(
-                      _formatCurrencyNumber(earnings),
+                      displayText,
                       columnName: 'Earnings (₹)',
                       isFirst: false,
                       isLastRow: isLastRow,
                       isLast: true,
-                      prefix: '₹ ',
+                      prefix: displayText == '-' ? null : '₹ ',
                     );
                   }),
                 ],
@@ -4417,7 +4612,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
       width: width,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: const Color(0x70707070), // rgba(112,112,112,0.2)
+        color: const Color(0xFF707070).withOpacity(0.08),
         border: Border(
           top: const BorderSide(color: Colors.black, width: 1),
           bottom: const BorderSide(color: Colors.black, width: 1),
@@ -4560,7 +4755,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
     double? perSqftFee,
     required bool isLastRow,
   }) {
-    final width = _getAgentsColumnWidth('Earning Type *');
+    final width = _getAgentsColumnWidth('Earning Type ');
     return Container(
       height: 48,
       width: width,
@@ -4571,7 +4766,8 @@ return manager['fixed_fee'] as double? ?? 0.0;
           right: const BorderSide(color: Colors.black, width: 1),
         ),
       ),
-      child: Center(
+      child: Align(
+        alignment: Alignment.centerLeft,
         child: _buildAgentsEarningTypeContent(
           compensationType: compensationType,
           earningType: earningType,
@@ -4595,16 +4791,24 @@ return manager['fixed_fee'] as double? ?? 0.0;
     double? perSqftFee,
   }) {
     if (compensationType == 'Percentage Bonus') {
-      // Map database earning type to UI display
+      // Map database earning type to UI display (same mapping as project_details_page)
       String displayEarningType = earningType;
-      if (earningType == 'Per Plot') {
+      final lowerEarningType = earningType.toLowerCase();
+      
+      if (lowerEarningType == 'profit per plot') {
         displayEarningType = '% of Profit on Each Sold Plot';
-      } else if (earningType == 'Lump Sum') {
+      } else if (lowerEarningType == 'selling price per plot' || lowerEarningType == '% of selling price per plot') {
+        displayEarningType = '% of Selling Price per Plot';
+      } else if (lowerEarningType == 'lump sum' || lowerEarningType == '% of total project profit') {
         displayEarningType = '% of Total Project Profit';
+      } else if (lowerEarningType == 'per plot') {
+        displayEarningType = '% of Profit on Each Sold Plot';
       }
       
       return Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             height: 32,
@@ -4641,12 +4845,12 @@ return manager['fixed_fee'] as double? ?? 0.0;
             ),
             child: Text(
               displayEarningType,
+              textAlign: TextAlign.left,
               style: GoogleFonts.inter(
                 fontSize: 16,
                 fontWeight: FontWeight.normal,
                 color: Colors.black,
               ),
-              textAlign: TextAlign.center,
             ),
           ),
         ],
@@ -4673,6 +4877,8 @@ return manager['fixed_fee'] as double? ?? 0.0;
     } else if (compensationType == 'Monthly Fee') {
       return Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             height: 32,
@@ -4777,9 +4983,9 @@ return manager['fixed_fee'] as double? ?? 0.0;
         return 60;
       case 'Agent Name':
         return 320;
-      case 'Compensation *':
+      case 'Compensation ':
         return 176;
-      case 'Earning Type *':
+      case 'Earning Type ':
         return 337;
       case 'Earnings (₹)':
         return 215;
@@ -5128,14 +5334,10 @@ return manager['fixed_fee'] as double? ?? 0.0;
         child: SingleChildScrollView(
           controller: _compensationTableScrollController,
           scrollDirection: Axis.horizontal,
-        child: Table(
+          child: Table(
           border: TableBorder(
             horizontalInside: BorderSide(color: Colors.black, width: 1),
             verticalInside: BorderSide(color: Colors.black, width: 1),
-            left: const BorderSide(color: Colors.black, width: 1),
-            right: const BorderSide(color: Colors.black, width: 1),
-            top: const BorderSide(color: Colors.black, width: 1),
-            bottom: const BorderSide(color: Colors.black, width: 1),
           ),
           columnWidths: const {
             0: FixedColumnWidth(60),   // Sl. No.
@@ -5148,8 +5350,8 @@ return manager['fixed_fee'] as double? ?? 0.0;
           children: [
             // Header row
             TableRow(
-              decoration: const BoxDecoration(
-                color: Color(0x70707070), // rgba(112,112,112,0.2)
+              decoration: BoxDecoration(
+                color: const Color(0xFF707070).withOpacity(0.08),
               ),
               children: [
                 _buildCompensationTableHeaderCell('Sl. No.', isFirst: true),
@@ -5170,15 +5372,84 @@ return manager['fixed_fee'] as double? ?? 0.0;
               final isSold = status == 'sold';
               final agentName = plot['agent_name'] as String? ?? '';
               
-              // Calculate agent's total earnings (same as in agent section)
-              double agentEarnings = 0.0;
-              if (agentName.isNotEmpty && _agents != null) {
+              // Calculate agent's compensation for THIS SPECIFIC PLOT
+              double plotCompensation = 0.0;
+              if (agentName.isNotEmpty && isSold && _agents != null) {
                 final agent = _agents!.firstWhere(
                   (a) => (a['name'] as String? ?? '').toLowerCase() == agentName.toLowerCase(),
                   orElse: () => <String, dynamic>{},
                 );
                 if (agent.isNotEmpty) {
-                  agentEarnings = _calculateAgentEarnings(agent);
+                  final compensationType = agent['compensation_type'] as String? ?? '';
+                  
+                  if (compensationType == 'Fixed Fee') {
+                    plotCompensation = agent['fixed_fee'] as double? ?? 0.0;
+                  } else if (compensationType == 'Monthly Fee') {
+                    final monthlyFee = agent['monthly_fee'] as double? ?? 0.0;
+                    final months = agent['months'] as int? ?? 0;
+                    plotCompensation = monthlyFee * months;
+                  } else if (compensationType == 'Per Sqft Fee') {
+                    final perSqftFee = agent['per_sqft_fee'] as double? ?? 0.0;
+                    plotCompensation = perSqftFee * area;
+                  } else if (compensationType == 'Percentage Bonus') {
+                    final percentage = agent['percentage'] as double? ?? 0.0;
+                    final earningType = agent['earning_type'] as String? ?? '';
+                    final salePrice = ((plot['sale_price'] as num?)?.toDouble() ?? 0.0);
+                    final saleValue = salePrice * area;
+                    
+                    // Check for "Selling Price Per Plot" - calculate percentage from sale value
+                    final isSellingPriceBased = earningType == 'Selling Price Per Plot' || 
+                                                earningType == '% of Selling Price per Plot' ||
+                                                (earningType.toLowerCase().contains('selling price') && earningType.toLowerCase().contains('plot'));
+                    
+                    // Check if it's Lump Sum / Total Project Profit
+                    final isLumpSum = earningType == 'Lump Sum' || 
+                                    earningType == '% of Total Project Profit' ||
+                                    (earningType.toLowerCase().contains('total project profit') || earningType.toLowerCase().contains('lump'));
+                    
+                    if (isSellingPriceBased) {
+                      // Apply percentage to this plot's sale value
+                      plotCompensation = (saleValue * percentage) / 100;
+                    } else if (isLumpSum) {
+                      // For "% of Total Project Profit", calculate total agent compensation
+                      // then distribute proportionally across agent's sold plots
+                      final totalGrossProfit = _calculateTotalGrossProfit();
+                      final totalAgentCompensation = (totalGrossProfit * percentage) / 100;
+                      
+                      // Calculate total sale value for all plots sold by this agent
+                      double totalAgentSaleValue = 0.0;
+                      if (_siteLayouts.isNotEmpty && agentName.isNotEmpty) {
+                        for (var layout in _siteLayouts) {
+                          final layoutPlots = layout['plots'] as List<dynamic>? ?? [];
+                          for (var layoutPlot in layoutPlots) {
+                            final plotStatus = (layoutPlot['status'] as String? ?? '').toLowerCase();
+                            final plotAgentName = (layoutPlot['agent_name'] as String? ?? layoutPlot['agent'] as String? ?? '').trim();
+                            
+                            if (plotStatus == 'sold' && plotAgentName == agentName.trim()) {
+                              final plotSalePrice = ((layoutPlot['sale_price'] as num?)?.toDouble() ?? 0.0);
+                              final plotArea = ((layoutPlot['area'] as num?)?.toDouble() ?? 0.0);
+                              totalAgentSaleValue += plotSalePrice * plotArea;
+                            }
+                          }
+                        }
+                      }
+                      
+                      // Distribute compensation proportionally based on this plot's sale value
+                      if (totalAgentSaleValue > 0) {
+                        plotCompensation = (totalAgentCompensation * saleValue) / totalAgentSaleValue;
+                      } else {
+                        plotCompensation = 0.0;
+                      }
+                    } else {
+                      // Calculate profit for this specific plot
+                      final allInCost = _dashboardData!['allInCost'] as double? ?? 0.0;
+                      final plotCost = area * allInCost;
+                      final plotProfit = saleValue - plotCost;
+                      
+                      // Apply percentage to this plot's profit
+                      plotCompensation = (plotProfit * percentage) / 100;
+                    }
+                  }
                 }
               }
               
@@ -5192,7 +5463,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
                   _buildCompensationStatusCell(isSold ? 'Sold' : 'Available', isSold, isLastRow),
                   _buildCompensationAgentCell(agentName, isSold, isLastRow),
                   _buildCompensationTableDataCell(
-                    agentEarnings > 0 ? _formatCurrency(agentEarnings) : '-',
+                    plotCompensation > 0 ? _formatCurrency(plotCompensation) : '-',
                     isFirst: false,
                     isLastRow: isLastRow,
                     isLast: true,
@@ -5201,7 +5472,7 @@ return manager['fixed_fee'] as double? ?? 0.0;
               );
             }).toList(),
           ],
-        ),
+          ),
         ),
       ),
     );
@@ -5212,7 +5483,13 @@ return manager['fixed_fee'] as double? ?? 0.0;
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: const Color(0x70707070), // rgba(112,112,112,0.2)
+        color: const Color(0xFF707070).withOpacity(0.08),
+        border: Border(
+          top: const BorderSide(color: Colors.black, width: 1),
+          bottom: const BorderSide(color: Colors.black, width: 1),
+          left: isFirst ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+          right: isLast ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+        ),
         borderRadius: isFirst
             ? const BorderRadius.only(topLeft: Radius.circular(8))
             : isLast
@@ -5238,6 +5515,11 @@ return manager['fixed_fee'] as double? ?? 0.0;
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
+        border: Border(
+          left: isFirst ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+          right: isLast ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+          bottom: isLastRow ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+        ),
         borderRadius: isFirst && isLastRow
             ? const BorderRadius.only(bottomLeft: Radius.circular(8))
             : isLast && isLastRow
@@ -5271,6 +5553,13 @@ return manager['fixed_fee'] as double? ?? 0.0;
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide.none,
+          right: BorderSide.none,
+          bottom: isLastRow ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+        ),
+      ),
       child: Center(
         child: Container(
           height: 32,
@@ -5310,6 +5599,13 @@ return manager['fixed_fee'] as double? ?? 0.0;
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide.none,
+          right: BorderSide.none,
+          bottom: isLastRow ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+        ),
+      ),
       child: Center(
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -5370,6 +5666,13 @@ return manager['fixed_fee'] as double? ?? 0.0;
       return Container(
         height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: BoxDecoration(
+          border: Border(
+            left: BorderSide.none,
+            right: BorderSide.none,
+            bottom: isLastRow ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+          ),
+        ),
         child: Center(
           child: Container(
             height: 32,
@@ -5398,6 +5701,13 @@ return manager['fixed_fee'] as double? ?? 0.0;
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide.none,
+          right: BorderSide.none,
+          bottom: isLastRow ? const BorderSide(color: Colors.black, width: 1) : BorderSide.none,
+        ),
+      ),
       child: Center(
         child: Container(
           height: 32,

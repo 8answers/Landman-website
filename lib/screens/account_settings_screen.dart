@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../widgets/sidebar_navigation.dart';
 import '../widgets/account_settings_content.dart';
 import '../widgets/create_project_dialog.dart';
@@ -15,6 +16,7 @@ import '../pages/dashboard_page.dart';
 import '../pages/data_entry_page.dart';
 import '../pages/plot_status_page.dart';
 import '../pages/settings_page.dart';
+import '../pages/login_page.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({super.key});
@@ -24,7 +26,7 @@ class AccountSettingsScreen extends StatefulWidget {
 }
 
 class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
-  NavigationPage _currentPage = NavigationPage.account;
+  NavigationPage _currentPage = NavigationPage.recentProjects;
   NavigationPage? _previousPage;
   String? _projectName;
   String? _projectId;
@@ -180,6 +182,66 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     });
   }
 
+  void _handleLogout() async {
+    // Sign out from Supabase
+    try {
+      await Supabase.instance.client.auth.signOut();
+    } catch (e) {
+      print('Error signing out: $e');
+    }
+    
+    // Clear any session data and navigate to login page
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => const LoginPage()),
+        (route) => false,
+      );
+    }
+  }
+
+  void _handlePageChange(NavigationPage page) {
+    // Handle logout separately
+    if (page == NavigationPage.logout) {
+      _handleLogout();
+      return;
+    }
+
+    if (page == NavigationPage.home) {
+      if (_previousPage != null) {
+        setState(() {
+          _currentPage = _previousPage!;
+          _previousPage = null;
+        });
+      }
+    } else {
+      // Track previous page when navigating to project details context pages
+      if (page == NavigationPage.projectDetails ||
+          page == NavigationPage.dataEntry ||
+          page == NavigationPage.dashboard ||
+          page == NavigationPage.plotStatus) {
+        // Only track if we're not already in project details context
+        if (_currentPage != NavigationPage.projectDetails &&
+            _currentPage != NavigationPage.dataEntry &&
+            _currentPage != NavigationPage.dashboard &&
+            _currentPage != NavigationPage.plotStatus) {
+          setState(() {
+            _previousPage = _currentPage;
+            _currentPage = page;
+          });
+        } else {
+          // Already in project details context, just switch pages
+          setState(() {
+            _currentPage = page;
+          });
+        }
+      } else {
+        setState(() {
+          _currentPage = page;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -194,42 +256,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               projectName: _projectName,
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
-              onPageChanged: (page) {
-                if (page == NavigationPage.home) {
-                  if (_previousPage != null) {
-                    setState(() {
-                      _currentPage = _previousPage!;
-                      _previousPage = null;
-                    });
-                  }
-                } else {
-                  // Track previous page when navigating to project details context pages
-                  if (page == NavigationPage.projectDetails ||
-                      page == NavigationPage.dataEntry ||
-                      page == NavigationPage.dashboard ||
-                      page == NavigationPage.plotStatus) {
-                    // Only track if we're not already in project details context
-                    if (_currentPage != NavigationPage.projectDetails &&
-                        _currentPage != NavigationPage.dataEntry &&
-                        _currentPage != NavigationPage.dashboard &&
-                        _currentPage != NavigationPage.plotStatus) {
-                      setState(() {
-                        _previousPage = _currentPage;
-                        _currentPage = page;
-                      });
-                    } else {
-                      // Already in project details context, just switch pages
-                      setState(() {
-                        _currentPage = page;
-                      });
-                    }
-                  } else {
-                    setState(() {
-                      _currentPage = page;
-                    });
-                  }
-                }
-              },
+              onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
           } else if (constraints.maxWidth < 1024) {
@@ -240,42 +267,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
-              onPageChanged: (page) {
-                if (page == NavigationPage.home) {
-                  if (_previousPage != null) {
-                    setState(() {
-                      _currentPage = _previousPage!;
-                      _previousPage = null;
-                    });
-                  }
-                } else {
-                  // Track previous page when navigating to project details context pages
-                  if (page == NavigationPage.projectDetails ||
-                      page == NavigationPage.dataEntry ||
-                      page == NavigationPage.dashboard ||
-                      page == NavigationPage.plotStatus) {
-                    // Only track if we're not already in project details context
-                    if (_currentPage != NavigationPage.projectDetails &&
-                        _currentPage != NavigationPage.dataEntry &&
-                        _currentPage != NavigationPage.dashboard &&
-                        _currentPage != NavigationPage.plotStatus) {
-                      setState(() {
-                        _previousPage = _currentPage;
-                        _currentPage = page;
-                      });
-                    } else {
-                      // Already in project details context, just switch pages
-                      setState(() {
-                        _currentPage = page;
-                      });
-                    }
-                  } else {
-                    setState(() {
-                      _currentPage = page;
-                    });
-                  }
-                }
-              },
+              onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
           } else {
@@ -286,29 +278,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
-              onPageChanged: (page) {
-                if (page == NavigationPage.home) {
-                  // Go back to previous page
-                  if (_previousPage != null) {
-                    setState(() {
-                      _currentPage = _previousPage!;
-                      _previousPage = null;
-                    });
-                  }
-                } else {
-                  // Track previous page when navigating to project details
-                  if (page == NavigationPage.projectDetails) {
-                    setState(() {
-                      _previousPage = _currentPage;
-                      _currentPage = page;
-                    });
-                  } else {
-                    setState(() {
-                      _currentPage = page;
-                    });
-                  }
-                }
-              },
+              onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
           }

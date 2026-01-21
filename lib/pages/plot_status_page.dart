@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../widgets/decimal_input_field.dart';
 import '../services/layout_storage_service.dart';
 import '../services/project_storage_service.dart';
 
@@ -134,6 +136,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   final Map<String, TextEditingController> _buyerNameControllers = {};
   final Map<String, TextEditingController> _saleDateControllers = {};
   
+  // FocusNodes for editable fields
+  final Map<String, FocusNode> _salePriceFocusNodes = {};
+  final Map<String, FocusNode> _buyerNameFocusNodes = {};
+  final Map<String, FocusNode> _saleDateFocusNodes = {};
+  
   // Stored agents list from storage
   List<Map<String, dynamic>> _storedAgents = [];
   
@@ -215,6 +222,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var controller in _saleDateControllers.values) {
       controller.dispose();
     }
+    for (var focusNode in _salePriceFocusNodes.values) {
+      focusNode.dispose();
+    }
+    for (var focusNode in _buyerNameFocusNodes.values) {
+      focusNode.dispose();
+    }
+    for (var focusNode in _saleDateFocusNodes.values) {
+      focusNode.dispose();
+    }
     // Dispose scroll controllers
     _plotStatusTableScrollController.dispose();
     for (var controller in _layoutTableScrollControllers.values) {
@@ -247,7 +263,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             final plots = await _supabase
                 .from('plots')
                 .select()
-                .eq('layout_id', layoutId);
+                .eq('layout_id', layoutId)
+                .order('created_at', ascending: true);
             
             final plotsData = <Map<String, dynamic>>[];
             for (var plot in plots) {
@@ -275,7 +292,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 'purchaseRate': _formatDecimal(plot['all_in_cost_per_sqft'] ?? 0.0),
                 'totalPlotCost': _formatDecimal(plot['total_plot_cost'] ?? 0.0),
                 'status': plotStatus,
-                'salePrice': plot['sale_price'] != null ? _formatDecimal(plot['sale_price']) : null,
+                'salePrice': plot['sale_price'] != null && plot['sale_price'] != 0 ? _formatDecimal(plot['sale_price']) : '',
                 'buyerName': (plot['buyer_name'] ?? '').toString(),
                 'saleDate': _formatDateFromDatabase(plot['sale_date']),
                 'agent': (plot['agent_name'] ?? '').toString(),
@@ -318,6 +335,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     // Fallback to local storage for agents if not loaded from database
     if (agents.isEmpty) {
       agents = await LayoutStorageService.loadAgentsData();
+    }
+    
+    // Cleanup: Revert any incomplete sold plots back to available in the database
+    if (widget.projectId != null && widget.projectId!.isNotEmpty) {
+      await _cleanupIncompleteSoldPlots();
     }
     
     // Convert layout data from Site section format to plot status format
@@ -415,6 +437,60 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     
     print('PlotStatusPage: Initialized ${_salePriceControllers.length} sale price controllers, ${_buyerNameControllers.length} buyer name controllers, ${_saleDateControllers.length} sale date controllers');
+  }
+
+  Future<void> _cleanupIncompleteSoldPlots() async {
+    /// This function cleans up the database by reverting any "sold" plots that don't have all required fields
+    /// It queries all sold plots and checks if they have complete data (agent, buyer_name, sale_price, sale_date)
+    /// If any field is missing, it reverts the status back to 'available'
+    try {
+      print('_cleanupIncompleteSoldPlots: Starting cleanup of incomplete sold plots...');
+      
+      // Get all layouts for this project
+      final layouts = await _supabase
+          .from('layouts')
+          .select('id')
+          .eq('project_id', widget.projectId!);
+      
+      for (var layout in layouts) {
+        final layoutId = layout['id'] as String;
+        
+        // Get all sold plots for this layout
+        final soldPlots = await _supabase
+            .from('plots')
+            .select()
+            .eq('layout_id', layoutId)
+            .eq('status', 'sold');
+        
+        // Check each sold plot and revert if incomplete
+        for (var plot in soldPlots) {
+          final plotId = plot['id'] as String;
+          final agent = (plot['agent_name'] as String? ?? '').trim();
+          final buyerName = (plot['buyer_name'] as String? ?? '').trim();
+          final salePrice = plot['sale_price'];
+          final saleDate = (plot['sale_date'] as String? ?? '').trim();
+          
+          final isComplete = agent.isNotEmpty && 
+                            buyerName.isNotEmpty && 
+                            salePrice != null && 
+                            salePrice != 0 &&
+                            saleDate.isNotEmpty;
+          
+          if (!isComplete) {
+            print('_cleanupIncompleteSoldPlots: Reverting plot $plotId to available');
+            // Revert status to available
+            await _supabase
+                .from('plots')
+                .update({'status': 'available'})
+                .eq('id', plotId);
+          }
+        }
+      }
+      
+      print('_cleanupIncompleteSoldPlots: Cleanup completed');
+    } catch (e) {
+      print('_cleanupIncompleteSoldPlots: Error during cleanup: $e');
+    }
   }
 
   Future<void> _saveLayoutsData() async {
@@ -561,7 +637,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'plotNumber': plotNumber,
           'area': area.isEmpty ? '0.00' : area,
           'status': plotStatus,
-          'salePrice': plotMap['salePrice'] as String? ?? '0.00',
+          'salePrice': plotMap['salePrice'] as String? ?? '',
           'buyerName': plotMap['buyerName'] as String? ?? '',
           'agent': plotMap['agent'] as String? ?? '',
           'saleDate': plotMap['saleDate'] as String? ?? '',
@@ -585,6 +661,69 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }).toList();
   }
 
+  Future<void> _savePlotsToDatabase() async {
+    // Save plot data (including agent, status, buyer, price, date) to Supabase
+    if (widget.projectId == null) return;
+    
+    try {
+      for (var layout in _layouts) {
+        final layoutId = layout['layoutId'] as String?;
+        if (layoutId == null) continue;
+        
+        final plots = layout['plots'] as List<dynamic>? ?? [];
+        for (var plot in plots) {
+          final plotId = plot['id'] as String?;
+          if (plotId == null) continue;
+          
+          // Get values from the plot data
+          // Handle status - can be PlotStatus enum or string
+          var status = 'available';
+          if (plot['status'] is PlotStatus) {
+            status = (plot['status'] as PlotStatus).name.toLowerCase();
+          } else {
+            status = (plot['status'] as String? ?? 'available').toString().toLowerCase();
+          }
+          
+          final agent = (plot['agent'] as String? ?? '').toString().trim();
+          final buyerName = (plot['buyerName'] as String? ?? '').toString().trim();
+          final salePrice = (plot['salePrice'] as String? ?? '').toString().replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+          final saleDate = (plot['saleDate'] as String? ?? '').toString().trim();
+          
+          // If status is 'sold', verify all required fields are filled
+          // If not, revert status back to 'available'
+          if (status == 'sold') {
+            final isComplete = agent.isNotEmpty && 
+                              buyerName.isNotEmpty && 
+                              salePrice.isNotEmpty && 
+                              salePrice != '0' &&
+                              salePrice != '0.00' && 
+                              saleDate.isNotEmpty;
+            
+            if (!isComplete) {
+              print('Plot $plotId incomplete - reverting status to available. Agent: "$agent", Buyer: "$buyerName", Price: "$salePrice", Date: "$saleDate"');
+              status = 'available'; // Revert to available if incomplete
+            }
+          }
+          
+          // Update the plot in the database
+          await _supabase
+              .from('plots')
+              .update({
+                'status': status,
+                'agent': agent.isEmpty ? null : agent,
+                'buyer_name': buyerName.isEmpty ? null : buyerName,
+                'sale_price': salePrice.isEmpty || salePrice == '0' || salePrice == '0.00' ? null : double.tryParse(salePrice),
+                'sale_date': saleDate.isEmpty ? null : saleDate,
+              })
+              .eq('id', plotId);
+        }
+      }
+      print('Successfully saved plots to database');
+    } catch (e) {
+      print('Error saving plots to database: $e');
+    }
+  }
+
   void _updatePlotStatus(int index, PlotStatus newStatus) {
     setState(() {
       if (index < _allPlots.length) {
@@ -592,8 +731,34 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final plotNumber = plot['plotNumber'] as String? ?? '';
         final layoutName = plot['layout'] as String? ?? '';
         
+        // If trying to set status to 'sold', check if all required fields are filled
+        PlotStatus statusToSet = newStatus;
+        String? warningMessage;
+        
+        if (newStatus == PlotStatus.sold) {
+          final agent = (plot['agent'] as String? ?? '').toString().trim();
+          final buyerName = (plot['buyerName'] as String? ?? '').toString().trim();
+          final salePrice = (plot['salePrice'] as String? ?? '').toString().replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+          final saleDate = (plot['saleDate'] as String? ?? '').toString().trim();
+          
+          // Check if any required field is missing
+          final missingFields = <String>[];
+          if (agent.isEmpty) missingFields.add('Agent');
+          if (buyerName.isEmpty) missingFields.add('Buyer Name');
+          if (salePrice.isEmpty || salePrice == '0' || salePrice == '0.00') missingFields.add('Sale Price');
+          if (saleDate.isEmpty) missingFields.add('Sale Date');
+          
+          if (missingFields.isNotEmpty) {
+            statusToSet = PlotStatus.available;
+            warningMessage = 'Cannot mark as sold. Missing: ${missingFields.join(', ')}';
+            print('_updatePlotStatus: Blocking status change to sold. $warningMessage');
+          } else {
+            print('_updatePlotStatus: All required fields present, allowing status change to sold');
+          }
+        }
+        
         // Update _allPlots
-        _allPlots[index]['status'] = newStatus;
+        _allPlots[index]['status'] = statusToSet;
         
         // Also update the corresponding plot in _layouts
         for (var layout in _layouts) {
@@ -603,7 +768,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               if (plotData is Map<String, dynamic>) {
                 final pn = plotData['plotNumber'] as String? ?? '';
                 if (pn == plotNumber) {
-                  plotData['status'] = newStatus;
+                  plotData['status'] = statusToSet;
                   break;
                 }
               }
@@ -611,8 +776,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             break;
           }
         }
+        
+        // Show warning if validation failed
+        if (warningMessage != null) {
+          Future.delayed(Duration.zero, () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(warningMessage!),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          });
+        }
       }
     });
+    _saveLayoutsData();
+    _savePlotsToDatabase(); // Save to database
   }
 
   List<String> get _availableLayouts {
@@ -781,6 +961,48 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
   }
 
+  bool _hasValidationErrors() {
+    // Check if any sold plot has empty required fields (Buyer Name, Agent, Sale Price, Sale Date)
+    for (var layout in _layouts) {
+      final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
+      for (var plot in plots) {
+        final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
+        if (status == PlotStatus.sold) {
+          final buyerName = (plot['buyerName'] as String? ?? '').trim();
+          final agent = (plot['agent'] as String? ?? '').trim();
+          final salePrice = (plot['salePrice'] as String? ?? '').replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+          final saleDate = (plot['saleDate'] as String? ?? '').trim();
+          
+          if (buyerName.isEmpty || agent.isEmpty || salePrice.isEmpty || salePrice == '0' || salePrice == '0.00' || saleDate.isEmpty) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Helper widget to build focus-aware input container with dynamic shadow
+  Widget _buildFocusAwareInputContainer({
+    required Widget child,
+    required FocusNode focusNode,
+    VoidCallback? onFocusLost,
+    double width = double.infinity,
+    double height = 40,
+    Color backgroundColor = const Color(0xFFF8F9FA),
+    double borderRadius = 8,
+  }) {
+    return _FocusAwareInputContainer(
+      focusNode: focusNode,
+      onFocusLost: onFocusLost,
+      width: width,
+      height: height,
+      backgroundColor: backgroundColor,
+      borderRadius: borderRadius,
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -829,27 +1051,54 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 children: [
                   Column(
                     children: [
-                      Container(
-                        height: 32,
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: const BoxDecoration(
-                          border: Border(
-                            bottom: BorderSide(
-                              color: Color(0xFF0C8CE9),
-                              width: 2,
-                            ),
+                      Stack(
+                        children: [
+                          Stack(
+                            clipBehavior: Clip.none,
+                            alignment: Alignment.topCenter,
+                            children: [
+                              Container(
+                                height: 32,
+                                padding: const EdgeInsets.symmetric(horizontal: 4),
+                                decoration: const BoxDecoration(
+                                  border: Border(
+                                    bottom: BorderSide(
+                                      color: Color(0xFF0C8CE9),
+                                      width: 2,
+                                    ),
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    "Site",
+                                    style: GoogleFonts.inter(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                      color: const Color(0xFF0C8CE9),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              if (_hasValidationErrors())
+                                Positioned(
+                                  top: -8,
+                                  child: SvgPicture.asset(
+                                    'assets/images/Error_msg.svg',
+                                    width: 17,
+                                    height: 15,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      print('Error loading Error_msg.svg: $error');
+                                      return const SizedBox(
+                                        width: 17,
+                                        height: 15,
+                                      );
+                                    },
+                                  ),
+                                ),
+                            ],
                           ),
-                        ),
-                        child: Center(
-                          child: Text(
-                            "Site",
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: const Color(0xFF0C8CE9),
-                            ),
-                          ),
-                        ),
+                        ],
                       ),
                     ],
                   ),
@@ -1814,62 +2063,61 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               } else {
                 return Row(
                   children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
-                        child: Container(
-                          key: statusKey,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: statusBackgroundColor,
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
+                    GestureDetector(
+                      onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
+                      child: Container(
+                        key: statusKey,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: statusBackgroundColor,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                              spreadRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 16,
+                              height: 16,
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
                               ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 16,
-                                height: 16,
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Center(
-                                  child: Container(
-                                    width: 12,
-                                    height: 12,
-                                    decoration: BoxDecoration(
-                                      color: statusColor,
-                                      shape: BoxShape.circle,
-                                    ),
+                              child: Center(
+                                child: Container(
+                                  width: 12,
+                                  height: 12,
+                                  decoration: BoxDecoration(
+                                    color: statusColor,
+                                    shape: BoxShape.circle,
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                              Text(
-                                statusText,
-                                textAlign: TextAlign.center,
-                                style: GoogleFonts.inter(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.normal,
-                                  fontStyle: FontStyle.normal,
-                                  color: Colors.black, // #000
-                                  height: 1.0, // normal line-height
-                                ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              statusText,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.inter(
+                                fontSize: 16,
+                                fontWeight: FontWeight.normal,
+                                fontStyle: FontStyle.normal,
+                                color: Colors.black, // #000
+                                height: 1.0, // normal line-height
                               ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
+                    const Spacer(),
                     GestureDetector(
                       key: iconKey,
                       onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
@@ -1897,152 +2145,118 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   _salePriceControllers[key] = TextEditingController(
                     text: plot['salePrice'] as String? ?? '0.00',
                   );
+                  _salePriceFocusNodes[key] = FocusNode();
                 } else {
                   // Don't update controller during rebuilds - let the formatter and onChanged handle it
                   // This prevents the controller from being reset while user is typing
                 }
                 final controller = _salePriceControllers[key]!;
+                final focusNode = _salePriceFocusNodes[key]!;
                 final salePriceEmpty = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim().isEmpty ||
                                       controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim() == '0' ||
                                       controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim() == '0.00' ||
                                       (plot['salePrice']?.toString().trim().isEmpty ?? true) ||
                                       plot['salePrice'] == '0.00';
-                return Container(
+                return _buildFocusAwareInputContainer(
+                  focusNode: focusNode,
                   width: 200,
                   height: 32,
-                  child: Center(
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        Container(
-                          width: double.infinity,
-                          height: 32,
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF8F9FA),
-                            borderRadius: BorderRadius.circular(4),
-                            boxShadow: [
-                              BoxShadow(
-                                color: salePriceEmpty ? Colors.red : Colors.black.withOpacity(0.15),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
+                  backgroundColor: const Color(0xFFF8F9FA),
+                  borderRadius: 4,
+                  child: Builder(
+                    builder: (context) {
+                      final cleanedText = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+                      final isEmpty = cleanedText.isEmpty || cleanedText == '0' || cleanedText == '0.00';
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            '₹ ',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: FontWeight.normal,
+                              color: Colors.black,
+                            ),
                           ),
-                          child: Builder(
-                            builder: (context) {
-                              final cleanedText = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                              final isEmpty = cleanedText.isEmpty || cleanedText == '0' || cleanedText == '0.00';
-                              return Row(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    '₹ ',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.normal,
-                                      color: Colors.black,
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: TextField(
-                                      controller: controller,
-                                      keyboardType: TextInputType.number,
-                                      textAlignVertical: TextAlignVertical.center,
-                                      inputFormatters: [IndianNumberFormatter()],
-                                      onTap: () {
-                                        // Clear '0.00' when field is tapped
-                                        final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                        if (cleaned == '0' || cleaned == '0.00') {
-                                          controller.text = '';
-                                          controller.selection = TextSelection.collapsed(offset: 0);
-                                          setState(() {});
-                                        }
-                                      },
-                                      onChanged: (value) {
-                                        // Remove commas, format, then store with commas
-                                        final rawValue = value.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '');
-                                        final formatted = rawValue.isEmpty ? '0.00' : _formatAmount(rawValue);
-                                        setState(() {
-                                          _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                        });
-                                        _saveLayoutsData();
-                                      },
-                                      onEditingComplete: () {
-                                        // Remove commas before formatting
-                                        final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                        // Format the amount (this ensures .00 is added and adds commas)
-                                        final formatted = _formatAmount(cleaned);
-                                        // Store value WITH commas
-                                        // Apply formatter to ensure commas are displayed
-                                        // Pass the cleaned value (without commas) to formatter so it can add them
-                                        final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
-                                        final oldValue = controller.value;
-                                        final newValue = TextEditingValue(
-                                          text: cleanedForFormatter,
-                                          selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
-                                        );
-                                        final formattedValue = IndianNumberFormatter().formatEditUpdate(
-                                          oldValue,
-                                          newValue,
-                                        );
-                                        controller.value = formattedValue;
-                                        setState(() {
-                                          _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                        });
-                                        _saveLayoutsData();
-                                        FocusScope.of(context).nextFocus();
-                                      },
-                                      onTapOutside: (event) {
-                                        // Remove commas before formatting
-                                        final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                        // Format the amount (this ensures .00 is added and adds commas)
-                                        final formatted = _formatAmount(cleaned);
-                                        // Store value WITH commas
-                                        // Apply formatter to ensure commas are displayed
-                                        // Pass the cleaned value (without commas) to formatter so it can add them
-                                        final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
-                                        final oldValue = controller.value;
-                                        final newValue = TextEditingValue(
-                                          text: cleanedForFormatter,
-                                          selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
-                                        );
-                                        final formattedValue = IndianNumberFormatter().formatEditUpdate(
-                                          oldValue,
-                                          newValue,
-                                        );
-                                        controller.value = formattedValue;
-                                        setState(() {
-                                          _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                        });
-                                        _saveLayoutsData();
-                                      },
-                                      decoration: InputDecoration(
-                                        hintText: '0.00',
-                                        hintStyle: GoogleFonts.inter(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.normal,
-                                          color: const Color(0xFF5D5D5D),
-                                        ),
-                                        border: InputBorder.none,
-                                        contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                                        isDense: true,
-                                      ),
-                                      style: GoogleFonts.inter(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.normal,
-                                        color: isEmpty ? const Color(0xFF5D5D5D) : Colors.black,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              );
-                            },
+                          Expanded(
+                            child: DecimalInputField(
+                              controller: controller,
+                              focusNode: focusNode,
+                              hintText: '0.00',
+                              inputFormatters: [IndianNumberFormatter()],
+                              onTap: () {
+                                // Clear '0.00' when field is tapped
+                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+                                if (cleaned == '0' || cleaned == '0.00') {
+                                  controller.text = '';
+                                  controller.selection = TextSelection.collapsed(offset: 0);
+                                  setState(() {});
+                                }
+                              },
+                              onChanged: (value) {
+                                // Remove commas, format, then store with commas
+                                final rawValue = value.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '');
+                                final formatted = rawValue.isEmpty ? '0.00' : _formatAmount(rawValue);
+                                setState(() {
+                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
+                                });
+                                _saveLayoutsData();
+                              },
+                              onEditingComplete: () {
+                                // Remove commas before formatting
+                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+                                // Format the amount (this ensures .00 is added and adds commas)
+                                final formatted = _formatAmount(cleaned);
+                                // Store value WITH commas
+                                // Apply formatter to ensure commas are displayed
+                                // Pass the cleaned value (without commas) to formatter so it can add them
+                                final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
+                                final oldValue = controller.value;
+                                final newValue = TextEditingValue(
+                                  text: cleanedForFormatter,
+                                  selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
+                                );
+                                final formattedValue = IndianNumberFormatter().formatEditUpdate(
+                                  oldValue,
+                                  newValue,
+                                );
+                                controller.value = formattedValue;
+                                setState(() {
+                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
+                                });
+                                _saveLayoutsData();
+                                FocusScope.of(context).nextFocus();
+                              },
+                              onTapOutside: () {
+                                // Remove commas before formatting
+                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+                                // Format the amount (this ensures .00 is added and adds commas)
+                                final formatted = _formatAmount(cleaned);
+                                // Store value WITH commas
+                                // Apply formatter to ensure commas are displayed
+                                // Pass the cleaned value (without commas) to formatter so it can add them
+                                final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
+                                final oldValue = controller.value;
+                                final newValue = TextEditingValue(
+                                  text: cleanedForFormatter,
+                                  selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
+                                );
+                                final formattedValue = IndianNumberFormatter().formatEditUpdate(
+                                  oldValue,
+                                  newValue,
+                                );
+                                controller.value = formattedValue;
+                                setState(() {
+                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
+                                });
+                                _saveLayoutsData();
+                              },
+                              contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      );
+                    },
                   ),
                 );
               } else {
@@ -2122,6 +2336,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   _buyerNameControllers[key] = TextEditingController(
                     text: plot['buyerName'] as String? ?? '',
                   );
+                  _buyerNameFocusNodes[key] = FocusNode();
                 } else {
                   // Update controller if data has changed
                   final currentValue = plot['buyerName'] as String? ?? '';
@@ -2129,24 +2344,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     _buyerNameControllers[key]!.text = currentValue;
                   }
                 }
-                return Container(
+                final buyerNameEmpty = _buyerNameControllers[key]?.text.trim().isEmpty ?? true;
+                return _buildFocusAwareInputContainer(
+                  focusNode: _buyerNameFocusNodes[key]!,
                   width: 300,
                   height: 32,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF8F9FA),
-                    borderRadius: BorderRadius.circular(4),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.15),
-                        blurRadius: 2,
-                        offset: const Offset(0, 0),
-                        spreadRadius: 0,
-                      ),
-                    ],
-                  ),
+                  backgroundColor: const Color(0xFFF8F9FA),
+                  borderRadius: 4,
                   child: TextField(
                     controller: _buyerNameControllers[key],
+                    focusNode: _buyerNameFocusNodes[key],
                     onChanged: (value) {
                       setState(() {
                         _layouts[layoutIndex]['plots'][index]['buyerName'] = value;
@@ -2217,7 +2424,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                   borderRadius: BorderRadius.circular(4),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: Colors.black.withOpacity(0.15),
+                                      color: currentAgent.isEmpty ? Colors.red : Colors.black.withOpacity(0.15),
                                       blurRadius: 2,
                                       offset: const Offset(0, 0),
                                       spreadRadius: 0,
@@ -2285,6 +2492,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   _saleDateControllers[key] = TextEditingController(
                     text: plot['saleDate'] as String? ?? '',
                   );
+                  _saleDateFocusNodes[key] = FocusNode();
                 } else {
                   // Update controller if data has changed
                   final currentValue = plot['saleDate'] as String? ?? '';
@@ -2300,22 +2508,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       Flexible(
                         child: GestureDetector(
                           onTap: () => _selectSaleDate(layoutIndex, index, key),
-                          child: Container(
-                            constraints: const BoxConstraints(maxWidth: 180),
+                          child: _buildFocusAwareInputContainer(
+                            focusNode: _saleDateFocusNodes[key]!,
+                            width: 180,
                             height: 32,
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF8F9FA),
-                              borderRadius: BorderRadius.circular(4),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.15),
-                                  blurRadius: 2,
-                                  offset: const Offset(0, 0),
-                                  spreadRadius: 0,
-                                ),
-                              ],
-                            ),
+                            backgroundColor: const Color(0xFFF8F9FA),
+                            borderRadius: 4,
                             child: Row(
                               children: [
                                 Icon(
@@ -2327,7 +2525,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 Expanded(
                                   child: TextField(
                                     controller: _saleDateControllers[key],
+                                    focusNode: _saleDateFocusNodes[key],
                                     readOnly: true,
+                                    textAlign: TextAlign.center,
                                     style: GoogleFonts.inter(
                                       fontSize: 16,
                                       fontWeight: FontWeight.normal,
@@ -2562,6 +2762,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 _layouts[layoutIndex]['plots'][plotIndex]['status'] = status;
                               });
                               _saveLayoutsData();
+                              _savePlotsToDatabase(); // Save to database
                               closeDropdown();
                             },
                             child: Container(
@@ -2580,7 +2781,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 ],
                               ),
                               child: Row(
-                                mainAxisSize: status == PlotStatus.sold ? MainAxisSize.min : MainAxisSize.max,
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Container(
                                     width: 16,
@@ -2735,8 +2936,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                               );
                               if (actualIndex >= 0) {
                                 _updatePlotStatus(actualIndex, status);
-                                // Save to database after status change
-                                await _saveLayoutsData();
                               }
                               closeDropdown();
                             },
@@ -2908,6 +3107,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 _layouts[layoutIndex]['plots'][plotIndex]['agent'] = agent;
                               });
                               _saveLayoutsData();
+                              _savePlotsToDatabase(); // Save to database
                               closeDropdown();
                             },
                             child: Container(
@@ -2984,3 +3184,79 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
 }
+
+// Focus-aware input container widget that dynamically changes shadow based on focus state
+class _FocusAwareInputContainer extends StatefulWidget {
+  final FocusNode focusNode;
+  final Widget child;
+  final VoidCallback? onFocusLost;
+  final double width;
+  final double height;
+  final Color backgroundColor;
+  final double borderRadius;
+
+  const _FocusAwareInputContainer({
+    required this.focusNode,
+    required this.child,
+    this.onFocusLost,
+    this.width = double.infinity,
+    this.height = 40,
+    this.backgroundColor = const Color(0xFFF8F9FA),
+    this.borderRadius = 8,
+  });
+
+  @override
+  State<_FocusAwareInputContainer> createState() =>
+      _FocusAwareInputContainerState();
+}
+
+class _FocusAwareInputContainerState extends State<_FocusAwareInputContainer> {
+  late VoidCallback _focusListener;
+  bool _hadFocus = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _hadFocus = widget.focusNode.hasFocus;
+    _focusListener = () {
+      // Call onFocusLost when focus changes from true to false
+      if (_hadFocus && !widget.focusNode.hasFocus && widget.onFocusLost != null) {
+        widget.onFocusLost!();
+      }
+      _hadFocus = widget.focusNode.hasFocus;
+      setState(() {});
+    };
+    widget.focusNode.addListener(_focusListener);
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode.removeListener(_focusListener);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: widget.width,
+      height: widget.height,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: widget.backgroundColor,
+        borderRadius: BorderRadius.circular(widget.borderRadius),
+        boxShadow: [
+          BoxShadow(
+            color: widget.focusNode.hasFocus
+                ? const Color(0xFF0C8CE9) // Focus color: #0C8CE9 (solid blue)
+                : Colors.black.withOpacity(0.15), // Default color
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: widget.child,
+    );
+  }
+}
+

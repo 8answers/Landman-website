@@ -39,14 +39,71 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class AuthWrapper extends StatelessWidget {
+class AuthWrapper extends StatefulWidget {
   const AuthWrapper({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  bool _isInitialized = false;
+  bool _isLoggedIn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAuthState();
+    _listenToAuthStateChanges();
+  }
+
+  void _checkAuthState() {
+    // Check if user is already logged in
     final session = Supabase.instance.client.auth.currentSession;
-    
-    if (session != null) {
+    setState(() {
+      _isInitialized = true;
+      _isLoggedIn = session != null;
+    });
+  }
+
+  void _listenToAuthStateChanges() {
+    // Listen for auth state changes
+    Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+      final AuthChangeEvent event = data.event;
+      final Session? session = data.session;
+
+      setState(() {
+        if (event == AuthChangeEvent.signedIn && session != null) {
+          _isLoggedIn = true;
+        } else if (event == AuthChangeEvent.signedOut) {
+          _isLoggedIn = false;
+        }
+      });
+    }, onError: (error) {
+      print('Auth state change error: $error');
+      // Don't show error for code verifier issues on initial load
+      if (error.toString().contains('Code verifier')) {
+        print('PKCE code verifier issue, this is expected on page reload');
+        // Keep the current auth state
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isInitialized) {
+      // Show loading screen while checking auth state
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0C8CE9)),
+          ),
+        ),
+      );
+    }
+
+    if (_isLoggedIn) {
       // User is logged in, show main app
       return AccountSettingsScreen();
     } else {

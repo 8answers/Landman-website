@@ -36,7 +36,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
       width: 252,
       height: double.infinity,
       decoration: BoxDecoration(
-        color: const Color(0xFFFAFAFA),
+        color: const Color(0xFFF4F4F4),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.25),
@@ -84,7 +84,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                               color: const Color(0xFF5C5C5C),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 24),
                           // Home icon
                           SizedBox(
                             width: 16,
@@ -468,7 +468,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                         hoverIconPath: 'assets/images/Logout_hver.svg',
                         activeIconPath: 'assets/images/Logout_active.svg',
                         label: 'Log Out',
-                        iconRotation: 180,
+                        iconRotation: 0,
                         isActive: widget.currentPage == NavigationPage.logout,
                         onTap: () => widget.onPageChanged(NavigationPage.logout),
                       ),

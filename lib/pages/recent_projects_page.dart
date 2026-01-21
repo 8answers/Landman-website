@@ -25,6 +25,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
   List<Map<String, dynamic>> _filteredProjects = [];
   bool _isLoading = true;
   String _searchQuery = '';
+  int? _hoveredIndex; // Track which project row is being hovered
 
   @override
   void initState() {
@@ -623,69 +624,130 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                   ? DateTime.parse(project['created_at'])
                   : null;
               final projectId = project['id']?.toString() ?? '';
+              final isHovered = _hoveredIndex == index;
 
-              return GestureDetector(
-                onTap: () {
-                  if (widget.onProjectSelected != null) {
-                    widget.onProjectSelected!(projectId, projectName);
-                  }
+              return MouseRegion(
+                onEnter: (_) {
+                  setState(() {
+                    _hoveredIndex = index;
+                  });
                 },
+                onExit: (_) {
+                  setState(() {
+                    _hoveredIndex = null;
+                  });
+                },
+                child: GestureDetector(
+                  onTap: () {
+                    if (widget.onProjectSelected != null) {
+                      widget.onProjectSelected!(projectId, projectName);
+                    }
+                  },
                 child: Container(
                   height: 48,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Row(
-                    children: [
-                      // Project Name
-                      SizedBox(
-                        width: 320,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Text(
-                            projectName,
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                              color: Colors.black,
+                  decoration: BoxDecoration(
+                    color: isHovered ? const Color(0xFF5C5C5C).withOpacity(0.1) : Colors.transparent,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                    child: Row(
+                      children: [
+                        // Project Name
+                        SizedBox(
+                          width: 320,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text(
+                              projectName,
+                              style: GoogleFonts.inter(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.black,
+                              ),
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                      ),
-                      // Last modified
-                      SizedBox(
-                        width: 294,
-                        child: Center(
-                          child: Text(
-                            updatedAt != null
-                                ? _formatRelativeTime(updatedAt)
-                                : 'N/A',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.normal,
-                              color: const Color(0xFF5C5C5C),
+                        // Last modified
+                        SizedBox(
+                          width: 294,
+                          child: Center(
+                            child: Text(
+                              updatedAt != null
+                                  ? _formatRelativeTime(updatedAt)
+                                  : 'N/A',
+                              style: GoogleFonts.inter(
+                                fontSize: 16,
+                                fontWeight: FontWeight.normal,
+                                color: const Color(0xFF5C5C5C),
+                              ),
+                              textAlign: TextAlign.center,
                             ),
-                            textAlign: TextAlign.center,
                           ),
                         ),
-                      ),
-                      // Created
-                      SizedBox(
-                        width: 294,
-                        child: Center(
-                          child: Text(
-                            createdAt != null
-                                ? _formatDate(createdAt)
-                                : 'N/A',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.normal,
-                              color: const Color(0xFF5C5C5C),
+                        // Created
+                        SizedBox(
+                          width: 294,
+                          child: Center(
+                            child: Text(
+                              createdAt != null
+                                  ? _formatDate(createdAt)
+                                  : 'N/A',
+                              style: GoogleFonts.inter(
+                                fontSize: 16,
+                                fontWeight: FontWeight.normal,
+                                color: const Color(0xFF5C5C5C),
+                              ),
+                              textAlign: TextAlign.center,
                             ),
-                            textAlign: TextAlign.center,
                           ),
                         ),
-                      ),
-                    ],
+                        // Spacer to push Open button to the right
+                        const Spacer(),
+                        // Open button - only visible on hover
+                        if (isHovered)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Open',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w400,
+                                    color: const Color(0xFF0C8CE9),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Transform.rotate(
+                                  angle: -45 * 3.14159 / 180,
+                                  child: SvgPicture.asset(
+                                    'assets/images/Hover_open.svg',
+                                    width: 16,
+                                    height: 16,
+                                    fit: BoxFit.contain,
+                                    placeholderBuilder: (context) => const Icon(
+                                      Icons.east,
+                                      color: Color(0xFF0C8CE9),
+                                      size: 16,
+                                    ),
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return const Icon(
+                                        Icons.east,
+                                        color: Color(0xFF0C8CE9),
+                                        size: 16,
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          const SizedBox(width: 0),
+                      ],
+                    ),
                   ),
                 ),
               );
