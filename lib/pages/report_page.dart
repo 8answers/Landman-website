@@ -3297,6 +3297,35 @@ class _ReportPageState extends State<ReportPage> {
     }
   }
 
+  void _scrollMainPreviewToPage(int pageNum) {
+    final totalPages = _buildAllReportPagesForPreview().length;
+    final safePage = pageNum.clamp(1, math.max(1, totalPages)).toInt();
+    if (!_mainPreviewScrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollMainPreviewToPage(safePage);
+        }
+      });
+      return;
+    }
+
+    const pageExtent = 858.0; // 842 page height + 16 spacing
+    final maxOffset = _mainPreviewScrollController.position.maxScrollExtent;
+    final targetOffset = ((safePage - 1) * pageExtent).clamp(0.0, maxOffset);
+
+    _mainPreviewScrollController.animateTo(
+      targetOffset,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+    );
+
+    if (_currentPage != safePage && mounted) {
+      setState(() {
+        _currentPage = safePage;
+      });
+    }
+  }
+
   // Helper to resolve plot field values from multiple possible key names
   String _plotFieldStr(Map<String, dynamic> plot, List<String> candidates) {
     for (final k in candidates) {
@@ -4292,53 +4321,56 @@ class _ReportPageState extends State<ReportPage> {
 
   Widget _buildPageThumbnail(int pageNum,
       {bool isSelected = false, Widget? preview}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-      decoration: BoxDecoration(
-        color: isSelected ? const Color(0xFFF1F1F1) : const Color(0xFFF8F9FA),
-        border: isSelected
-            ? const Border(bottom: BorderSide(color: Color(0xFFE0E0E0)))
-            : null,
-      ),
-      child: Row(
-        children: [
-          Text(
-            '$pageNum',
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-              color: Colors.black.withOpacity(0.75),
-            ),
-          ),
-          const Spacer(),
-          Container(
-            width: 71,
-            height: 100,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: Border.all(
-                color: isSelected
-                    ? const Color(0xFF0C8CE9)
-                    : Colors.black.withOpacity(0.25),
-                width: isSelected ? 2 : 0.5,
+    return GestureDetector(
+      onTap: () => _scrollMainPreviewToPage(pageNum),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFFF1F1F1) : const Color(0xFFF8F9FA),
+          border: isSelected
+              ? const Border(bottom: BorderSide(color: Color(0xFFE0E0E0)))
+              : null,
+        ),
+        child: Row(
+          children: [
+            Text(
+              '$pageNum',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.black.withOpacity(0.75),
               ),
             ),
-            child: ClipRect(
-              child: preview == null
-                  ? const SizedBox.shrink()
-                  : FittedBox(
-                      fit: BoxFit.cover,
-                      alignment: Alignment.topCenter,
-                      child: SizedBox(
-                        width: 595,
-                        height: 842,
-                        child: preview,
+            const Spacer(),
+            Container(
+              width: 71,
+              height: 100,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                border: Border.all(
+                  color: isSelected
+                      ? const Color(0xFF0C8CE9)
+                      : Colors.black.withOpacity(0.25),
+                  width: isSelected ? 2 : 0.5,
+                ),
+              ),
+              child: ClipRect(
+                child: preview == null
+                    ? const SizedBox.shrink()
+                    : FittedBox(
+                        fit: BoxFit.cover,
+                        alignment: Alignment.topCenter,
+                        child: SizedBox(
+                          width: 595,
+                          height: 842,
+                          child: preview,
+                        ),
                       ),
-                    ),
+              ),
             ),
-          ),
-          const Spacer(),
-        ],
+            const Spacer(),
+          ],
+        ),
       ),
     );
   }
