@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -25,9 +25,11 @@ jobs:
         run: flutter build web --release
 
       - name: Deploy to Netlify
-        uses: nwtour/github-action-netlify@v1.2
+        uses: nwtgck/actions-netlify@v3.0
         with:
           publish-dir: './build/web'
+          production-branch: main
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           production-deploy: true
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
