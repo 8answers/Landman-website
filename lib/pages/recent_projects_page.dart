@@ -3,11 +3,12 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import '../widgets/app_scale_metrics.dart';
 
 class RecentProjectsPage extends StatefulWidget {
   final VoidCallback? onCreateProject;
   final Function(String projectId, String projectName)? onProjectSelected;
-  
+
   const RecentProjectsPage({
     super.key,
     this.onCreateProject,
@@ -97,6 +98,22 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
     }
   }
 
+  Future<void> _deleteProject(String projectId) async {
+    try {
+      await _supabase.from('projects').delete().eq('id', projectId);
+      await _loadProjects();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Project deleted')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to delete project: $e')),
+      );
+    }
+  }
+
   String _formatRelativeTime(DateTime dateTime) {
     final now = DateTime.now();
     final difference = now.difference(dateTime);
@@ -122,19 +139,93 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
     return DateFormat('d MMM yyyy').format(dateTime);
   }
 
+  Widget _skeletonBlock({required double width, required double height}) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE3E7EB),
+        borderRadius: BorderRadius.circular(8),
+      ),
+    );
+  }
+
+  Widget _buildRecentProjectsLoadingSkeleton() {
+    return Padding(
+      padding: const EdgeInsets.only(left: 24, right: 24),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8F9FA),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 2,
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _skeletonBlock(width: 220, height: 20),
+                const Spacer(),
+                _skeletonBlock(width: 120, height: 20),
+                const SizedBox(width: 24),
+                _skeletonBlock(width: 100, height: 20),
+              ],
+            ),
+            const SizedBox(height: 16),
+            ...List.generate(
+              8,
+              (index) => Padding(
+                padding: EdgeInsets.only(bottom: index == 7 ? 0 : 12),
+                child: Container(
+                  height: 52,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      _skeletonBlock(width: 220, height: 18),
+                      const Spacer(),
+                      _skeletonBlock(width: 120, height: 18),
+                      const SizedBox(width: 24),
+                      _skeletonBlock(width: 100, height: 18),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
+    final scaleMetrics = AppScaleMetrics.of(context);
+    final designViewportWidth =
+        scaleMetrics?.designViewportWidth ?? screenWidth;
+    final extraRightWidth = designViewportWidth > screenWidth
+        ? (designViewportWidth - screenWidth)
+        : 0.0;
     final isMobile = screenWidth < 768;
-    final isTablet = screenWidth >= 768 && screenWidth < 1024;
-    
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Header section
         Padding(
           padding: const EdgeInsets.only(
-            top: 0,
+            top: 24,
             left: 24,
             right: 24,
           ),
@@ -144,253 +235,99 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
               Text(
                 'Recent Projects ',
                 style: GoogleFonts.inter(
-                  fontSize: isMobile ? 28 : isTablet ? 32 : 36,
+                  fontSize: 32,
                   fontWeight: FontWeight.w600,
                   color: Colors.black,
+                  height: 1.25,
                 ),
               ),
               const SizedBox(height: 8),
               Text(
                 "Quick access to projects you've worked on recently.",
                 style: GoogleFonts.inter(
-                  fontSize: 16,
+                  fontSize: 20,
                   fontWeight: FontWeight.normal,
                   color: Colors.black.withOpacity(0.8),
+                  height: 1.0,
                 ),
               ),
             ],
           ),
         ),
-        const SizedBox(height: 36),
-        // Sort by section
-        Transform.translate(
-          offset: const Offset(-24, 0), // Move left by 24px
-          child: Container(
-            width: MediaQuery.of(context).size.width + 24, // Full width plus compensate for transform
-            height: 32,
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: const Color(0xFF5C5C5C),
-                  width: 0.5,
-                ),
+        const SizedBox(height: 24),
+        // Action buttons row + stretched divider on wider screens
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              left: 0,
+              right: -extraRightWidth,
+              bottom: 0,
+              child: Container(
+                height: 0.5,
+                color: const Color(0xFF5C5C5C),
               ),
             ),
-            child: Row(
-              children: [
-                const SizedBox(width: 48), // Compensate for Transform.translate + 24px for tab options
-                Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: SizedBox(
-                      height: 32,
-                      child: Center(
-                        child: Text(
-                          'Sort by:',
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 60),
-                  Container(
-                    height: 32,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    decoration: BoxDecoration(
-                      border: Border(
-                        bottom: BorderSide(
-                          color: const Color(0xFF0C8CE9),
-                          width: 2,
-                        ),
-                      ),
-                    ),
-                    child: Center(
-                      child: Text(
-                        'Last modified',
-                        style: GoogleFonts.inter(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                          color: const Color(0xFF0C8CE9),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 36),
-        // Action buttons row
-        Padding(
-          padding: const EdgeInsets.only(left: 24, right: 24),
-          child: isMobile
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Create new project button
-                      GestureDetector(
-                        onTap: widget.onCreateProject,
-                        child: Container(
-                          height: 44,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 0,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0C8CE9),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              'Create new project',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                color: Colors.white,
-                              ),
+            Padding(
+              padding: const EdgeInsets.only(left: 24, right: 24, bottom: 16),
+              child: isMobile
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Create new project button
+                        GestureDetector(
+                          onTap: widget.onCreateProject,
+                          child: Container(
+                            height: 36,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 0,
+                              vertical: 4,
                             ),
-                            const SizedBox(width: 8),
-                            SvgPicture.asset(
-                              'assets/images/Cretae_new_projet_white.svg',
-                              width: 13,
-                              height: 13,
-                              fit: BoxFit.contain,
-                              placeholderBuilder: (context) => const SizedBox(
-                                width: 13,
-                                height: 13,
-                              ),
-                            ),
-                          ],
-                        ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      // Search bar
-                      Container(
-                        height: 44,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(32),
-                          border: Border.all(
-                            color: const Color(0xFF5C5C5C),
-                            width: 0.5,
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            SvgPicture.asset(
-                              'assets/images/Search_projects.svg',
-                              width: 24,
-                              height: 24,
-                              fit: BoxFit.contain,
-                              placeholderBuilder: (context) => const SizedBox(
-                                width: 24,
-                                height: 24,
-                              ),
-                            ),
-                            const SizedBox(width: 15),
-                            Expanded(
-                              child: TextField(
-                                controller: _searchController,
-                                style: GoogleFonts.inter(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.normal,
-                                  color: Colors.black.withOpacity(0.8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0C8CE9),
+                              borderRadius: BorderRadius.circular(8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.25),
+                                  blurRadius: 2,
+                                  offset: const Offset(0, 0),
+                                  spreadRadius: 0,
                                 ),
-                                decoration: InputDecoration(
-                                  hintText: 'Search by project name',
-                                  hintStyle: GoogleFonts.inter(
-                                    fontSize: 16,
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  'Create new project',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
                                     fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.8),
+                                    color: Colors.white,
                                   ),
-                                  border: InputBorder.none,
-                                  isDense: true,
-                                  contentPadding: EdgeInsets.zero,
                                 ),
-                              ),
+                                const SizedBox(width: 8),
+                                SvgPicture.asset(
+                                  'assets/images/Cretae_new_projet_white.svg',
+                                  width: 13,
+                                  height: 13,
+                                  fit: BoxFit.contain,
+                                  placeholderBuilder: (context) =>
+                                      const SizedBox(
+                                    width: 13,
+                                    height: 13,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  )
-                : Row(
-                    children: [
-                      // Create new project button
-                      GestureDetector(
-                        onTap: widget.onCreateProject,
-                        child: Container(
-                          height: 44,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 4,
                           ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0C8CE9),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Create new project',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            SvgPicture.asset(
-                              'assets/images/Cretae_new_projet_white.svg',
-                              width: 13,
-                              height: 13,
-                              fit: BoxFit.contain,
-                              placeholderBuilder: (context) => const SizedBox(
-                                width: 13,
-                                height: 13,
-                              ),
-                            ),
-                          ],
                         ),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      // Search bar
-                      Expanded(
-                        child: Container(
-                          height: 44,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 10,
-                          ),
+                        const SizedBox(height: 16),
+                        // Search bar
+                        Container(
+                          height: 36,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(32),
@@ -403,207 +340,344 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                             children: [
                               SvgPicture.asset(
                                 'assets/images/Search_projects.svg',
-                                width: 24,
-                                height: 24,
+                                width: 16,
+                                height: 16,
                                 fit: BoxFit.contain,
                                 placeholderBuilder: (context) => const SizedBox(
-                                  width: 24,
-                                  height: 24,
+                                  width: 16,
+                                  height: 16,
                                 ),
                               ),
-                              const SizedBox(width: 15),
+                              const SizedBox(width: 8),
                               Expanded(
-                                child: TextField(
-                                  controller: _searchController,
-                                  style: GoogleFonts.inter(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.8),
-                                  ),
-                                  decoration: InputDecoration(
-                                    hintText: 'Search by project name',
-                                    hintStyle: GoogleFonts.inter(
-                                      fontSize: 16,
+                                child: SizedBox(
+                                  height: 20,
+                                  child: TextField(
+                                    controller: _searchController,
+                                    textAlignVertical: TextAlignVertical.center,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
                                       fontWeight: FontWeight.normal,
                                       color: Colors.black.withOpacity(0.8),
+                                      height: 1.0,
                                     ),
-                                    border: InputBorder.none,
-                                    isDense: true,
-                                    contentPadding: EdgeInsets.zero,
+                                    decoration: InputDecoration(
+                                      hintText: 'Search Documents',
+                                      hintStyle: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.normal,
+                                        color: Colors.black.withOpacity(0.5),
+                                        height: 1.0,
+                                      ),
+                                      border: InputBorder.none,
+                                      isDense: true,
+                                      isCollapsed: true,
+                                      contentPadding: EdgeInsets.zero,
+                                    ),
                                   ),
                                 ),
                               ),
                             ],
                           ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    )
+                  : Row(
+                      children: [
+                        // Create new project button
+                        GestureDetector(
+                          onTap: widget.onCreateProject,
+                          child: Container(
+                            height: 36,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0C8CE9),
+                              borderRadius: BorderRadius.circular(8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.25),
+                                  blurRadius: 2,
+                                  offset: const Offset(0, 0),
+                                  spreadRadius: 0,
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Create new project',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                SvgPicture.asset(
+                                  'assets/images/Cretae_new_projet_white.svg',
+                                  width: 13,
+                                  height: 13,
+                                  fit: BoxFit.contain,
+                                  placeholderBuilder: (context) =>
+                                      const SizedBox(
+                                    width: 13,
+                                    height: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        // Search bar
+                        Expanded(
+                          child: Container(
+                            height: 36,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(32),
+                              border: Border.all(
+                                color: const Color(0xFF5C5C5C),
+                                width: 0.5,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                SvgPicture.asset(
+                                  'assets/images/Search_projects.svg',
+                                  width: 16,
+                                  height: 16,
+                                  fit: BoxFit.contain,
+                                  placeholderBuilder: (context) =>
+                                      const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: SizedBox(
+                                    height: 20,
+                                    child: TextField(
+                                      controller: _searchController,
+                                      textAlignVertical:
+                                          TextAlignVertical.center,
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.normal,
+                                        color: Colors.black.withOpacity(0.8),
+                                        height: 1.0,
+                                      ),
+                                      decoration: InputDecoration(
+                                        hintText: 'Search Documents',
+                                        hintStyle: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.normal,
+                                          color: Colors.black.withOpacity(0.5),
+                                          height: 1.0,
+                                        ),
+                                        border: InputBorder.none,
+                                        isDense: true,
+                                        isCollapsed: true,
+                                        contentPadding: EdgeInsets.zero,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
+          ],
         ),
         const SizedBox(height: 24),
         // Projects list or empty state
         Expanded(
           child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
+              ? _buildRecentProjectsLoadingSkeleton()
               : _filteredProjects.isEmpty
                   ? Padding(
-            padding: const EdgeInsets.only(left: 24, right: 24),
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Empty state icon
-                    SvgPicture.asset(
-                      'assets/images/Rcent_projects_folder.svg',
-                      width: 108,
-                      height: 80,
-                      fit: BoxFit.contain,
-                      placeholderBuilder: (context) => const SizedBox(
-                        width: 108,
-                        height: 80,
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
+                      padding: const EdgeInsets.only(left: 24, right: 24),
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            // Empty state icon
+                            SvgPicture.asset(
+                              'assets/images/Rcent_projects_folder.svg',
+                              width: 108,
+                              height: 80,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 108,
+                                height: 80,
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+                            Text(
                               _searchQuery.isNotEmpty
                                   ? 'No projects found'
                                   : 'No recent projects yet',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.normal,
-                        color: Colors.black,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
+                              style: GoogleFonts.inter(
+                                fontSize: 16,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
                               _searchQuery.isNotEmpty
                                   ? 'Try a different search term.'
                                   : 'Projects you open will appear here.',
-                      style: GoogleFonts.inter(
-                        fontSize: 14,
-                        fontWeight: FontWeight.normal,
-                        color: const Color(0xFF5C5C5C),
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: const Color(0xFF5C5C5C),
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
                             if (_searchQuery.isEmpty) ...[
-                    const SizedBox(height: 24),
-                    // Create new project button (empty state)
-                    GestureDetector(
+                              const SizedBox(height: 24),
+                              // Create new project button (empty state)
+                              GestureDetector(
                                 onTap: widget.onCreateProject,
-                      child: Container(
-                        height: 44,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'Create new project',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.normal,
-                              color: const Color(0xFF0C8CE9),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Plus icon
-                          SvgPicture.asset(
-                            'assets/images/Create_new_project_blue.svg',
-                            width: 13,
-                            height: 13,
-                            fit: BoxFit.contain,
-                            placeholderBuilder: (context) => const SizedBox(
-                              width: 13,
-                              height: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                      ),
-                    ),
-                  ],
+                                child: Container(
+                                  height: 44,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.25),
+                                        blurRadius: 2,
+                                        offset: const Offset(0, 0),
+                                        spreadRadius: 0,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        'Create new project',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.normal,
+                                          color: const Color(0xFF0C8CE9),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      // Plus icon
+                                      SvgPicture.asset(
+                                        'assets/images/Create_new_project_blue.svg',
+                                        width: 13,
+                                        height: 13,
+                                        fit: BoxFit.contain,
+                                        placeholderBuilder: (context) =>
+                                            const SizedBox(
+                                          width: 13,
+                                          height: 13,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
                     )
                   : Padding(
-                      padding: const EdgeInsets.only(left: 24),
-                      child: _buildProjectsTable(),
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: _buildProjectsTable(extraRightWidth),
                     ),
         ),
       ],
     );
   }
 
-  Widget _buildProjectsTable() {
+  Widget _buildProjectsTable(double extraRightWidth) {
+    const nameColumnWidth = 562.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Table header
         Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: [
-              // Project Name column
               SizedBox(
-                width: 320,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Text(
-                    'Project Name',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: const Color(0xFF5C5C5C),
-                    ),
+                width: nameColumnWidth,
+                child: Text(
+                  'Project Name',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: const Color(0xFF5C5C5C),
                   ),
                 ),
               ),
-              // Last modified column
-              SizedBox(
-                width: 294,
-                child: Center(
-                  child: Text(
-                    'Last modified',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: const Color(0xFF5C5C5C),
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              ),
-              // Created column
-              SizedBox(
-                width: 294,
-                child: Center(
-                  child: Text(
-                    'Created',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: const Color(0xFF5C5C5C),
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final rightSectionWidth =
+                        (constraints.maxWidth + extraRightWidth)
+                            .clamp(452.0, double.infinity)
+                            .toDouble();
+                    return OverflowBox(
+                      alignment: Alignment.centerLeft,
+                      minWidth: rightSectionWidth,
+                      maxWidth: rightSectionWidth,
+                      child: SizedBox(
+                        width: rightSectionWidth,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            SizedBox(
+                              width: 180,
+                              child: Text(
+                                'Last modified',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: const Color(0xFF5C5C5C),
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                            SizedBox(
+                              width: 180,
+                              child: Text(
+                                'Created',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: const Color(0xFF5C5C5C),
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                            const SizedBox(width: 52),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
             ],
@@ -643,109 +717,164 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                       widget.onProjectSelected!(projectId, projectName);
                     }
                   },
-                child: Container(
-                  height: 48,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: isHovered ? const Color(0xFF5C5C5C).withOpacity(0.1) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
+                  child: Container(
+                    height: 56,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: isHovered
+                          ? const Color(0xFFF1F1F1)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                     child: Row(
                       children: [
-                        // Project Name
                         SizedBox(
-                          width: 320,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: Text(
-                              projectName,
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w500,
-                                color: Colors.black,
-                              ),
-                              overflow: TextOverflow.ellipsis,
+                          width: nameColumnWidth,
+                          child: Text(
+                            projectName,
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: const Color(0xFF5C5C5C),
                             ),
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        // Last modified
-                        SizedBox(
-                          width: 294,
-                          child: Center(
-                            child: Text(
-                              updatedAt != null
-                                  ? _formatRelativeTime(updatedAt)
-                                  : 'N/A',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                color: const Color(0xFF5C5C5C),
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ),
-                        // Created
-                        SizedBox(
-                          width: 294,
-                          child: Center(
-                            child: Text(
-                              createdAt != null
-                                  ? _formatDate(createdAt)
-                                  : 'N/A',
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                color: const Color(0xFF5C5C5C),
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ),
-                        // Spacer to push Open button to the right
-                        const Spacer(),
-                        // Open button - only visible on hover
-                        if (isHovered)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  'Open',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w400,
-                                    color: const Color(0xFF0C8CE9),
+                        Expanded(
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final rightSectionWidth =
+                                  (constraints.maxWidth + extraRightWidth)
+                                      .clamp(452.0, double.infinity)
+                                      .toDouble();
+                              return OverflowBox(
+                                alignment: Alignment.centerLeft,
+                                minWidth: rightSectionWidth,
+                                maxWidth: rightSectionWidth,
+                                child: SizedBox(
+                                  width: rightSectionWidth,
+                                  child: Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      SizedBox(
+                                        width: 180,
+                                        child: Text(
+                                          updatedAt != null
+                                              ? _formatRelativeTime(updatedAt)
+                                              : 'N/A',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.normal,
+                                            color: const Color(0xFF5C5C5C),
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 180,
+                                        child: Text(
+                                          createdAt != null
+                                              ? _formatDate(createdAt)
+                                              : 'N/A',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.normal,
+                                            color: const Color(0xFF5C5C5C),
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ),
+                                      PopupMenuButton<String>(
+                                        tooltip: '',
+                                        color: Colors.transparent,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                                width: 165),
+                                        menuPadding: EdgeInsets.zero,
+                                        elevation: 0,
+                                        shadowColor: Colors.transparent,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        offset: const Offset(0, 40),
+                                        onSelected: (value) {
+                                          if (value == 'delete') {
+                                            _deleteProject(projectId);
+                                          }
+                                        },
+                                        itemBuilder: (context) => [
+                                          PopupMenuItem<String>(
+                                            value: 'delete',
+                                            height: 52,
+                                            padding: EdgeInsets.zero,
+                                            child: Container(
+                                              width: 165,
+                                              height: 52,
+                                              padding: const EdgeInsets.all(8),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFFF8F9FA),
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: Colors.black
+                                                        .withOpacity(0.5),
+                                                    blurRadius: 1,
+                                                    offset: const Offset(0, 0),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: Container(
+                                                alignment: Alignment.center,
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white,
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black
+                                                          .withOpacity(0.5),
+                                                      blurRadius: 1,
+                                                      offset:
+                                                          const Offset(0, 0),
+                                                    ),
+                                                  ],
+                                                ),
+                                                child: Text(
+                                                  'Delete Project',
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 14,
+                                                    fontWeight:
+                                                        FontWeight.normal,
+                                                    color: Colors.red,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                        child: Container(
+                                          width: 52,
+                                          height: 36,
+                                          alignment: Alignment.centerRight,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16),
+                                          child: const Icon(
+                                            Icons.more_horiz,
+                                            size: 20,
+                                            color: Color(0xFF5C5C5C),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                Transform.rotate(
-                                  angle: -45 * 3.14159 / 180,
-                                  child: SvgPicture.asset(
-                                    'assets/images/Hover_open.svg',
-                                    width: 16,
-                                    height: 16,
-                                    fit: BoxFit.contain,
-                                    placeholderBuilder: (context) => const Icon(
-                                      Icons.east,
-                                      color: Color(0xFF0C8CE9),
-                                      size: 16,
-                                    ),
-                                    errorBuilder: (context, error, stackTrace) {
-                                      return const Icon(
-                                        Icons.east,
-                                        color: Color(0xFF0C8CE9),
-                                        size: 16,
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        else
-                          const SizedBox(width: 0),
+                              );
+                            },
+                          ),
+                        ),
                       ],
                     ),
                   ),

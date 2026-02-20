@@ -3,12 +3,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:ui';
 import '../widgets/decimal_input_field.dart';
 import '../services/layout_storage_service.dart';
 import '../services/project_storage_service.dart';
+import '../services/area_unit_service.dart';
+import '../utils/area_unit_utils.dart';
+import '../widgets/area_unit_selector.dart';
+import '../widgets/app_scale_metrics.dart';
 
 // TextInputFormatter for Indian numbering system (commas every 2 digits)
 class IndianNumberFormatter extends TextInputFormatter {
+  final int? maxIntegerDigits;
+
+  IndianNumberFormatter({this.maxIntegerDigits});
+
   @override
   TextEditingValue formatEditUpdate(
     TextEditingValue oldValue,
@@ -20,13 +29,26 @@ class IndianNumberFormatter extends TextInputFormatter {
 
     // Remove all non-digit characters except decimal point
     String cleaned = newValue.text.replaceAll(RegExp(r'[^\d.]'), '');
-    
+
+    // If cleaning removed all content (user typed only letters), reject the input
+    if (cleaned.isEmpty || (cleaned == '.' && oldValue.text.isNotEmpty)) {
+      return oldValue;
+    }
+
     // Only allow one decimal point
     final parts = cleaned.split('.');
     if (parts.length > 2) {
       cleaned = '${parts[0]}.${parts.sublist(1).join()}';
     }
-    
+
+    // Limit integer part length if maxIntegerDigits is specified
+    if (maxIntegerDigits != null) {
+      final integerPart = parts[0];
+      if (integerPart.length > maxIntegerDigits!) {
+        return oldValue; // Reject the input if it exceeds max digits
+      }
+    }
+
     // Limit decimal places to 2
     if (parts.length == 2 && parts[1].length > 2) {
       cleaned = '${parts[0]}.${parts[1].substring(0, 2)}';
@@ -35,21 +57,25 @@ class IndianNumberFormatter extends TextInputFormatter {
     // Split into integer and decimal parts
     String integerPart;
     String decimalPart = '';
-    
+
     if (cleaned.contains('.')) {
       final splitParts = cleaned.split('.');
-      integerPart = splitParts[0];
+      integerPart = splitParts[0].isEmpty
+          ? '0'
+          : splitParts[0]; // Default to '0' if empty
       decimalPart = splitParts.length > 1 ? splitParts[1] : '';
     } else {
-      integerPart = cleaned;
+      integerPart = cleaned.isEmpty ? '0' : cleaned; // Default to '0' if empty
     }
 
     // Format integer part with Indian numbering
     // Numbers < 10000: no commas (e.g., 1000, 9999)
     // Numbers >= 10000: Indian numbering (e.g., 10,000, 1,00,000)
     String formattedInteger = '';
-    
-    if (integerPart.length <= 4) {
+
+    if (integerPart.isEmpty || integerPart == '0') {
+      formattedInteger = integerPart.isEmpty ? '0' : integerPart;
+    } else if (integerPart.length <= 4) {
       // No commas for numbers less than 10000
       formattedInteger = integerPart;
     } else {
@@ -58,7 +84,7 @@ class IndianNumberFormatter extends TextInputFormatter {
       final length = integerPart.length;
       final lastThreeDigits = integerPart.substring(length - 3);
       final remainingDigits = integerPart.substring(0, length - 3);
-      
+
       // Format remaining digits with Indian numbering (comma every 2 digits)
       String formattedRemaining = '';
       int count = 0;
@@ -69,29 +95,37 @@ class IndianNumberFormatter extends TextInputFormatter {
         formattedRemaining = remainingDigits[i] + formattedRemaining;
         count++;
       }
-      
+
       // Combine: remaining digits (with commas) + last 3 digits (no comma)
-      formattedInteger = formattedRemaining.isEmpty 
-          ? lastThreeDigits 
+      formattedInteger = formattedRemaining.isEmpty
+          ? lastThreeDigits
           : '$formattedRemaining,$lastThreeDigits';
     }
 
     // Combine formatted integer with decimal part
-    String formattedText = decimalPart.isNotEmpty 
-        ? '$formattedInteger.$decimalPart'
+    // Keep the decimal point even if decimalPart is empty (user might still be typing)
+    String formattedText = cleaned.contains('.')
+        ? '$formattedInteger.${decimalPart}'
         : formattedInteger;
 
     // Calculate cursor position
     int cursorPosition = formattedText.length;
-    if (newValue.selection.baseOffset < newValue.text.length) {
-      // Try to maintain relative cursor position
-      final oldLength = oldValue.text.replaceAll(',', '').length;
-      final newLength = formattedText.replaceAll(',', '').length;
-      if (oldLength > 0) {
-        final ratio = newValue.selection.baseOffset / oldValue.text.length;
-        cursorPosition = (formattedText.length * ratio).round().clamp(0, formattedText.length);
+    int unformattedLength = newValue.selection.baseOffset;
+    int commaCount = 0;
+    int charCount = 0;
+
+    for (int i = 0;
+        i < formattedText.length && charCount < unformattedLength;
+        i++) {
+      if (formattedText[i] != ',') {
+        charCount++;
+      } else {
+        commaCount++;
       }
     }
+
+    cursorPosition = unformattedLength + commaCount;
+    cursorPosition = cursorPosition.clamp(0, formattedText.length);
 
     return TextEditingValue(
       text: formattedText,
@@ -111,8 +145,15 @@ class PlotStatusPage extends StatefulWidget {
   final List<Map<String, dynamic>>? layouts;
   final List<Map<String, dynamic>>? agents;
   final String? projectId;
-  
-  const PlotStatusPage({super.key, this.layouts, this.agents, this.projectId});
+  final Function(bool)? onPlotStatusErrorsChanged;
+
+  const PlotStatusPage({
+    super.key,
+    this.layouts,
+    this.agents,
+    this.projectId,
+    this.onPlotStatusErrorsChanged,
+  });
 
   @override
   State<PlotStatusPage> createState() => _PlotStatusPageState();
@@ -120,6 +161,7 @@ class PlotStatusPage extends StatefulWidget {
 
 class _PlotStatusPageState extends State<PlotStatusPage> {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final ScrollController _scrollController = ScrollController();
   String _selectedLayout = 'All Layouts';
   String _selectedStatus = 'All Status';
   String _searchQuery = '';
@@ -127,27 +169,53 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   // Plot data structure
   List<Map<String, dynamic>> _allPlots = [];
-  
+
   // Layouts with plots data - loaded from Site section
   List<Map<String, dynamic>> _layouts = [];
-  
+
   // Controllers for editable fields
   final Map<String, TextEditingController> _salePriceControllers = {};
   final Map<String, TextEditingController> _buyerNameControllers = {};
   final Map<String, TextEditingController> _saleDateControllers = {};
-  
+  final Map<String, TextEditingController> _paymentAmountControllers = {};
+  final Map<String, TextEditingController> _paymentTextControllers = {};
+
   // FocusNodes for editable fields
   final Map<String, FocusNode> _salePriceFocusNodes = {};
   final Map<String, FocusNode> _buyerNameFocusNodes = {};
   final Map<String, FocusNode> _saleDateFocusNodes = {};
-  
+  final Map<String, FocusNode> _paymentAmountFocusNodes = {};
+  final Map<String, FocusNode> _paymentTextFocusNodes = {};
+
   // Stored agents list from storage
   List<Map<String, dynamic>> _storedAgents = [];
-  
+
   // Scroll controllers for tables
   final ScrollController _plotStatusTableScrollController = ScrollController();
-  final Map<int, ScrollController> _layoutTableScrollControllers = {}; // Key: layoutIndex
-  
+  final Map<int, ScrollController> _layoutTableScrollControllers =
+      {}; // Key: layoutIndex
+  final ScrollController _editDialogScrollController = ScrollController();
+  final GlobalKey _paymentMethodFieldKey = GlobalKey();
+  final GlobalKey _agentFieldKey = GlobalKey();
+
+  // Edit dialog state
+  int? _editingLayoutIndex;
+  int? _editingPlotIndex;
+  PlotStatus? _editingStatus;
+  bool _isStatusDropdownOpen = false;
+  final GlobalKey _statusDropdownKey = GlobalKey();
+  bool _isPaymentMethodDropdownOpen = false;
+  bool _isAgentDropdownOpen = false;
+  int _currentPaymentIndex = 0;
+
+  // Layout expand/collapse and zoom state
+  Set<int> _collapsedLayouts = {}; // Set of collapsed layout indices
+  double _tableZoomLevel =
+      1.0; // Table zoom level (1.0 = 100%, 0.5 = 50%, 1.2 = 120%, etc.)
+  String _areaUnit = 'Square Feet (sqft)';
+  bool get _isSqm => AreaUnitUtils.isSqm(_areaUnit);
+  String get _areaUnitSuffix => AreaUnitUtils.unitSuffix(_isSqm);
+
   // Helper function to format decimal values
   String _formatDecimal(dynamic value) {
     if (value == null) return '0.00';
@@ -160,13 +228,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     return '0.00';
   }
-  
+
   // Helper function to format date from database (YYYY-MM-DD) to UI format (DD/MM/YYYY)
   String _formatDateFromDatabase(dynamic value) {
     if (value == null) return '';
     final dateStr = value.toString().trim();
     if (dateStr.isEmpty) return '';
-    
+
     // Try to parse ISO format (YYYY-MM-DD)
     final isoPattern = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$');
     final match = isoPattern.firstMatch(dateStr);
@@ -176,23 +244,122 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       final day = match.group(3) ?? '';
       return '$day/$month/$year';
     }
-    
+
     // If already in DD/MM/YYYY format, return as is
     return dateStr;
+  }
+
+  PlotStatus _parsePlotStatus(dynamic statusData) {
+    if (statusData is PlotStatus) return statusData;
+    if (statusData is String) {
+      return PlotStatus.values.firstWhere(
+        (e) => e.name == statusData.toLowerCase(),
+        orElse: () => PlotStatus.available,
+      );
+    }
+    return PlotStatus.available;
+  }
+
+  void _syncEditingPlotToAllPlots() {
+    if (_editingLayoutIndex == null || _editingPlotIndex == null) return;
+    print(
+        '🔄 SYNC: Starting sync for layout=$_editingLayoutIndex, plot=$_editingPlotIndex');
+    final layout = _layouts[_editingLayoutIndex!];
+    final plots = layout['plots'] as List<dynamic>? ?? [];
+    if (_editingPlotIndex! >= plots.length) return;
+    final plot = plots[_editingPlotIndex!] as Map<String, dynamic>;
+    final layoutName = layout['name'] as String? ?? '';
+    final plotNumber = plot['plotNumber'] as String? ?? '';
+    final status = _parsePlotStatus(plot['status']);
+    print(
+        '🔄 SYNC: Plot data - layout=$layoutName, plot=$plotNumber, status=$status');
+
+    for (var plotData in _allPlots) {
+      final matchesByIndex = plotData['layoutIndex'] == _editingLayoutIndex &&
+          plotData['plotIndex'] == _editingPlotIndex;
+      final matchesByName =
+          (plotData['layout'] as String? ?? '') == layoutName &&
+              (plotData['plotNumber'] as String? ?? '') == plotNumber;
+      if (matchesByIndex || matchesByName) {
+        print('🔄 SYNC: Found match, updating _allPlots entry');
+        plotData['layout'] = layoutName;
+        plotData['layoutIndex'] = _editingLayoutIndex;
+        plotData['plotIndex'] = _editingPlotIndex;
+        plotData['plotNumber'] = plotNumber;
+        plotData['status'] = status;
+        plotData['salePrice'] = plot['salePrice'] as String? ?? '';
+        plotData['buyerName'] = plot['buyerName'] as String? ?? '';
+        plotData['agent'] = plot['agent'] as String? ?? '';
+        plotData['saleDate'] = plot['saleDate'] as String? ?? '';
+        plotData['payments'] = (plot['payments'] as List<dynamic>?) ?? [];
+        print(
+            '🔄 SYNC: Updated with status=$status, price=${plotData['salePrice']}, buyer=${plotData['buyerName']}');
+        break;
+      }
+    }
+    print('🔄 SYNC: Completed');
+  }
+
+  void _rebuildAllPlotsFromLayouts() {
+    print('🔨 REBUILD: Starting full rebuild from _layouts');
+    final rebuilt = <Map<String, dynamic>>[];
+    for (var layoutIndex = 0; layoutIndex < _layouts.length; layoutIndex++) {
+      final layout = _layouts[layoutIndex];
+      final layoutName = layout['name'] as String? ?? '';
+      final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
+      for (var plotIndex = 0; plotIndex < plots.length; plotIndex++) {
+        final plot = plots[plotIndex];
+        rebuilt.add({
+          'layout': layoutName,
+          'layoutIndex': layoutIndex,
+          'plotIndex': plotIndex,
+          'plotNumber': plot['plotNumber'] as String? ?? '',
+          'area': plot['area'] as String? ?? '0.00',
+          'status': _parsePlotStatus(plot['status']),
+          'purchaseRate': plot['purchaseRate'] as String? ?? '0.00',
+          'totalPlotCost': plot['totalPlotCost'] as String? ?? '0.00',
+          'salePrice': plot['salePrice'] as String? ?? '',
+          'buyerName': plot['buyerName'] as String? ?? '',
+          'agent': plot['agent'] as String? ?? '',
+          'saleDate': plot['saleDate'] as String? ?? '',
+          'payments': (plot['payments'] as List<dynamic>?) ?? [],
+        });
+      }
+    }
+
+    _allPlots = rebuilt;
+    print(
+        '🔨 REBUILD: Completed. Total plots in _allPlots: ${_allPlots.length}');
+  }
+
+  void _removePaymentBlock(int paymentIndex) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= 0 && paymentIndex < payments.length) {
+      payments.removeAt(paymentIndex);
+      setState(() {
+        _syncEditingPlotToAllPlots();
+      });
+      _saveLayoutsData();
+    }
   }
 
   // Get available agents list
   List<String> get _availableAgents {
     final List<String> agents = ['Direct Sale']; // Direct Sale is always first
-    
+
     // First, try to use agents from widget (if passed directly)
     List<Map<String, dynamic>> agentsToUse = widget.agents ?? [];
-    
+
     // If not provided, use stored agents
     if (agentsToUse.isEmpty) {
       agentsToUse = _storedAgents;
     }
-    
+
     // Add agents from the agent section
     for (var agent in agentsToUse) {
       final agentName = agent['name']?.toString().trim() ?? '';
@@ -200,14 +367,26 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         agents.add(agentName);
       }
     }
-    
+
     return agents;
   }
-  
+
   @override
   void initState() {
     super.initState();
-    _loadPlotData(); // This now also loads agents
+    _loadPlotDataAndNotify();
+  }
+
+  Future<void> _loadPlotDataAndNotify() async {
+    await _loadPlotData();
+    _notifyErrorState();
+  }
+
+  void _notifyErrorState() {
+    final hasErrors = _hasValidationErrors();
+    print(
+        '🔴 PlotStatusPage._notifyErrorState: hasErrors=$hasErrors, callback=${widget.onPlotStatusErrorsChanged != null}');
+    widget.onPlotStatusErrorsChanged?.call(hasErrors);
   }
 
   @override
@@ -231,8 +410,21 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var focusNode in _saleDateFocusNodes.values) {
       focusNode.dispose();
     }
+    for (var focusNode in _paymentAmountFocusNodes.values) {
+      focusNode.dispose();
+    }
+    for (var focusNode in _paymentTextFocusNodes.values) {
+      focusNode.dispose();
+    }
+    for (var controller in _paymentAmountControllers.values) {
+      controller.dispose();
+    }
+    for (var controller in _paymentTextControllers.values) {
+      controller.dispose();
+    }
     // Dispose scroll controllers
     _plotStatusTableScrollController.dispose();
+    _editDialogScrollController.dispose();
     for (var controller in _layoutTableScrollControllers.values) {
       controller.dispose();
     }
@@ -240,23 +432,42 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     super.dispose();
   }
 
+  FocusNode _createDialogFocusNode() {
+    final node = FocusNode();
+    node.addListener(() {
+      if (mounted) setState(() {});
+    });
+    return node;
+  }
+
   Future<void> _loadPlotData() async {
+    _areaUnit = await AreaUnitService.getAreaUnit(widget.projectId);
     List<Map<String, dynamic>> sourceLayouts = widget.layouts ?? [];
     List<Map<String, dynamic>> agents = [];
-    
+
+    print(
+        '🔵 _loadPlotData ENTRY: widget.layouts=${widget.layouts?.length ?? "null"}, widget.projectId=${widget.projectId}');
+
     // If projectId is available, load from database first
     if (widget.projectId != null && widget.projectId!.isNotEmpty) {
       try {
-        print('PlotStatusPage: Loading data from database for projectId=${widget.projectId}');
-        
+        print(
+            'PlotStatusPage: Loading data from database for projectId=${widget.projectId}');
+
         // Load layouts from database
         final layouts = await _supabase
             .from('layouts')
             .select('id, name')
             .eq('project_id', widget.projectId!);
-        
+
+        print('📥 LOADED LAYOUTS FROM DB: ${layouts.length} layouts');
+        for (var i = 0; i < layouts.length; i++) {
+          print(
+              '   Layout $i: id=${layouts[i]['id']}, name=${layouts[i]['name']}');
+        }
+
         final layoutsData = <Map<String, dynamic>>[];
-        
+
         if (layouts.isNotEmpty) {
           for (var layout in layouts) {
             final layoutId = layout['id'];
@@ -265,7 +476,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 .select()
                 .eq('layout_id', layoutId)
                 .order('created_at', ascending: true);
-            
+
+            print('   📥 Layout ${layout['name']} has ${plots.length} plots');
+            for (var p = 0; p < plots.length; p++) {
+              print(
+                  '      Plot $p: plotNumber=${plots[p]['plot_number']}, status=${plots[p]['status']}');
+            }
+
             final plotsData = <Map<String, dynamic>>[];
             for (var plot in plots) {
               // Load plot partners
@@ -273,7 +490,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   .from('plot_partners')
                   .select('partner_name')
                   .eq('plot_id', plot['id']);
-              
+
               // Parse status string to PlotStatus enum
               PlotStatus plotStatus = PlotStatus.available;
               final statusString = (plot['status'] ?? 'available').toString();
@@ -285,81 +502,120 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               } catch (e) {
                 plotStatus = PlotStatus.available;
               }
-              
+
+              // Log what payments data is in the database for this plot
+              final paymentsFromDb = plot['payments'];
+              print(
+                  '📥 LOADING Plot ${plot['plot_number']}: payments from DB = ${paymentsFromDb.runtimeType} - $paymentsFromDb');
+
               plotsData.add({
                 'plotNumber': (plot['plot_number'] ?? '').toString(),
                 'area': _formatDecimal(plot['area'] ?? 0.0),
-                'purchaseRate': _formatDecimal(plot['all_in_cost_per_sqft'] ?? 0.0),
+                'purchaseRate':
+                    _formatDecimal(plot['all_in_cost_per_sqft'] ?? 0.0),
                 'totalPlotCost': _formatDecimal(plot['total_plot_cost'] ?? 0.0),
                 'status': plotStatus,
-                'salePrice': plot['sale_price'] != null && plot['sale_price'] != 0 ? _formatDecimal(plot['sale_price']) : '',
+                'salePrice':
+                    plot['sale_price'] != null && plot['sale_price'] != 0
+                        ? _formatDecimal(plot['sale_price'])
+                        : '',
                 'buyerName': (plot['buyer_name'] ?? '').toString(),
                 'saleDate': _formatDateFromDatabase(plot['sale_date']),
                 'agent': (plot['agent_name'] ?? '').toString(),
-                'partners': plotPartners.map((p) => (p['partner_name'] ?? '').toString()).toList(),
+                'partners': plotPartners
+                    .map((p) => (p['partner_name'] ?? '').toString())
+                    .toList(),
+                'payments': (plot['payments'] as List<dynamic>?) ?? [],
               });
             }
-            
+
             layoutsData.add({
               'name': (layout['name'] ?? '').toString(),
               'plots': plotsData,
             });
           }
         }
-        
-        sourceLayouts = layoutsData;
-        
+
+        print('📥 TOTAL LAYOUTS FROM DB TO ADD: ${layoutsData.length} layouts');
+        for (var i = 0; i < layoutsData.length; i++) {
+          final plots = layoutsData[i]['plots'] as List<dynamic>? ?? [];
+          print(
+              '   Loaded Layout $i (${layoutsData[i]['name']}): ${plots.length} plots');
+        }
+
+        // Only use database data if we have layouts with actual plots
+        // Otherwise fall back to local storage which may have more recent data
+        final hasAnyPlots = layoutsData.any((layout) =>
+            (layout['plots'] as List<dynamic>?)?.isNotEmpty ?? false);
+
+        if (hasAnyPlots) {
+          sourceLayouts = layoutsData;
+          print(
+              '✅ Using database layouts (has ${layoutsData.length} layouts with plots)');
+        } else {
+          print('⚠️ Database has layouts but no plots, will try local storage');
+        }
+
         // Load agents from database
         final agentsData = await _supabase
             .from('agents')
             .select('name')
             .eq('project_id', widget.projectId!);
-        
-        agents = agentsData.map((a) => {
-          'name': (a['name'] ?? '').toString(),
-        }).toList();
-        
-        print('PlotStatusPage: Loaded ${sourceLayouts.length} layouts and ${agents.length} agents from database');
+
+        agents = agentsData
+            .map((a) => {
+                  'name': (a['name'] ?? '').toString(),
+                })
+            .toList();
+
+        print(
+            'PlotStatusPage: Loaded ${sourceLayouts.length} layouts and ${agents.length} agents from database');
       } catch (e, stackTrace) {
         print('PlotStatusPage: Error loading from database: $e');
         print('Stack trace: $stackTrace');
         // Fall back to local storage if database load fails
       }
     }
-    
+
     // Fallback to local storage or provided layouts if database load didn't work
     if (sourceLayouts.isEmpty) {
+      print('⚠️ sourceLayouts is empty, loading from local storage');
       sourceLayouts = await LayoutStorageService.loadLayoutsData();
+      print('📥 Loaded from local storage: ${sourceLayouts.length} layouts');
     }
-    
+
     // Fallback to local storage for agents if not loaded from database
     if (agents.isEmpty) {
       agents = await LayoutStorageService.loadAgentsData();
     }
-    
+
     // Cleanup: Revert any incomplete sold plots back to available in the database
     if (widget.projectId != null && widget.projectId!.isNotEmpty) {
       await _cleanupIncompleteSoldPlots();
     }
-    
+
     // Convert layout data from Site section format to plot status format
     setState(() {
       _storedAgents = agents;
       _layouts = _convertLayoutsData(sourceLayouts);
       _allPlots = [];
-      
+
       // Populate _allPlots from layouts for filtering/search
-      for (var layout in _layouts) {
+      for (var layoutIndex = 0; layoutIndex < _layouts.length; layoutIndex++) {
+        final layout = _layouts[layoutIndex];
         final layoutName = layout['name'] as String? ?? '';
         final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
-        for (var plot in plots) {
+        for (var plotIndex = 0; plotIndex < plots.length; plotIndex++) {
+          final plot = plots[plotIndex];
           _allPlots.add({
             'layout': layoutName,
+            'layoutIndex': layoutIndex,
+            'plotIndex': plotIndex,
             'plotNumber': plot['plotNumber'] as String? ?? '',
             'area': plot['area'] as String? ?? '0.00',
-            'status': plot['status'] is PlotStatus 
-                ? plot['status'] as PlotStatus 
-                : (plot['status'] is String 
+            'status': plot['status'] is PlotStatus
+                ? plot['status'] as PlotStatus
+                : (plot['status'] is String
                     ? PlotStatus.values.firstWhere(
                         (e) => e.name == plot['status'].toString(),
                         orElse: () => PlotStatus.available,
@@ -371,17 +627,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             'buyerName': plot['buyerName'] as String? ?? '',
             'agent': plot['agent'] as String? ?? '',
             'saleDate': plot['saleDate'] as String? ?? '',
+            'payments': (plot['payments'] as List<dynamic>?) ?? [],
           });
         }
       }
-      
+
       print('PlotStatusPage: Loaded ${_allPlots.length} plots total');
-      
+
       // Initialize controllers for sale price, buyer name, and sale date from loaded data
       _initializeControllersFromData();
     });
   }
-  
+
   void _initializeControllersFromData() {
     // Dispose old controllers first
     for (var controller in _salePriceControllers.values) {
@@ -396,72 +653,83 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     _salePriceControllers.clear();
     _buyerNameControllers.clear();
     _saleDateControllers.clear();
-    
+
     // Initialize controllers with data from _layouts
     for (int layoutIndex = 0; layoutIndex < _layouts.length; layoutIndex++) {
       final plots = _layouts[layoutIndex]['plots'] as List<dynamic>? ?? [];
       for (int plotIndex = 0; plotIndex < plots.length; plotIndex++) {
         final plot = plots[plotIndex] as Map<String, dynamic>;
-        final status = plot['status'] is PlotStatus 
-            ? plot['status'] as PlotStatus 
-            : (plot['status'] is String 
+        final status = plot['status'] is PlotStatus
+            ? plot['status'] as PlotStatus
+            : (plot['status'] is String
                 ? PlotStatus.values.firstWhere(
                     (e) => e.name == plot['status'].toString(),
                     orElse: () => PlotStatus.available,
                   )
                 : PlotStatus.available);
-        
+
         if (status == PlotStatus.sold) {
           // Initialize sale price controller
           final priceKey = '${layoutIndex}_${plotIndex}_price';
           final salePrice = plot['salePrice'] as String?;
           _salePriceControllers[priceKey] = TextEditingController(
-            text: (salePrice != null && salePrice.isNotEmpty && salePrice != '0.00') ? salePrice : '',
+            text: (salePrice != null &&
+                    salePrice.isNotEmpty &&
+                    salePrice != '0.00')
+                ? salePrice
+                : '',
           );
-          
+          _salePriceFocusNodes[priceKey] = _createDialogFocusNode();
+
           // Initialize buyer name controller
           final buyerKey = '${layoutIndex}_${plotIndex}_buyer';
           final buyerName = plot['buyerName'] as String? ?? '';
           _buyerNameControllers[buyerKey] = TextEditingController(
             text: buyerName,
           );
-          
+          _buyerNameFocusNodes[buyerKey] = _createDialogFocusNode();
+
           // Initialize sale date controller
           final dateKey = '${layoutIndex}_${plotIndex}_date';
           final saleDate = plot['saleDate'] as String? ?? '';
           _saleDateControllers[dateKey] = TextEditingController(
             text: saleDate,
           );
+          _saleDateFocusNodes[dateKey] = _createDialogFocusNode();
         }
       }
     }
-    
-    print('PlotStatusPage: Initialized ${_salePriceControllers.length} sale price controllers, ${_buyerNameControllers.length} buyer name controllers, ${_saleDateControllers.length} sale date controllers');
+
+    print(
+        'PlotStatusPage: Initialized ${_salePriceControllers.length} sale price controllers, ${_buyerNameControllers.length} buyer name controllers, ${_saleDateControllers.length} sale date controllers');
   }
 
   Future<void> _cleanupIncompleteSoldPlots() async {
     /// This function cleans up the database by reverting any "sold" plots that don't have all required fields
     /// It queries all sold plots and checks if they have complete data (agent, buyer_name, sale_price, sale_date)
     /// If any field is missing, it reverts the status back to 'available'
+    // Disabled to allow saving status as Sold even when details are added later.
+    return;
     try {
-      print('_cleanupIncompleteSoldPlots: Starting cleanup of incomplete sold plots...');
-      
+      print(
+          '_cleanupIncompleteSoldPlots: Starting cleanup of incomplete sold plots...');
+
       // Get all layouts for this project
       final layouts = await _supabase
           .from('layouts')
           .select('id')
           .eq('project_id', widget.projectId!);
-      
+
       for (var layout in layouts) {
         final layoutId = layout['id'] as String;
-        
+
         // Get all sold plots for this layout
         final soldPlots = await _supabase
             .from('plots')
             .select()
             .eq('layout_id', layoutId)
             .eq('status', 'sold');
-        
+
         // Check each sold plot and revert if incomplete
         for (var plot in soldPlots) {
           final plotId = plot['id'] as String;
@@ -469,24 +737,24 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           final buyerName = (plot['buyer_name'] as String? ?? '').trim();
           final salePrice = plot['sale_price'];
           final saleDate = (plot['sale_date'] as String? ?? '').trim();
-          
-          final isComplete = agent.isNotEmpty && 
-                            buyerName.isNotEmpty && 
-                            salePrice != null && 
-                            salePrice != 0 &&
-                            saleDate.isNotEmpty;
-          
+
+          final isComplete = agent.isNotEmpty &&
+              buyerName.isNotEmpty &&
+              salePrice != null &&
+              salePrice != 0 &&
+              saleDate.isNotEmpty;
+
           if (!isComplete) {
-            print('_cleanupIncompleteSoldPlots: Reverting plot $plotId to available');
+            print(
+                '_cleanupIncompleteSoldPlots: Reverting plot $plotId to available');
             // Revert status to available
             await _supabase
                 .from('plots')
-                .update({'status': 'available'})
-                .eq('id', plotId);
+                .update({'status': 'available'}).eq('id', plotId);
           }
         }
       }
-      
+
       print('_cleanupIncompleteSoldPlots: Cleanup completed');
     } catch (e) {
       print('_cleanupIncompleteSoldPlots: Error during cleanup: $e');
@@ -494,47 +762,87 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
   Future<void> _saveLayoutsData() async {
+    print(
+        '🔷 _saveLayoutsData ENTRY: Starting save, _layouts has ${_layouts.length} layouts');
+
+    // Debug: Print current state  of _layouts before conversion
+    for (var i = 0; i < _layouts.length; i++) {
+      final layout = _layouts[i];
+      final plots = layout['plots'] as List<dynamic>? ?? [];
+      print(
+          'PRE-CONVERSION Layout $i (${layout['name']}): ${plots.length} plots');
+      for (var j = 0; j < plots.length; j++) {
+        final plot = plots[j] as Map<String, dynamic>? ?? {};
+        print(
+            '  Plot $j: plotNumber=${plot['plotNumber']}, status=${plot['status']}');
+      }
+    }
+
     // Save updated layout data back to storage
     // Convert _layouts back to the format expected by storage
     final layoutsToSave = _layouts.asMap().entries.map((layoutEntry) {
       final layoutIndex = layoutEntry.key;
       final layout = layoutEntry.value;
-      final plots = (layout['plots'] as List<dynamic>).asMap().entries.map((plotEntry) {
+      final plots =
+          (layout['plots'] as List<dynamic>).asMap().entries.map((plotEntry) {
         final plotIndex = plotEntry.key;
         final plotMap = plotEntry.value as Map<String, dynamic>;
-        
+
         // Get values from controllers using the correct key format
         final priceKey = '${layoutIndex}_${plotIndex}_price';
         final buyerKey = '${layoutIndex}_${plotIndex}_buyer';
         final dateKey = '${layoutIndex}_${plotIndex}_date';
-        
+
         final salePriceController = _salePriceControllers[priceKey];
         final buyerNameController = _buyerNameControllers[buyerKey];
         final saleDateController = _saleDateControllers[dateKey];
-        
+
         // Get sale price - convert empty string to null
-        final salePriceText = salePriceController?.text.trim() ?? plotMap['salePrice']?.toString() ?? '';
-        final cleanedSalePrice = salePriceText.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-        final salePrice = (cleanedSalePrice.isEmpty || cleanedSalePrice == '0' || cleanedSalePrice == '0.00') 
-            ? null 
+        final salePriceText = salePriceController?.text.trim() ??
+            plotMap['salePrice']?.toString() ??
+            '';
+        final cleanedSalePrice = salePriceText
+            .replaceAll(',', '')
+            .replaceAll('₹', '')
+            .replaceAll(' ', '')
+            .trim();
+        final salePrice = (cleanedSalePrice.isEmpty ||
+                cleanedSalePrice == '0' ||
+                cleanedSalePrice == '0.00')
+            ? null
             : cleanedSalePrice;
-        
+
         // Get buyer name - convert empty string to null
-        final buyerNameText = buyerNameController?.text.trim() ?? plotMap['buyerName']?.toString() ?? '';
+        final buyerNameText = buyerNameController?.text.trim() ??
+            plotMap['buyerName']?.toString() ??
+            '';
         final buyerName = buyerNameText.isEmpty ? null : buyerNameText;
-        
+
         // Get agent - convert empty string to null
         final agentText = plotMap['agent']?.toString() ?? '';
         final agent = agentText.isEmpty ? null : agentText;
-        
+
         // Get sale date - convert empty string to null
-        final saleDateText = saleDateController?.text.trim() ?? plotMap['saleDate']?.toString() ?? '';
+        final saleDateText = saleDateController?.text.trim() ??
+            plotMap['saleDate']?.toString() ??
+            '';
         final saleDate = saleDateText.isEmpty ? null : saleDateText;
-        
+
         // Get partners - ensure it's a list
         final partners = plotMap['partners'] as List<dynamic>? ?? [];
         final partnersList = partners.map((p) => p.toString()).toList();
-        
+
+        // Get payments - ensure it's a list with all payment details
+        final payments = plotMap['payments'] as List<dynamic>? ?? [];
+        print(
+            'DEBUG _saveLayoutsData: LAYOUT=${layoutIndex}_PLOT=${plotIndex} - Number=${plotMap['plotNumber']}, payments=${payments.isEmpty ? "EMPTY" : "${payments.length} items"}');
+        final paymentsList = payments.map((payment) {
+          if (payment is Map<String, dynamic>) {
+            return Map<String, dynamic>.from(payment);
+          }
+          return payment;
+        }).toList();
+
         return {
           'plotNumber': plotMap['plotNumber'] as String? ?? '',
           'area': plotMap['area'] as String? ?? '0.00',
@@ -546,16 +854,30 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'agent': agent,
           'saleDate': saleDate,
           'partners': partnersList,
+          'payments': paymentsList,
         };
       }).toList();
-      
+
       return {
         'name': layout['name'] as String? ?? 'Layout',
         'plots': plots,
       };
     }).toList();
-    
+
     // Save to Supabase if projectId is available, otherwise save to local storage
+    print(
+        '🔷 _saveLayoutsData BEFORE SAVE: projectId=${widget.projectId}, layoutsToSave has ${layoutsToSave.length} layouts');
+    for (var i = 0; i < layoutsToSave.length; i++) {
+      final layout = layoutsToSave[i];
+      final plots = layout['plots'] as List<dynamic>? ?? [];
+      print('   Layout $i: ${layout['name']} - ${plots.length} plots');
+      for (var j = 0; j < plots.length; j++) {
+        final plot = plots[j] as Map<String, dynamic>? ?? {};
+        final payments = plot['payments'] as List<dynamic>? ?? [];
+        print(
+            '     Plot $j (${plot['plotNumber']}): status=${plot['status']}, payments=${payments.isEmpty ? "EMPTY" : "${payments.length} items"}');
+      }
+    }
     if (widget.projectId != null && widget.projectId!.isNotEmpty) {
       try {
         await ProjectStorageService.saveProjectData(
@@ -572,13 +894,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       // Save to local storage if no projectId
       await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
     }
+    print('🔷 _saveLayoutsData COMPLETE: Save finished successfully');
+    _notifyErrorState();
   }
 
   Future<void> _saveToStorage(List<Map<String, dynamic>> layouts) async {
     await LayoutStorageService.saveLayoutsDataDirect(layouts);
   }
 
-  List<Map<String, dynamic>> _convertLayoutsData(List<Map<String, dynamic>> sourceLayouts) {
+  List<Map<String, dynamic>> _convertLayoutsData(
+      List<Map<String, dynamic>> sourceLayouts) {
     // Convert layouts from Site section format to Plot Status format
     // Site format: plots have plotNumber, area, purchaseRate, partner (values may be in controllers)
     // Plot Status format: plots need status, salePrice, buyerName, agent, saleDate
@@ -586,41 +911,43 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     return sourceLayouts.map((layout) {
       final plots = (layout['plots'] as List<dynamic>? ?? []).map((plot) {
         final plotMap = plot as Map<String, dynamic>;
-        
+
         // Extract plot data - handle both direct values and controller-based values
         String plotNumber = '';
         String area = '0.00';
         String purchaseRate = '0.00';
         String totalPlotCost = '0.00';
-        
+
         // If plotNumber is a controller, get its text, otherwise use the value directly
         if (plotMap['plotNumber'] is TextEditingController) {
           plotNumber = (plotMap['plotNumber'] as TextEditingController).text;
         } else {
           plotNumber = plotMap['plotNumber'] as String? ?? '';
         }
-        
+
         // Same for area
         if (plotMap['area'] is TextEditingController) {
           area = (plotMap['area'] as TextEditingController).text;
         } else {
           area = plotMap['area'] as String? ?? '0.00';
         }
-        
+
         // Same for purchaseRate
         if (plotMap['purchaseRate'] is TextEditingController) {
-          purchaseRate = (plotMap['purchaseRate'] as TextEditingController).text;
+          purchaseRate =
+              (plotMap['purchaseRate'] as TextEditingController).text;
         } else {
           purchaseRate = plotMap['purchaseRate'] as String? ?? '0.00';
         }
-        
+
         // Same for totalPlotCost
         if (plotMap['totalPlotCost'] is TextEditingController) {
-          totalPlotCost = (plotMap['totalPlotCost'] as TextEditingController).text;
+          totalPlotCost =
+              (plotMap['totalPlotCost'] as TextEditingController).text;
         } else {
           totalPlotCost = plotMap['totalPlotCost'] as String? ?? '0.00';
         }
-        
+
         // Handle status - can be PlotStatus enum or string
         PlotStatus plotStatus = PlotStatus.available;
         if (plotMap['status'] is PlotStatus) {
@@ -632,7 +959,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             orElse: () => PlotStatus.available,
           );
         }
-        
+
         return {
           'plotNumber': plotNumber,
           'area': area.isEmpty ? '0.00' : area,
@@ -643,9 +970,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'saleDate': plotMap['saleDate'] as String? ?? '',
           'purchaseRate': purchaseRate.isEmpty ? '0.00' : purchaseRate,
           'totalPlotCost': totalPlotCost.isEmpty ? '0.00' : totalPlotCost,
+          'payments': (plotMap['payments'] as List<dynamic>?) ?? [],
         };
       }).toList();
-      
+
       // Extract layout name - handle controller case
       String layoutName = 'Layout';
       if (layout['name'] is TextEditingController) {
@@ -653,7 +981,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       } else {
         layoutName = layout['name'] as String? ?? 'Layout';
       }
-      
+
       return {
         'name': layoutName.isEmpty ? 'Layout' : layoutName,
         'plots': plots,
@@ -664,58 +992,51 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   Future<void> _savePlotsToDatabase() async {
     // Save plot data (including agent, status, buyer, price, date) to Supabase
     if (widget.projectId == null) return;
-    
+
     try {
       for (var layout in _layouts) {
         final layoutId = layout['layoutId'] as String?;
         if (layoutId == null) continue;
-        
+
         final plots = layout['plots'] as List<dynamic>? ?? [];
         for (var plot in plots) {
           final plotId = plot['id'] as String?;
           if (plotId == null) continue;
-          
+
           // Get values from the plot data
           // Handle status - can be PlotStatus enum or string
           var status = 'available';
           if (plot['status'] is PlotStatus) {
             status = (plot['status'] as PlotStatus).name.toLowerCase();
           } else {
-            status = (plot['status'] as String? ?? 'available').toString().toLowerCase();
+            status = (plot['status'] as String? ?? 'available')
+                .toString()
+                .toLowerCase();
           }
-          
+
           final agent = (plot['agent'] as String? ?? '').toString().trim();
-          final buyerName = (plot['buyerName'] as String? ?? '').toString().trim();
-          final salePrice = (plot['salePrice'] as String? ?? '').toString().replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-          final saleDate = (plot['saleDate'] as String? ?? '').toString().trim();
-          
-          // If status is 'sold', verify all required fields are filled
-          // If not, revert status back to 'available'
-          if (status == 'sold') {
-            final isComplete = agent.isNotEmpty && 
-                              buyerName.isNotEmpty && 
-                              salePrice.isNotEmpty && 
-                              salePrice != '0' &&
-                              salePrice != '0.00' && 
-                              saleDate.isNotEmpty;
-            
-            if (!isComplete) {
-              print('Plot $plotId incomplete - reverting status to available. Agent: "$agent", Buyer: "$buyerName", Price: "$salePrice", Date: "$saleDate"');
-              status = 'available'; // Revert to available if incomplete
-            }
-          }
-          
+          final buyerName =
+              (plot['buyerName'] as String? ?? '').toString().trim();
+          final salePrice = (plot['salePrice'] as String? ?? '')
+              .toString()
+              .replaceAll(',', '')
+              .replaceAll('₹', '')
+              .replaceAll(' ', '')
+              .trim();
+          final saleDate =
+              (plot['saleDate'] as String? ?? '').toString().trim();
+
           // Update the plot in the database
-          await _supabase
-              .from('plots')
-              .update({
-                'status': status,
-                'agent': agent.isEmpty ? null : agent,
-                'buyer_name': buyerName.isEmpty ? null : buyerName,
-                'sale_price': salePrice.isEmpty || salePrice == '0' || salePrice == '0.00' ? null : double.tryParse(salePrice),
-                'sale_date': saleDate.isEmpty ? null : saleDate,
-              })
-              .eq('id', plotId);
+          await _supabase.from('plots').update({
+            'status': status,
+            'agent': agent.isEmpty ? null : agent,
+            'buyer_name': buyerName.isEmpty ? null : buyerName,
+            'sale_price':
+                salePrice.isEmpty || salePrice == '0' || salePrice == '0.00'
+                    ? null
+                    : double.tryParse(salePrice),
+            'sale_date': saleDate.isEmpty ? null : saleDate,
+          }).eq('id', plotId);
         }
       }
       print('Successfully saved plots to database');
@@ -730,36 +1051,47 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final plot = _allPlots[index];
         final plotNumber = plot['plotNumber'] as String? ?? '';
         final layoutName = plot['layout'] as String? ?? '';
-        
+
         // If trying to set status to 'sold', check if all required fields are filled
         PlotStatus statusToSet = newStatus;
         String? warningMessage;
-        
+
         if (newStatus == PlotStatus.sold) {
           final agent = (plot['agent'] as String? ?? '').toString().trim();
-          final buyerName = (plot['buyerName'] as String? ?? '').toString().trim();
-          final salePrice = (plot['salePrice'] as String? ?? '').toString().replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-          final saleDate = (plot['saleDate'] as String? ?? '').toString().trim();
-          
+          final buyerName =
+              (plot['buyerName'] as String? ?? '').toString().trim();
+          final salePrice = (plot['salePrice'] as String? ?? '')
+              .toString()
+              .replaceAll(',', '')
+              .replaceAll('₹', '')
+              .replaceAll(' ', '')
+              .trim();
+          final saleDate =
+              (plot['saleDate'] as String? ?? '').toString().trim();
+
           // Check if any required field is missing
           final missingFields = <String>[];
           if (agent.isEmpty) missingFields.add('Agent');
           if (buyerName.isEmpty) missingFields.add('Buyer Name');
-          if (salePrice.isEmpty || salePrice == '0' || salePrice == '0.00') missingFields.add('Sale Price');
+          if (salePrice.isEmpty || salePrice == '0' || salePrice == '0.00')
+            missingFields.add('Sale Price');
           if (saleDate.isEmpty) missingFields.add('Sale Date');
-          
+
           if (missingFields.isNotEmpty) {
             statusToSet = PlotStatus.available;
-            warningMessage = 'Cannot mark as sold. Missing: ${missingFields.join(', ')}';
-            print('_updatePlotStatus: Blocking status change to sold. $warningMessage');
+            warningMessage =
+                'Cannot mark as sold. Missing: ${missingFields.join(', ')}';
+            print(
+                '_updatePlotStatus: Blocking status change to sold. $warningMessage');
           } else {
-            print('_updatePlotStatus: All required fields present, allowing status change to sold');
+            print(
+                '_updatePlotStatus: All required fields present, allowing status change to sold');
           }
         }
-        
+
         // Update _allPlots
         _allPlots[index]['status'] = statusToSet;
-        
+
         // Also update the corresponding plot in _layouts
         for (var layout in _layouts) {
           if ((layout['name'] as String? ?? '') == layoutName) {
@@ -776,7 +1108,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             break;
           }
         }
-        
+
         // Show warning if validation failed
         if (warningMessage != null) {
           Future.delayed(Duration.zero, () {
@@ -793,17 +1125,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     });
     _saveLayoutsData();
     _savePlotsToDatabase(); // Save to database
+    _notifyErrorState();
   }
 
   List<String> get _availableLayouts {
-    final layouts = _allPlots.map((plot) => plot['layout'] as String? ?? '').toSet().toList();
+    final layouts = _allPlots
+        .map((plot) => plot['layout'] as String? ?? '')
+        .toSet()
+        .toList();
     layouts.remove('');
     layouts.sort();
     return ['All Layouts', ...layouts];
   }
 
   List<Map<String, dynamic>> get _filteredPlots {
-    return _allPlots.where((plot) {
+    print(
+        '🔍 FILTER: Computing filtered plots from ${_allPlots.length} total plots');
+    final result = _allPlots.where((plot) {
       // Filter by layout
       if (_selectedLayout != 'All Layouts') {
         if ((plot['layout'] as String? ?? '') != _selectedLayout) {
@@ -813,7 +1151,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
       // Filter by status
       if (_selectedStatus != 'All Status') {
-        final plotStatus = plot['status'] as PlotStatus? ?? PlotStatus.available;
+        final plotStatus = _parsePlotStatus(plot['status']);
         final statusString = _getStatusString(plotStatus);
         if (statusString != _selectedStatus) {
           return false;
@@ -832,6 +1170,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
       return true;
     }).toList();
+    print('🔍 FILTER: Returning ${result.length} filtered plots');
+    return result;
   }
 
   List<Map<String, dynamic>> get _salesData {
@@ -839,7 +1179,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var layout in _layouts) {
       final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
       for (var plot in plots) {
-        final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
+        final status = _parsePlotStatus(plot['status']);
         if (status == PlotStatus.sold) {
           salesData.add({
             'plotNumber': plot['plotNumber'] as String? ?? '',
@@ -902,7 +1242,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       final length = integerPart.length;
       final lastThreeDigits = integerPart.substring(length - 3);
       final remainingDigits = integerPart.substring(0, length - 3);
-      
+
       String formattedRemaining = '';
       int count = 0;
       for (int i = remainingDigits.length - 1; i >= 0; i--) {
@@ -912,9 +1252,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         formattedRemaining = remainingDigits[i] + formattedRemaining;
         count++;
       }
-      
-      return formattedRemaining.isEmpty 
-          ? lastThreeDigits 
+
+      return formattedRemaining.isEmpty
+          ? lastThreeDigits
           : '$formattedRemaining,$lastThreeDigits';
     }
   }
@@ -923,12 +1263,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     if (value.trim().isEmpty) {
       return '0.00';
     }
-    
-    String cleaned = value.trim().replaceAll('₹', '').replaceAll(' ', '').replaceAll(',', '');
-    
+
+    String cleaned = value
+        .trim()
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '');
+
     String integerPart;
     String decimalPart;
-    
+
     if (!cleaned.contains('.')) {
       integerPart = cleaned.isEmpty ? '0' : cleaned;
       decimalPart = '00';
@@ -936,13 +1280,50 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       final parts = cleaned.split('.');
       integerPart = parts[0].isEmpty ? '0' : parts[0];
       decimalPart = parts.length > 1 ? parts[1] : '00';
-      decimalPart = decimalPart.length > 2 
-          ? decimalPart.substring(0, 2) 
+      decimalPart = decimalPart.length > 2
+          ? decimalPart.substring(0, 2)
           : decimalPart.padRight(2, '0');
     }
-    
+
     final formattedInteger = _formatIntegerWithIndianNumbering(integerPart);
     return '$formattedInteger.$decimalPart';
+  }
+
+  // Format amount without trailing zeros (shows "0" instead of "0.00")
+  String _formatAmountNoTrailingZeros(String value) {
+    if (value.trim().isEmpty) {
+      return '0';
+    }
+
+    String cleaned = value
+        .trim()
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '');
+
+    String integerPart;
+    String decimalPart;
+
+    if (!cleaned.contains('.')) {
+      integerPart = cleaned.isEmpty ? '0' : cleaned;
+      decimalPart = '';
+    } else {
+      final parts = cleaned.split('.');
+      integerPart = parts[0].isEmpty ? '0' : parts[0];
+      decimalPart = parts.length > 1 ? parts[1] : '';
+      // Remove trailing zeros from decimal part
+      decimalPart = decimalPart.replaceAll(RegExp(r'0+$'), '');
+      // Limit to 2 decimal places
+      if (decimalPart.length > 2) {
+        decimalPart = decimalPart.substring(0, 2);
+        decimalPart = decimalPart.replaceAll(RegExp(r'0+$'), '');
+      }
+    }
+
+    final formattedInteger = _formatIntegerWithIndianNumbering(integerPart);
+    return decimalPart.isEmpty
+        ? formattedInteger
+        : '$formattedInteger.$decimalPart';
   }
 
   @override
@@ -966,14 +1347,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var layout in _layouts) {
       final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
       for (var plot in plots) {
-        final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
+        final status = _parsePlotStatus(plot['status']);
         if (status == PlotStatus.sold) {
           final buyerName = (plot['buyerName'] as String? ?? '').trim();
           final agent = (plot['agent'] as String? ?? '').trim();
-          final salePrice = (plot['salePrice'] as String? ?? '').replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+          final salePrice = (plot['salePrice'] as String? ?? '')
+              .replaceAll(',', '')
+              .replaceAll('₹', '')
+              .replaceAll(' ', '')
+              .trim();
           final saleDate = (plot['saleDate'] as String? ?? '').trim();
-          
-          if (buyerName.isEmpty || agent.isEmpty || salePrice.isEmpty || salePrice == '0' || salePrice == '0.00' || saleDate.isEmpty) {
+
+          if (buyerName.isEmpty ||
+              agent.isEmpty ||
+              salePrice.isEmpty ||
+              salePrice == '0' ||
+              salePrice == '0.00' ||
+              saleDate.isEmpty) {
             return true;
           }
         }
@@ -991,6 +1381,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     double height = 40,
     Color backgroundColor = const Color(0xFFF8F9FA),
     double borderRadius = 8,
+    bool hasError = false,
   }) {
     return _FocusAwareInputContainer(
       focusNode: focusNode,
@@ -999,99 +1390,3753 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       height: height,
       backgroundColor: backgroundColor,
       borderRadius: borderRadius,
+      hasError: hasError,
       child: child,
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isMobile = screenWidth < 768;
-    final isTablet = screenWidth >= 768 && screenWidth < 1024;
+  bool _rowHasRequiredSoldFieldError(Map<String, dynamic> plot) {
+    final status = _parsePlotStatus(plot['status']);
+    if (status != PlotStatus.sold) return false;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Header section - Fixed at top
-        Padding(
-          padding: const EdgeInsets.only(
-            top: 0,
-            left: 0,
-            right: 24,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Plot Status',
+    final salePrice = (plot['salePrice'] as String? ?? '')
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .trim();
+    final buyerName = (plot['buyerName'] as String? ?? '').trim();
+    final agent = (plot['agent'] as String? ?? '').trim();
+    final saleDate = (plot['saleDate'] as String? ?? '').trim();
+    final payments = plot['payments'] as List<dynamic>? ?? [];
+    final hasPaymentMethod = payments.any((p) {
+      final m = p as Map<String, dynamic>;
+      return (m['paymentMethod'] as String? ?? '').trim().isNotEmpty;
+    });
+
+    final salePriceMissing =
+        salePrice.isEmpty || salePrice == '0' || salePrice == '0.00';
+    return salePriceMissing ||
+        buyerName.isEmpty ||
+        agent.isEmpty ||
+        saleDate.isEmpty ||
+        !hasPaymentMethod;
+  }
+
+  void _showFilterDropdown(BuildContext context) {
+    // Calculate totals
+    int totalPlots = 0;
+    int availablePlots = 0;
+    int soldPlots = 0;
+
+    for (var layout in _layouts) {
+      final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
+      for (var plot in plots) {
+        final status = _parsePlotStatus(plot['status']);
+        totalPlots++;
+
+        if (status == PlotStatus.sold) {
+          soldPlots++;
+        } else if (status == PlotStatus.available) {
+          availablePlots++;
+        }
+      }
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.transparent,
+      builder: (BuildContext dialogContext) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () {
+                  Navigator.of(dialogContext).pop();
+                },
+                child: Container(),
+              ),
+            ),
+            Positioned(
+              top: 200,
+              right: 650,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  width: 160,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x80000000),
+                        blurRadius: 2,
+                        offset: Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Sold option
+                      _buildFilterOption(
+                        label: 'Sold ($soldPlots)',
+                        color: const Color(0xFFF44336),
+                        isSelected: _selectedStatus == 'Sold',
+                        onTap: () {
+                          print('Selected: Sold');
+                          setState(() {
+                            _selectedStatus = 'Sold';
+                          });
+                          Navigator.of(dialogContext).pop();
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      // Available option
+                      _buildFilterOption(
+                        label: 'Available ($availablePlots)',
+                        color: const Color(0xFF4CAF50),
+                        isSelected: _selectedStatus == 'Available',
+                        onTap: () {
+                          print('Selected: Available');
+                          setState(() {
+                            _selectedStatus = 'Available';
+                          });
+                          Navigator.of(dialogContext).pop();
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      // All option
+                      _buildFilterOption(
+                        label: 'All ($totalPlots)',
+                        color: const Color(0xFF0C8CE9),
+                        isSelected: _selectedStatus == 'All Status',
+                        onTap: () {
+                          print('Selected: All');
+                          setState(() {
+                            _selectedStatus = 'All Status';
+                          });
+                          Navigator.of(dialogContext).pop();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Helper widget to build a single filter option
+  Widget _buildFilterOption({
+    required String label,
+    required Color color,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    final bool isSold = color.value == const Color(0xFFF44336).value;
+    final bool isAvailable = color.value == const Color(0xFF4CAF50).value;
+    final bool isAll = color.value == const Color(0xFF0C8CE9).value;
+
+    final Color backgroundColor = isSelected
+        ? (isSold
+            ? const Color(0xFFF9E5E6)
+            : isAvailable
+                ? const Color(0xFFD1EDD2)
+                : const Color(0xFFEFF5F9))
+        : Colors.white;
+
+    final List<BoxShadow> optionShadow = isSelected
+        ? [
+            BoxShadow(
+              color: isAll ? const Color(0xFF0C8CE9) : const Color(0x40000000),
+              blurRadius: 2,
+              offset: const Offset(0, 0),
+            ),
+          ]
+        : const [
+            BoxShadow(
+              color: Color(0x40000000),
+              blurRadius: 2,
+              offset: Offset(0, 0),
+            ),
+          ];
+
+    return GestureDetector(
+      onTap: () {
+        print('FilterOption tapped: $label, isSelected: $isSelected');
+        onTap();
+      },
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: optionShadow,
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.white,
+                  width: 1,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
                 style: GoogleFonts.inter(
-                  fontSize: isMobile ? 28 : isTablet ? 32 : 36,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
                   color: Colors.black,
                 ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                'Manage plot availability, holds, and sales with buyer and pricing details.',
-                style: GoogleFonts.inter(
-                  fontSize: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  @override
+  Widget build(BuildContext context) {
+    print('🔨 BUILD: Widget rebuilding. _allPlots count: ${_allPlots.length}');
+    final screenWidth = MediaQuery.of(context).size.width;
+    final scaleMetrics = AppScaleMetrics.of(context);
+    final tabLineWidth = scaleMetrics?.designViewportWidth ?? screenWidth;
+    final extraTabLineWidth =
+        tabLineWidth > screenWidth ? tabLineWidth - screenWidth : 0.0;
+    final isMobile = screenWidth < 768;
+    final isTablet = screenWidth >= 768 && screenWidth < 1024;
+
+    return Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Header section - Fixed at top
+            Padding(
+              padding: const EdgeInsets.only(
+                top: 24,
+                left: 24,
+                right: 24,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Plot Status',
+                          style: GoogleFonts.inter(
+                            fontSize: 32,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black,
+                            height: 40 / 32, // 125% line-height
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Track and update the status of each plot.',
+                          style: GoogleFonts.inter(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w400,
+                            color: Colors.black.withOpacity(0.8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  AreaUnitSelector(
+                    selectedUnit: _areaUnit,
+                    projectId: widget.projectId,
+                    onUnitChanged: (unit) => setState(() => _areaUnit = unit),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Full-width TabBar
+            SizedBox(
+              height: 32,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned(
+                    left: 0,
+                    right: -extraTabLineWidth,
+                    bottom: 0,
+                    child: Container(
+                      height: 0.5,
+                      color: const Color(0xFF5C5C5C),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      const SizedBox(width: 24),
+                      Stack(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.topCenter,
+                        children: [
+                          Container(
+                            height: 32,
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            decoration: const BoxDecoration(
+                              border: Border(
+                                bottom: BorderSide(
+                                  color: Color(0xFF0C8CE9),
+                                  width: 2,
+                                ),
+                              ),
+                            ),
+                            child: Center(
+                              child: Text(
+                                "Site",
+                                style: GoogleFonts.inter(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w500,
+                                  color: const Color(0xFF0C8CE9),
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_hasValidationErrors())
+                            Positioned(
+                              top: -8,
+                              child: SvgPicture.asset(
+                                'assets/images/Error_msg.svg',
+                                width: 17,
+                                height: 15,
+                                fit: BoxFit.contain,
+                                errorBuilder: (context, error, stackTrace) {
+                                  print('Error loading Error_msg.svg: $error');
+                                  return const SizedBox(
+                                    width: 17,
+                                    height: 15,
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Content - Scrollable
+            Expanded(
+              child: ScrollbarTheme(
+                data: ScrollbarThemeData(
+                  thickness: MaterialStateProperty.all(8),
+                  thumbVisibility: MaterialStateProperty.all(true),
+                  radius: const Radius.circular(4),
+                  minThumbLength: 233,
+                ),
+                child: Scrollbar(
+                  controller: _scrollController,
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    clipBehavior: Clip.hardEdge,
+                    padding: const EdgeInsets.only(
+                      top: 28,
+                      left: 24,
+                      right: 24,
+                      bottom: 24,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Overall Sales card
+                        Builder(
+                          builder: (context) {
+                            // Calculate totals from all layouts
+                            double totalAreaSold = 0.0;
+                            double totalSalesPrice =
+                                0.0; // Sum of sale price column (₹/sqft)
+                            double totalSaleValue =
+                                0.0; // Sum of sale value column (₹)
+                            int totalPlots = 0;
+                            int availablePlots = 0;
+                            int soldPlots = 0;
+
+                            for (var layout in _layouts) {
+                              final plots = layout['plots']
+                                      as List<Map<String, dynamic>>? ??
+                                  [];
+                              for (var plot in plots) {
+                                final status = _parsePlotStatus(plot['status']);
+                                totalPlots++;
+
+                                if (status == PlotStatus.sold) {
+                                  final area = double.tryParse(
+                                          plot['area'] as String? ?? '0.00') ??
+                                      0.0;
+                                  final salePriceStr =
+                                      (plot['salePrice'] as String? ?? '0.00')
+                                          .replaceAll(',', '')
+                                          .replaceAll('₹', '')
+                                          .replaceAll(' ', '')
+                                          .trim();
+                                  final salePrice =
+                                      double.tryParse(salePriceStr) ?? 0.0;
+                                  totalAreaSold += area;
+                                  totalSalesPrice +=
+                                      salePrice; // Sum of sale price per sqft
+                                  totalSaleValue += salePrice *
+                                      area; // Sum of sale value (price * area)
+                                  soldPlots++;
+                                } else if (status == PlotStatus.available) {
+                                  availablePlots++;
+                                }
+                              }
+                            }
+
+                            // Calculate average sale price
+                            double avgSalePrice = 0.0;
+                            if (totalAreaSold > 0) {
+                              avgSalePrice = totalSaleValue / totalAreaSold;
+                            }
+
+                            return Container(
+                              width: 904,
+                              margin: const EdgeInsets.only(bottom: 24),
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF8F9FA),
+                                borderRadius: BorderRadius.circular(8),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.25),
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 0),
+                                    spreadRadius: 0,
+                                  ),
+                                ],
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Title
+                                  Text(
+                                    "Overall Sales",
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: const Color(0xFF5C5C5C),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  // Three columns layout
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      // Column 1: Total Sale Value and Total Area Sold
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            // Total Sale Value
+                                            SizedBox(
+                                              height: 36,
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Text(
+                                                    "Total Sale Value: ",
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  Row(
+                                                    children: [
+                                                      Text(
+                                                        "₹",
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: const Color(
+                                                              0xFF5C5C5C),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Text(
+                                                        _formatAmountNoTrailingZeros(
+                                                            totalSaleValue
+                                                                .toString()),
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            // Total Area Sold
+                                            Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.center,
+                                              children: [
+                                                Text(
+                                                  "Total Area Sold:",
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 14,
+                                                    fontWeight: FontWeight.w500,
+                                                    color: Colors.black,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(horizontal: 8),
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                          minHeight: 36),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      Text(
+                                                        _formatAmountNoTrailingZeros(
+                                                            AreaUnitUtils
+                                                                    .areaFromSqftToDisplay(
+                                                                        totalAreaSold,
+                                                                        _isSqm)
+                                                                .toString()),
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Text(
+                                                        _areaUnitSuffix,
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: const Color(
+                                                              0xFF5C5C5C),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 24),
+                                      // Column 2: Avg Sale Price and Total Plots
+                                      SizedBox(
+                                        width: 301,
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            // Avg Sale Price
+                                            SizedBox(
+                                              height: 36,
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Text(
+                                                    "Avg Sale Price: ",
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  Row(
+                                                    children: [
+                                                      Text(
+                                                        "₹/$_areaUnitSuffix",
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: const Color(
+                                                              0xFF5C5C5C),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Text(
+                                                        _formatAmountNoTrailingZeros(
+                                                            AreaUnitUtils
+                                                                    .rateFromSqftToDisplay(
+                                                                        avgSalePrice,
+                                                                        _isSqm)
+                                                                .toString()),
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            // Total Plots
+                                            Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.center,
+                                              children: [
+                                                Text(
+                                                  "Total Plots:",
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 14,
+                                                    fontWeight: FontWeight.w500,
+                                                    color: Colors.black,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(horizontal: 8),
+                                                  height: 36,
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Text(
+                                                    totalPlots.toString(),
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 24),
+                                      // Column 3: Available and Sold
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            // Available
+                                            SizedBox(
+                                              height: 36,
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Container(
+                                                    width: 16,
+                                                    height: 16,
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(
+                                                          0xFF4CAF50),
+                                                      shape: BoxShape.circle,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    "Available:",
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    availablePlots.toString(),
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            // Sold
+                                            SizedBox(
+                                              height: 36,
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Container(
+                                                    width: 16,
+                                                    height: 16,
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(
+                                                          0xFFF44336),
+                                                      shape: BoxShape.circle,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    "Sold:",
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    soldPlots.toString(),
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 24),
+                        // Layouts heading with expand/collapse/zoom controls
+                        Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Layouts',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                                // Expand all layouts button
+                                Row(
+                                  children: [
+                                    // Filter button
+                                    GestureDetector(
+                                      onTap: () {
+                                        print(
+                                            'Filter button tapped, showing dropdown');
+                                        _showFilterDropdown(context);
+                                      },
+                                      child: Container(
+                                        height: 36,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16, vertical: 8),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          color: Colors.white,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.25),
+                                              blurRadius: 2,
+                                              offset: const Offset(0, 0),
+                                              spreadRadius: 0,
+                                            ),
+                                          ],
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            SvgPicture.asset(
+                                              'assets/images/Filter.svg',
+                                              width: 16,
+                                              height: 10,
+                                              fit: BoxFit.contain,
+                                              placeholderBuilder: (context) =>
+                                                  const SizedBox(
+                                                width: 16,
+                                                height: 10,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              'Filter',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w400,
+                                                color: Colors.black,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 24),
+                                    GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _collapsedLayouts.clear();
+                                        });
+                                      },
+                                      child: Container(
+                                        width: 188,
+                                        height: 36,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          color: Colors.white,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.25),
+                                              blurRadius: 2,
+                                              offset: const Offset(0, 0),
+                                              spreadRadius: 0,
+                                            ),
+                                          ],
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                'Expand all layouts',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w400,
+                                                  color: Colors.black,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 16),
+                                            SizedBox(
+                                              width: 14,
+                                              height: 7,
+                                              child: Center(
+                                                child: SvgPicture.asset(
+                                                  'assets/images/Expand.svg',
+                                                  width: 14,
+                                                  height: 7,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 14,
+                                                    height: 7,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 24),
+                                    // Collapse all layouts button
+                                    GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _collapsedLayouts.clear();
+                                          // Add all layout indices to collapsed set
+                                          for (int i = 0;
+                                              i < _layouts.length;
+                                              i++) {
+                                            _collapsedLayouts.add(i);
+                                          }
+                                        });
+                                      },
+                                      child: Container(
+                                        width: 210,
+                                        height: 36,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          color: Colors.white,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.25),
+                                              blurRadius: 2,
+                                              offset: const Offset(0, 0),
+                                              spreadRadius: 0,
+                                            ),
+                                          ],
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                'Collapse all layouts',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w400,
+                                                  color: Colors.black,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 16),
+                                            SizedBox(
+                                              width: 14,
+                                              height: 7,
+                                              child: Center(
+                                                child: SvgPicture.asset(
+                                                  'assets/images/Collapse.svg',
+                                                  width: 14,
+                                                  height: 7,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 14,
+                                                    height: 7,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 24),
+                                    // Zoom label and controls
+                                    Text(
+                                      'Zoom',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        color: Colors.black,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    // Zoom out button
+                                    GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _tableZoomLevel =
+                                              (_tableZoomLevel - 0.1)
+                                                  .clamp(0.5, 1.2);
+                                        });
+                                      },
+                                      child: Container(
+                                        width: 36,
+                                        height: 36,
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.25),
+                                              blurRadius: 2,
+                                              offset: const Offset(0, 0),
+                                              spreadRadius: 0,
+                                            ),
+                                          ],
+                                        ),
+                                        child: SvgPicture.asset(
+                                          'assets/images/Zoom_out.svg',
+                                          width: 36,
+                                          height: 36,
+                                          fit: BoxFit.contain,
+                                          placeholderBuilder: (context) =>
+                                              const SizedBox(
+                                            width: 36,
+                                            height: 36,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    // Zoom percentage display
+                                    SizedBox(
+                                      width: 50,
+                                      child: Text(
+                                        '${(_tableZoomLevel * 100).toInt()}%',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: Colors.black,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    // Zoom in button
+                                    GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _tableZoomLevel =
+                                              (_tableZoomLevel + 0.1)
+                                                  .clamp(0.5, 1.2);
+                                        });
+                                      },
+                                      child: Container(
+                                        width: 36,
+                                        height: 36,
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black
+                                                  .withOpacity(0.25),
+                                              blurRadius: 2,
+                                              offset: const Offset(0, 0),
+                                              spreadRadius: 0,
+                                            ),
+                                          ],
+                                        ),
+                                        child: SvgPicture.asset(
+                                          'assets/images/Zoom_in.svg',
+                                          width: 36,
+                                          height: 36,
+                                          fit: BoxFit.contain,
+                                          placeholderBuilder: (context) =>
+                                              const SizedBox(
+                                            width: 36,
+                                            height: 36,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        if (_layouts.isEmpty)
+                          Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.inbox_outlined,
+                                  size: 64,
+                                  color: Colors.black.withOpacity(0.3),
+                                ),
+                                const SizedBox(height: 16),
+                                Text(
+                                  'No layouts found',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.black.withOpacity(0.5),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Add layouts and plots in the Site tab to view their status here',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.black.withOpacity(0.4),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          ...List.generate(_layouts.length, (layoutIndex) {
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 24),
+                              child: _buildLayoutCard(
+                                  layoutIndex, _layouts[layoutIndex]),
+                            );
+                          }),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        // Edit dialog overlay
+        if (_editingLayoutIndex != null && _editingPlotIndex != null)
+          Positioned.fill(
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 4, sigmaY: 4),
+                    child: Container(
+                      color: Colors.black.withOpacity(0.06),
+                    ),
+                  ),
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _editingLayoutIndex = null;
+                            _editingPlotIndex = null;
+                            _editingStatus = null;
+                          });
+                        },
+                        child: Container(),
+                      ),
+                    ),
+                    _buildEditDialog(),
+                  ],
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  // Helper methods for building form fields in the dialog
+  Widget _buildSaleDateField() {
+    final key = '${_editingLayoutIndex!}_${_editingPlotIndex!}_date';
+    if (!_saleDateControllers.containsKey(key)) {
+      final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+          as Map<String, dynamic>;
+      _saleDateControllers[key] =
+          TextEditingController(text: plot['saleDate'] as String? ?? '');
+      _saleDateFocusNodes[key] = _createDialogFocusNode();
+    }
+    final controller = _saleDateControllers[key]!;
+    final isEmpty = controller.text.trim().isEmpty;
+
+    return Container(
+      height: 40,
+      width: 123,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: _saleDateFocusNodes[key]!.hasFocus
+                ? const Color(0xFF0C8CE9)
+                : (isEmpty ? Colors.red : Colors.black.withOpacity(0.25)),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.calendar_today,
+            size: 16,
+            color: const Color(0xFFC1C1C1),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: _saleDateFocusNodes[key],
+              readOnly: true,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color: isEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+              ),
+              decoration: InputDecoration(
+                hintText: 'dd/mm/yyyy',
+                hintStyle: GoogleFonts.inter(
+                  fontSize: 14,
                   fontWeight: FontWeight.normal,
-                  color: Colors.black.withOpacity(0.8),
+                  color: const Color(0xFFC1C1C1),
+                ),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onTap: () async {
+                final DateTime? picked = await showDatePicker(
+                  context: context,
+                  initialDate: DateTime.now(),
+                  firstDate: DateTime(2000),
+                  lastDate: DateTime(2100),
+                );
+                if (picked != null) {
+                  final formattedDate =
+                      '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+                  controller.text = formattedDate;
+                  _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+                      ['saleDate'] = formattedDate;
+                  setState(() {
+                    _syncEditingPlotToAllPlots();
+                  });
+                }
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAgentField() {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    final currentAgent = plot['agent'] as String? ?? '';
+    final isEmpty = currentAgent.isEmpty;
+
+    return Container(
+      height: 40,
+      width: 265,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: _isAgentDropdownOpen
+                ? const Color(0xFF0C8CE9)
+                : (isEmpty ? Colors.red : Colors.black.withOpacity(0.25)),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: GestureDetector(
+        key: _agentFieldKey,
+        onTap: () {
+          setState(() {
+            _isAgentDropdownOpen = !_isAgentDropdownOpen;
+          });
+          if (_isAgentDropdownOpen) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (_agentFieldKey.currentContext != null &&
+                  _editDialogScrollController.hasClients) {
+                Scrollable.ensureVisible(
+                  _agentFieldKey.currentContext!,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeInOut,
+                  alignment: 0.1,
+                );
+              }
+            });
+          }
+        },
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: isEmpty
+                    ? Text(
+                        'Select Agent',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: const Color(0xFFC1C1C1),
+                        ),
+                      )
+                    : Text(
+                        currentAgent,
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+              ),
+              SvgPicture.asset(
+                'assets/images/Drrrop_down.svg',
+                width: 14,
+                height: 7,
+                fit: BoxFit.contain,
+                placeholderBuilder: (context) => const SizedBox(
+                  width: 14,
+                  height: 7,
                 ),
               ),
             ],
           ),
         ),
-        const SizedBox(height: 24),
-        Padding(
-          padding: const EdgeInsets.only(left: 0),
+      ),
+    );
+  }
+
+  Widget _buildAgentDropdownInDialog(String currentAgent) {
+    final agents = _availableAgents;
+    return Container(
+      width: 265,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.5),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _isAgentDropdownOpen = false;
+              });
+            },
+            child: Container(
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Select Agent',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ),
+                  Transform.rotate(
+                    angle: 3.14159,
+                    child: SvgPicture.asset(
+                      'assets/images/Drrrop_down.svg',
+                      width: 14,
+                      height: 7,
+                      fit: BoxFit.contain,
+                      placeholderBuilder: (context) => const SizedBox(
+                        width: 14,
+                        height: 7,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: agents.map((agent) {
+                return GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _layouts[_editingLayoutIndex!]['plots']
+                          [_editingPlotIndex!]['agent'] = agent;
+                      _syncEditingPlotToAllPlots();
+                      _isAgentDropdownOpen = false;
+                    });
+                    _saveLayoutsData();
+                  },
+                  child: Container(
+                    width: double.infinity,
+                    height: 40,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    margin: const EdgeInsets.only(left: 8, right: 8, bottom: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: Colors.black.withOpacity(0.1),
+                        width: 1,
+                      ),
+                    ),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        agent,
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: agent == 'Direct Sale'
+                              ? const Color(0xFF0C8CE9)
+                              : Colors.black,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSalePriceField() {
+    final key = '${_editingLayoutIndex!}_${_editingPlotIndex!}_price';
+    if (!_salePriceControllers.containsKey(key)) {
+      final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+          as Map<String, dynamic>;
+      final salePrice = plot['salePrice'] as String? ?? '';
+      _salePriceControllers[key] = TextEditingController(text: salePrice);
+      _salePriceFocusNodes[key] = _createDialogFocusNode();
+    }
+    final controller = _salePriceControllers[key]!;
+    final cleaned = controller.text
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .trim();
+    final isEmpty = cleaned.isEmpty || cleaned == '0' || cleaned == '0.00';
+
+    return Container(
+      height: 40,
+      width: 209,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: _salePriceFocusNodes[key]!.hasFocus
+                ? const Color(0xFF0C8CE9)
+                : (isEmpty ? Colors.red : Colors.black.withOpacity(0.25)),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Text(
+            '₹/$_areaUnitSuffix',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.normal,
+              color: const Color(0xFF5C5C5C),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: _salePriceFocusNodes[key],
+              keyboardType: TextInputType.number,
+              inputFormatters: [IndianNumberFormatter()],
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: isEmpty
+                    ? const Color(0xFFADADAD).withOpacity(0.75)
+                    : Colors.black,
+              ),
+              decoration: InputDecoration(
+                hintText: '0',
+                hintStyle: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: const Color(0xFFADADAD).withOpacity(0.75),
+                ),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onChanged: (value) {
+                final rawValue = value
+                    .replaceAll(',', '')
+                    .replaceAll('₹', '')
+                    .replaceAll(' ', '');
+                final formatted =
+                    rawValue.isEmpty ? '0.00' : _formatAmount(rawValue);
+                setState(() {
+                  _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+                      ['salePrice'] = formatted;
+                  _syncEditingPlotToAllPlots();
+                });
+                _saveLayoutsData();
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSaleValueField() {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    final area =
+        double.tryParse((plot['area'] as String? ?? '0').replaceAll(',', '')) ??
+            0.0;
+    final salePriceStr = (plot['salePrice'] as String? ?? '0')
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .trim();
+    final salePrice = double.tryParse(salePriceStr) ?? 0.0;
+    final saleValue = area * salePrice;
+
+    return Container(
+      height: 40,
+      width: 178,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Text(
+            '₹',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.normal,
+              color: const Color(0xFF5C5C5C),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              saleValue == 0
+                  ? '0'
+                  : _formatAmountNoTrailingZeros(saleValue.toString()),
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.black,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBuyerNameField() {
+    final key = '${_editingLayoutIndex!}_${_editingPlotIndex!}_buyer';
+    if (!_buyerNameControllers.containsKey(key)) {
+      final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+          as Map<String, dynamic>;
+      _buyerNameControllers[key] =
+          TextEditingController(text: plot['buyerName'] as String? ?? '');
+      _buyerNameFocusNodes[key] = _createDialogFocusNode();
+    }
+    final controller = _buyerNameControllers[key]!;
+    final isEmpty = controller.text.trim().isEmpty;
+
+    return Container(
+      height: 40,
+      width: 304,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: _buyerNameFocusNodes[key]!.hasFocus
+                ? const Color(0xFF0C8CE9)
+                : (isEmpty ? Colors.red : Colors.black.withOpacity(0.25)),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: TextField(
+        controller: controller,
+        focusNode: _buyerNameFocusNodes[key],
+        textAlignVertical: TextAlignVertical.center,
+        style: GoogleFonts.inter(
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+          color: isEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+        ),
+        decoration: InputDecoration(
+          hintText: 'Enter buyer\'s name',
+          hintStyle: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: const Color(0xFFC1C1C1),
+          ),
+          border: InputBorder.none,
+          isDense: true,
+          contentPadding: const EdgeInsets.only(top: 12, bottom: 8),
+        ),
+        onChanged: (value) {
+          setState(() {
+            _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+                ['buyerName'] = value;
+            _syncEditingPlotToAllPlots();
+          });
+          _saveLayoutsData();
+        },
+      ),
+    );
+  }
+
+  // Payment methods list
+  static const List<Map<String, String>> _paymentMethods = [
+    {'name': 'Cash', 'icon': 'assets/images/Cash.svg'},
+    {'name': 'Cheque', 'icon': 'assets/images/Cheque.svg'},
+    {
+      'name': 'Bank Transfer (NEFT / RTGS / IMPS)',
+      'icon': 'assets/images/Bank.svg'
+    },
+    {'name': 'UPI', 'icon': 'assets/images/UPI.svg'},
+    {'name': 'Demand Draft (DD)', 'icon': 'assets/images/Demand_draft.svg'},
+    {'name': 'Other', 'icon': 'assets/images/Other.svg'},
+  ];
+
+  String? _getPaymentMethodIcon(String? paymentMethod) {
+    if (paymentMethod == null || paymentMethod.isEmpty) return null;
+    final method = _paymentMethods.firstWhere(
+      (m) => m['name'] == paymentMethod,
+      orElse: () => {},
+    );
+    return method['icon'];
+  }
+
+  Widget _buildPaymentMethodContent() {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+
+    // Initialize payments list if it doesn't exist
+    if (plot['payments'] == null) {
+      // Migrate old single payment to list format
+      final oldPaymentMethod = plot['paymentMethod'] as String? ?? '';
+      if (oldPaymentMethod.isNotEmpty) {
+        plot['payments'] = [
+          {
+            'paymentMethod': oldPaymentMethod,
+            'paymentAmount': plot['paymentAmount'] ?? '0',
+            'chequeDate': plot['chequeDate'] ?? '',
+            'chequeNumber': plot['chequeNumber'] ?? '',
+            'transferDate': plot['transferDate'] ?? '',
+            'transactionId': plot['transactionId'] ?? '',
+            'paymentDate': plot['paymentDate'] ?? '',
+            'upiTransactionId': plot['upiTransactionId'] ?? '',
+            'upiApp': plot['upiApp'] ?? '',
+            'ddDate': plot['ddDate'] ?? '',
+            'ddNumber': plot['ddNumber'] ?? '',
+            'otherPaymentDate': plot['otherPaymentDate'] ?? '',
+            'otherPaymentMethod': plot['otherPaymentMethod'] ?? '',
+            'referenceNumber': plot['referenceNumber'] ?? '',
+            'bankName': plot['bankName'] ?? '',
+          }
+        ];
+      } else {
+        plot['payments'] = [];
+      }
+    }
+
+    final payments = plot['payments'] as List<dynamic>;
+
+    // If no payments, show at least one empty payment block so user can select payment method
+    if (payments.isEmpty) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+        'chequeDate': '',
+        'chequeNumber': '',
+        'transferDate': '',
+        'transactionId': '',
+        'paymentDate': '',
+        'upiTransactionId': '',
+        'upiApp': '',
+        'ddDate': '',
+        'ddNumber': '',
+        'otherPaymentDate': '',
+        'otherPaymentMethod': '',
+        'referenceNumber': '',
+        'bankName': '',
+      });
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Render each payment
+        ...payments.asMap().entries.map((entry) {
+          final index = entry.key;
+          final payment = entry.value as Map<String, dynamic>;
+          return _buildSinglePaymentBlock(index, payment);
+        }).toList(),
+      ],
+    );
+  }
+
+  Widget _buildSinglePaymentBlock(
+      int paymentIndex, Map<String, dynamic> payment) {
+    final currentPaymentMethod = payment['paymentMethod'] as String? ?? '';
+
+    return Container(
+      width: 321,
+      margin: EdgeInsets.only(top: paymentIndex > 0 ? 16 : 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F9FA),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    '${paymentIndex + 1}. Payment Method ',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.black,
+                    ),
+                  ),
+                  Text(
+                    '*',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.red,
+                    ),
+                  ),
+                ],
+              ),
+              if (paymentIndex > 0)
+                GestureDetector(
+                  onTap: () => _removePaymentBlock(paymentIndex),
+                  child: Container(
+                    width: 85,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.25),
+                          blurRadius: 2,
+                          offset: const Offset(0, 0),
+                          spreadRadius: 0,
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: Text(
+                        'Remove',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          color: const Color(0xFFFF0000),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _buildPaymentMethodField(paymentIndex),
+          // Show fields based on payment method
+          if (currentPaymentMethod.isNotEmpty) ...[
+            const SizedBox(height: 24),
+            // Amount field (common to all payment methods)
+            _buildAmountField(paymentIndex),
+            // Payment method specific fields
+            if (currentPaymentMethod == 'Cheque') ...[
+              const SizedBox(height: 24),
+              _buildChequeDateField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildChequeNumberField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildBankNameField(paymentIndex),
+            ] else if (currentPaymentMethod ==
+                'Bank Transfer (NEFT / RTGS / IMPS)') ...[
+              const SizedBox(height: 24),
+              _buildTransferDateField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildTransactionIdField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildBankNameField(paymentIndex),
+            ] else if (currentPaymentMethod == 'UPI') ...[
+              const SizedBox(height: 24),
+              _buildPaymentDateField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildUpiTransactionIdField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildUpiAppField(paymentIndex),
+            ] else if (currentPaymentMethod == 'Demand Draft (DD)') ...[
+              const SizedBox(height: 24),
+              _buildDDDateField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildDDNumberField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildBankNameField(paymentIndex),
+            ] else if (currentPaymentMethod == 'Other') ...[
+              const SizedBox(height: 24),
+              _buildOtherPaymentDateField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildOtherPaymentMethodField(paymentIndex),
+              const SizedBox(height: 24),
+              _buildReferenceNumberField(paymentIndex),
+            ] else if (currentPaymentMethod == 'Cash') ...[
+              const SizedBox(height: 24),
+              _buildPaymentDateField(paymentIndex),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAmountField([int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final plotKey = '${_editingLayoutIndex}_${_editingPlotIndex}_$paymentIndex';
+
+    // Initialize controller if it doesn't exist
+    if (_paymentAmountControllers[plotKey] == null) {
+      final amount = payment['paymentAmount'] as String? ?? '0';
+      final amountNum =
+          double.tryParse(amount.toString().replaceAll(',', '')) ?? 0.0;
+      _paymentAmountControllers[plotKey] = TextEditingController(
+        text: amountNum == 0.0 ? '' : amount.toString(),
+      );
+    }
+    _paymentAmountFocusNodes.putIfAbsent(plotKey, _createDialogFocusNode);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              'Amount (₹) ',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.black,
+              ),
+            ),
+            Text(
+              '*',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.red,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Builder(
+          builder: (context) {
+            final controller = _paymentAmountControllers[plotKey];
+            final hasValue = controller != null &&
+                controller.text.isNotEmpty &&
+                controller.text
+                        .replaceAll(',', '')
+                        .replaceAll('₹', '')
+                        .replaceAll(' ', '')
+                        .trim() !=
+                    '' &&
+                controller.text
+                        .replaceAll(',', '')
+                        .replaceAll('₹', '')
+                        .replaceAll(' ', '')
+                        .trim() !=
+                    '0' &&
+                controller.text
+                        .replaceAll(',', '')
+                        .replaceAll('₹', '')
+                        .replaceAll(' ', '')
+                        .trim() !=
+                    '0.00';
+
+            return Container(
+              width: 178,
+              height: 40,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: _paymentAmountFocusNodes[plotKey]!.hasFocus
+                        ? const Color(0xFF0C8CE9)
+                        : (hasValue
+                            ? Colors.black.withOpacity(0.25)
+                            : Colors.red),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Text(
+                    '₹',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF5D5D5D),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: DecimalInputField(
+                      controller: _paymentAmountControllers[plotKey]!,
+                      focusNode: _paymentAmountFocusNodes[plotKey]!,
+                      hintText: '0',
+                      inputFormatters: [
+                        IndianNumberFormatter(maxIntegerDigits: 11)
+                      ],
+                      onTap: () {
+                        // Clear '0.00' when field is tapped
+                        final cleaned = _paymentAmountControllers[plotKey]!
+                            .text
+                            .replaceAll(',', '')
+                            .replaceAll('₹', '')
+                            .replaceAll(' ', '')
+                            .trim();
+                        if (cleaned == '0' || cleaned == '0.00') {
+                          _paymentAmountControllers[plotKey]!.text = '';
+                          _paymentAmountControllers[plotKey]!.selection =
+                              TextSelection.collapsed(offset: 0);
+                          setState(() {});
+                        }
+                      },
+                      onChanged: (value) {
+                        // Remove commas for storage (for real-time calculations)
+                        final rawValue = value
+                            .replaceAll(',', '')
+                            .replaceAll('₹', '')
+                            .replaceAll(' ', '');
+                        setState(() {
+                          payment['paymentAmount'] =
+                              rawValue.isEmpty ? '0.00' : rawValue;
+                          _syncEditingPlotToAllPlots();
+                        });
+                        _saveLayoutsData();
+                        // Trigger rebuild to update shadow color
+                        setState(() {});
+                      },
+                      onEditingComplete: () {
+                        // Remove commas before formatting
+                        final cleaned = _paymentAmountControllers[plotKey]!
+                            .text
+                            .replaceAll(',', '')
+                            .replaceAll('₹', '')
+                            .replaceAll(' ', '');
+                        final formatted = _formatAmount(cleaned);
+                        FocusScope.of(context).unfocus();
+                        _paymentAmountControllers[plotKey]!.value =
+                            TextEditingValue(
+                          text: formatted,
+                          selection:
+                              TextSelection.collapsed(offset: formatted.length),
+                        );
+                        setState(() {
+                          payment['paymentAmount'] =
+                              formatted.replaceAll(',', '');
+                          _syncEditingPlotToAllPlots();
+                        });
+                        _saveLayoutsData();
+                      },
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDateField(String label, String fieldKey, String placeholder,
+      [int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final dateValue = payment[fieldKey] as String? ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 8),
+        GestureDetector(
+          onTap: () async {
+            final DateTime? picked = await showDatePicker(
+              context: context,
+              initialDate: dateValue.isNotEmpty
+                  ? _parseDate(dateValue) ?? DateTime.now()
+                  : DateTime.now(),
+              firstDate: DateTime(2000),
+              lastDate: DateTime(2100),
+            );
+            if (picked != null) {
+              final formattedDate =
+                  '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+              setState(() {
+                payment[fieldKey] = formattedDate;
+                _syncEditingPlotToAllPlots();
+              });
+              _saveLayoutsData();
+            }
+          },
+          child: Container(
+            width: 128,
+            height: 40,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.calendar_today,
+                  size: 16,
+                  color: Colors.black.withOpacity(0.5),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      dateValue.isEmpty ? placeholder : dateValue,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: dateValue.isEmpty
+                            ? const Color(0xFFC1C1C1)
+                            : Colors.black,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTextInputField(String label, String fieldKey, String placeholder,
+      {double? width, int paymentIndex = 0}) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final value = payment[fieldKey] as String? ?? '';
+    final controlKey =
+        '${_editingLayoutIndex}_${_editingPlotIndex}_${paymentIndex}_$fieldKey';
+    final controller = _paymentTextControllers.putIfAbsent(
+      controlKey,
+      () => TextEditingController(text: value),
+    );
+    if (!(_paymentTextFocusNodes[controlKey]?.hasFocus ?? false) &&
+        controller.text != value) {
+      controller.text = value;
+    }
+    final focusNode =
+        _paymentTextFocusNodes.putIfAbsent(controlKey, _createDialogFocusNode);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: width ?? double.infinity,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: focusNode.hasFocus
+                    ? const Color(0xFF0C8CE9)
+                    : Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: TextField(
+            controller: controller,
+            focusNode: focusNode,
+            textAlignVertical: TextAlignVertical.center,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: controller.text.isEmpty
+                  ? const Color.fromARGB(191, 173, 173, 173)
+                  : Colors.black,
+            ),
+            decoration: InputDecoration(
+              hintText: placeholder,
+              hintStyle: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: const Color.fromARGB(191, 173, 173, 173),
+              ),
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+            onChanged: (text) {
+              setState(() {
+                payment[fieldKey] = text;
+                _syncEditingPlotToAllPlots();
+              });
+              _saveLayoutsData();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildChequeDateField([int paymentIndex = 0]) =>
+      _buildDateField('Cheque Date', 'chequeDate', 'dd/mm/yyyy', paymentIndex);
+  Widget _buildTransferDateField([int paymentIndex = 0]) => _buildDateField(
+      'Transfer Date', 'transferDate', 'dd/mm/yyyy', paymentIndex);
+  Widget _buildPaymentDateField([int paymentIndex = 0]) => _buildDateField(
+      'Payment Date', 'paymentDate', 'dd/mm/yyyy', paymentIndex);
+  Widget _buildDDDateField([int paymentIndex = 0]) =>
+      _buildDateField('DD Date', 'ddDate', 'dd/mm/yyyy', paymentIndex);
+  Widget _buildOtherPaymentDateField([int paymentIndex = 0]) => _buildDateField(
+      'DD Date', 'otherPaymentDate', 'dd/mm/yyyy', paymentIndex);
+
+  Widget _buildChequeNumberField([int paymentIndex = 0]) =>
+      _buildTextInputField(
+          'Cheque Number', 'chequeNumber', 'Enter Cheque Number',
+          width: 175, paymentIndex: paymentIndex);
+  Widget _buildTransactionIdField([int paymentIndex = 0]) =>
+      _buildTextInputField(
+          'Transaction ID / UTR', 'transactionId', 'Enter Transaction ID / UTR',
+          width: 273, paymentIndex: paymentIndex);
+  Widget _buildUpiTransactionIdField([int paymentIndex = 0]) =>
+      _buildTextInputField(
+          'UPI Transaction ID', 'upiTransactionId', 'Enter UPI Transaction ID',
+          width: 273, paymentIndex: paymentIndex);
+  Widget _buildDDNumberField([int paymentIndex = 0]) =>
+      _buildTextInputField('DD Number', 'ddNumber', 'Enter DD Number',
+          width: 273, paymentIndex: paymentIndex);
+  Widget _buildReferenceNumberField(
+          [int paymentIndex = 0]) =>
+      _buildTextInputField(
+          'Reference Number', 'referenceNumber', 'Enter Reference Number',
+          width: 273, paymentIndex: paymentIndex);
+
+  Widget _buildBankNameField([int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final value = payment['bankName'] as String? ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Bank Name',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: 304,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.95),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: TextField(
+            controller: TextEditingController(text: value),
+            textAlignVertical: TextAlignVertical.center,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: value.isEmpty
+                  ? const Color.fromARGB(191, 173, 173, 173)
+                  : Colors.black,
+            ),
+            decoration: InputDecoration(
+              hintText: 'Enter a bank name',
+              hintStyle: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: const Color.fromARGB(191, 173, 173, 173),
+              ),
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+            onChanged: (text) {
+              setState(() {
+                payment['bankName'] = text;
+                _syncEditingPlotToAllPlots();
+              });
+              _saveLayoutsData();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildUpiAppField([int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final value = payment['upiApp'] as String? ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'UPI App',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: 304,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.95),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: TextField(
+            controller: TextEditingController(text: value),
+            textAlignVertical: TextAlignVertical.center,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: value.isEmpty
+                  ? const Color.fromARGB(191, 173, 173, 173)
+                  : Colors.black,
+            ),
+            decoration: InputDecoration(
+              hintText: 'Enter a bank name',
+              hintStyle: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: const Color.fromARGB(191, 173, 173, 173),
+              ),
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+            onChanged: (text) {
+              setState(() {
+                payment['upiApp'] = text;
+                _syncEditingPlotToAllPlots();
+              });
+              _saveLayoutsData();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOtherPaymentMethodField([int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final value = payment['otherPaymentMethod'] as String? ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Payment Method',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: Colors.black,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: 304,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.95),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: TextField(
+            controller: TextEditingController(text: value),
+            textAlignVertical: TextAlignVertical.center,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: value.isEmpty
+                  ? const Color.fromARGB(191, 173, 173, 173)
+                  : Colors.black,
+            ),
+            decoration: InputDecoration(
+              hintText: 'Enter Payment Method ',
+              hintStyle: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: const Color.fromARGB(191, 173, 173, 173),
+              ),
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+            onChanged: (text) {
+              setState(() {
+                payment['otherPaymentMethod'] = text;
+                _syncEditingPlotToAllPlots();
+              });
+              _saveLayoutsData();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  DateTime? _parseDate(String dateStr) {
+    try {
+      // Try DD/MM/YYYY format
+      final parts = dateStr.split('/');
+      if (parts.length == 3) {
+        final day = int.tryParse(parts[0]);
+        final month = int.tryParse(parts[1]);
+        final year = int.tryParse(parts[2]);
+        if (day != null && month != null && year != null) {
+          return DateTime(year, month, day);
+        }
+      }
+      // Try YYYY-MM-DD format
+      final isoParts = dateStr.split('-');
+      if (isoParts.length == 3) {
+        final year = int.tryParse(isoParts[0]);
+        final month = int.tryParse(isoParts[1]);
+        final day = int.tryParse(isoParts[2]);
+        if (year != null && month != null && day != null) {
+          return DateTime(year, month, day);
+        }
+      }
+    } catch (e) {
+      return null;
+    }
+    return null;
+  }
+
+  Widget _buildPaymentMethodField([int paymentIndex = 0]) {
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    if (plot['payments'] == null) {
+      plot['payments'] = [];
+    }
+    final payments = plot['payments'] as List<dynamic>;
+    if (paymentIndex >= payments.length) {
+      payments.add({
+        'paymentMethod': '',
+        'paymentAmount': '0',
+      });
+    }
+    final payment = payments[paymentIndex] as Map<String, dynamic>;
+    final currentPaymentMethod = payment['paymentMethod'] as String? ?? '';
+    final isEmpty = currentPaymentMethod.isEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 325,
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
+          ),
           child: Row(
             children: [
-              Column(
-                children: [
-                  Column(
-                    children: [
-                      Stack(
-                        children: [
-                          Stack(
-                            clipBehavior: Clip.none,
-                            alignment: Alignment.topCenter,
-                            children: [
-                              Container(
-                                height: 32,
-                                padding: const EdgeInsets.symmetric(horizontal: 4),
-                                decoration: const BoxDecoration(
-                                  border: Border(
-                                    bottom: BorderSide(
-                                      color: Color(0xFF0C8CE9),
-                                      width: 2,
-                                    ),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _isPaymentMethodDropdownOpen =
+                          !_isPaymentMethodDropdownOpen;
+                      _currentPaymentIndex = paymentIndex;
+                    });
+                    // Scroll to show the dropdown
+                    if (_isPaymentMethodDropdownOpen) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (_paymentMethodFieldKey.currentContext != null &&
+                            _editDialogScrollController.hasClients) {
+                          Scrollable.ensureVisible(
+                            _paymentMethodFieldKey.currentContext!,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOut,
+                            alignment: 0.1,
+                          );
+                        }
+                      });
+                    }
+                  },
+                  child: Container(
+                    height: 36,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: isEmpty
+                              ? Text(
+                                  'Select Payment Method',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500,
+                                    color: const Color(0xFFC1C1C1),
                                   ),
-                                ),
-                                child: Center(
-                                  child: Text(
-                                    "Site",
-                                    style: GoogleFonts.inter(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w500,
-                                      color: const Color(0xFF0C8CE9),
+                                )
+                              : Row(
+                                  children: [
+                                    if (_getPaymentMethodIcon(
+                                            currentPaymentMethod) !=
+                                        null)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(right: 16),
+                                        child: SvgPicture.asset(
+                                          _getPaymentMethodIcon(
+                                              currentPaymentMethod)!,
+                                          width: 16,
+                                          height: 16,
+                                          fit: BoxFit.contain,
+                                          placeholderBuilder: (context) =>
+                                              const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                          ),
+                                        ),
+                                      ),
+                                    Flexible(
+                                      child: Text(
+                                        currentPaymentMethod,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w500,
+                                          color: Colors.black,
+                                        ),
+                                      ),
                                     ),
+                                  ],
+                                ),
+                        ),
+                        SvgPicture.asset(
+                          'assets/images/Drrrop_down.svg',
+                          width: 14,
+                          height: 7,
+                          fit: BoxFit.contain,
+                          placeholderBuilder: (context) => const SizedBox(
+                            width: 14,
+                            height: 7,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Dropdown inside the modal
+        if (_isPaymentMethodDropdownOpen &&
+            _currentPaymentIndex == paymentIndex) ...[
+          const SizedBox(height: 4),
+          _buildPaymentMethodDropdown(currentPaymentMethod),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPaymentMethodDropdown(String currentPaymentMethod) {
+    return Container(
+      width: 325,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.5),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _isPaymentMethodDropdownOpen = false;
+              });
+            },
+            child: Container(
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Select Payment Method',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _isPaymentMethodDropdownOpen = false;
+                      });
+                    },
+                    child: Transform.rotate(
+                      angle:
+                          3.14159, // 180 degrees in radians (pointing up when dropdown is open)
+                      child: SvgPicture.asset(
+                        'assets/images/Drrrop_down.svg',
+                        width: 14,
+                        height: 7,
+                        fit: BoxFit.contain,
+                        placeholderBuilder: (context) => const SizedBox(
+                          width: 14,
+                          height: 7,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Payment method options
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: _paymentMethods.asMap().entries.map((entry) {
+                final index = entry.key;
+                final method = entry.value;
+                final methodName = method['name']!;
+                final iconPath = method['icon']!;
+                final isSelected = methodName == currentPaymentMethod;
+                final isLast = index == _paymentMethods.length - 1;
+
+                return Container(
+                  margin: EdgeInsets.only(
+                    bottom: isLast ? 0 : 12,
+                    left: 8,
+                    right: 8,
+                    top: index == 0 ? 8 : 0,
+                  ),
+                  child: GestureDetector(
+                    onTap: () {
+                      final plot = _layouts[_editingLayoutIndex!]['plots']
+                          [_editingPlotIndex!] as Map<String, dynamic>;
+                      if (plot['payments'] == null) {
+                        plot['payments'] = [];
+                      }
+                      final payments = plot['payments'] as List<dynamic>;
+                      if (_currentPaymentIndex >= payments.length) {
+                        payments.add({
+                          'paymentMethod': methodName,
+                          'paymentAmount': '0',
+                        });
+                      } else {
+                        (payments[_currentPaymentIndex]
+                                as Map<String, dynamic>)['paymentMethod'] =
+                            methodName;
+                      }
+                      setState(() {
+                        _syncEditingPlotToAllPlots();
+                        _isPaymentMethodDropdownOpen = false;
+                      });
+                      _saveLayoutsData();
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.25),
+                            blurRadius: 2,
+                            offset: const Offset(0, 0),
+                            spreadRadius: 0,
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: SvgPicture.asset(
+                              iconPath,
+                              width: 16,
+                              height: 16,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 16,
+                                height: 16,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Text(
+                              methodName,
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.black,
+                              ),
+                              textAlign: TextAlign.left,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAgentDropdownInDialog(
+      BuildContext context, String currentAgent, GlobalKey agentKey) {
+    final RenderBox? renderBox =
+        agentKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+
+    final agents = _availableAgents;
+    final overlay = Overlay.of(context);
+    final offset = renderBox.localToGlobal(Offset.zero);
+
+    late OverlayEntry overlayEntry;
+    late OverlayEntry backdropEntry;
+
+    void closeDropdown() {
+      overlayEntry.remove();
+      backdropEntry.remove();
+    }
+
+    backdropEntry = OverlayEntry(
+      builder: (context) => Positioned.fill(
+        child: GestureDetector(
+          onTap: closeDropdown,
+          child: Container(color: Colors.transparent),
+        ),
+      ),
+    );
+
+    overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: offset.dx,
+        top: offset.dy + renderBox.size.height + 4,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width: 265,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.5),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                GestureDetector(
+                  onTap: closeDropdown,
+                  child: Container(
+                    height: 48,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Select Agent',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: closeDropdown,
+                          child: Transform.rotate(
+                            angle: 3.14159,
+                            child: SvgPicture.asset(
+                              'assets/images/Drrrop_down.svg',
+                              width: 14,
+                              height: 7,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 14,
+                                height: 7,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Options
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: agents.map((agent) {
+                      final isSelected = agent == currentAgent;
+                      return GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _layouts[_editingLayoutIndex!]['plots']
+                                [_editingPlotIndex!]['agent'] = agent;
+                            _syncEditingPlotToAllPlots();
+                          });
+                          _saveLayoutsData();
+                          closeDropdown();
+
+                          // Scroll to show the updated field
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (_editDialogScrollController.hasClients) {
+                              _editDialogScrollController.animateTo(
+                                _editDialogScrollController.position.pixels,
+                                duration: const Duration(milliseconds: 300),
+                                curve: Curves.easeInOut,
+                              );
+                            }
+                          });
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          height: 40,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          margin: const EdgeInsets.only(
+                              left: 8, right: 8, bottom: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(
+                              color: Colors.black.withOpacity(0.1),
+                              width: 1,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              agent,
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: agent == 'Direct Sale'
+                                    ? const Color(0xFF0C8CE9)
+                                    : Colors.black,
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    overlay.insert(backdropEntry);
+    overlay.insert(overlayEntry);
+
+    // Scroll to show the dropdown
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_editDialogScrollController.hasClients) {
+        Scrollable.ensureVisible(
+          agentKey.currentContext!,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          alignment: 0.3,
+        );
+      }
+    });
+  }
+
+  Widget _buildEditDialog() {
+    if (_editingLayoutIndex == null || _editingPlotIndex == null) {
+      return const SizedBox.shrink();
+    }
+
+    final layout = _layouts[_editingLayoutIndex!];
+    final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
+    if (_editingPlotIndex! >= plots.length) {
+      return const SizedBox.shrink();
+    }
+
+    // Get fresh plot data to ensure we have the latest status
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    final layoutName =
+        layout['name'] as String? ?? 'Layout ${_editingLayoutIndex! + 1}';
+    final plotNumber = plot['plotNumber'] as String? ?? '';
+    final area = plot['area'] as String? ?? '0';
+    // Read status fresh from the plot data
+    final statusData = plot['status'];
+    final status = statusData is PlotStatus
+        ? statusData as PlotStatus
+        : (statusData is String
+            ? PlotStatus.values.firstWhere(
+                (e) => e.name == statusData.toString().toLowerCase(),
+                orElse: () => PlotStatus.available,
+              )
+            : PlotStatus.available);
+    final effectiveStatus = _editingStatus ?? status;
+    final statusColor = _getStatusColor(effectiveStatus);
+    final statusText = _getStatusString(effectiveStatus);
+    final statusBackgroundColor = _getStatusBackgroundColor(effectiveStatus);
+
+    final screenHeight = MediaQuery.of(context).size.height;
+    final maxDialogHeight = screenHeight * 0.9;
+
+    return Container(
+      width: 492,
+      constraints: BoxConstraints(
+        maxHeight: maxDialogHeight,
+      ),
+      margin: const EdgeInsets.only(top: 56, right: 24, bottom: 16, left: 24),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F3F3),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header
+          Container(
+            height: 48,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(8),
+                topRight: Radius.circular(8),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Plot Status Details',
+                  style: GoogleFonts.inter(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black,
+                  ),
+                ),
+                Row(
+                  children: [
+                    // Discard button
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _editingLayoutIndex = null;
+                          _editingPlotIndex = null;
+                          _editingStatus = null;
+                          _isStatusDropdownOpen = false;
+                          _isPaymentMethodDropdownOpen = false;
+                        });
+                      },
+                      child: Container(
+                        height: 36,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                              spreadRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: Center(
+                          child: Text(
+                            'Discard',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.normal,
+                              color: const Color(0xFF0C8CE9),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    // Update button
+                    GestureDetector(
+                      onTap: () async {
+                        print('💾 UPDATE BUTTON: Clicked');
+                        // Close dialog immediately on Update click.
+                        setState(() {
+                          _syncEditingPlotToAllPlots();
+                          _rebuildAllPlotsFromLayouts();
+                          _editingLayoutIndex = null;
+                          _editingPlotIndex = null;
+                          _editingStatus = null;
+                          _isStatusDropdownOpen = false;
+                          _isPaymentMethodDropdownOpen = false;
+                        });
+                        // Save all changes in background after closing dialog.
+                        await _saveLayoutsData();
+                        await _savePlotsToDatabase();
+                        print('💾 UPDATE BUTTON: Complete');
+                      },
+                      child: Container(
+                        height: 36,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0C8CE9),
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                              spreadRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Update',
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            SvgPicture.asset(
+                              'assets/images/Update.svg',
+                              width: 14,
+                              height: 10,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 14,
+                                height: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          // Content
+          Flexible(
+            child: GestureDetector(
+              onTap: () {
+                // Close payment dropdown when clicking outside
+                if (_isPaymentMethodDropdownOpen) {
+                  setState(() {
+                    _isPaymentMethodDropdownOpen = false;
+                  });
+                }
+              },
+              child: SingleChildScrollView(
+                controller: _editDialogScrollController,
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 17),
+                    // Layout, Plot Number, Area
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                'Layout:',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black.withOpacity(0.75),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                height: 36,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  layoutName,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.black,
                                   ),
                                 ),
                               ),
-                              if (_hasValidationErrors())
-                                Positioned(
-                                  top: -8,
-                                  child: SvgPicture.asset(
-                                    'assets/images/Error_msg.svg',
-                                    width: 17,
-                                    height: 15,
-                                    fit: BoxFit.contain,
-                                    errorBuilder: (context, error, stackTrace) {
-                                      print('Error loading Error_msg.svg: $error');
-                                      return const SizedBox(
-                                        width: 17,
-                                        height: 15,
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Text(
+                                'Plot Number:',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black.withOpacity(0.75),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                height: 36,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  plotNumber,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Text(
+                                'Area:',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black.withOpacity(0.75),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      _formatAmountNoTrailingZeros(area),
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.normal,
+                                        color: Colors.black,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      _areaUnitSuffix,
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.normal,
+                                        color: const Color(0xFF5C5C5C),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    // Status
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                'Status ',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black,
+                                ),
+                              ),
+                              Text(
+                                '*',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.red,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              GestureDetector(
+                                key: _statusDropdownKey,
+                                onTap: () {
+                                  print(
+                                      '🎯 DROPDOWN TOGGLE: Clicked status field. Current state: $_isStatusDropdownOpen');
+                                  setState(() {
+                                    _isStatusDropdownOpen =
+                                        !_isStatusDropdownOpen;
+                                    print(
+                                        '🎯 DROPDOWN TOGGLE: New state: $_isStatusDropdownOpen');
+                                  });
+                                },
+                                child: Container(
+                                  width: 145,
+                                  height: 40,
+                                  padding:
+                                      const EdgeInsets.symmetric(horizontal: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.95),
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.25),
+                                        blurRadius: 2,
+                                        offset: const Offset(0, 0),
+                                        spreadRadius: 0,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Builder(
+                                    key: ValueKey(
+                                        'status_button_${_editingLayoutIndex}_${_editingPlotIndex}_${_layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]['status']}'),
+                                    builder: (context) {
+                                      // Read status fresh each time widget rebuilds
+                                      final currentPlot =
+                                          _layouts[_editingLayoutIndex!]
+                                                  ['plots'][_editingPlotIndex!]
+                                              as Map<String, dynamic>;
+                                      final currentStatusData =
+                                          currentPlot['status'];
+                                      final currentStatus = currentStatusData
+                                              is PlotStatus
+                                          ? currentStatusData as PlotStatus
+                                          : (currentStatusData is String
+                                              ? PlotStatus.values.firstWhere(
+                                                  (e) =>
+                                                      e.name ==
+                                                      currentStatusData
+                                                          .toString()
+                                                          .toLowerCase(),
+                                                  orElse: () =>
+                                                      PlotStatus.available,
+                                                )
+                                              : PlotStatus.available);
+                                      final effectiveCurrentStatus =
+                                          _editingStatus ?? currentStatus;
+                                      final currentStatusColor =
+                                          _getStatusColor(
+                                              effectiveCurrentStatus);
+                                      final currentStatusText =
+                                          _getStatusString(
+                                              effectiveCurrentStatus);
+                                      final currentStatusBackgroundColor =
+                                          _getStatusBackgroundColor(
+                                              effectiveCurrentStatus);
+
+                                      return Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 8),
+                                            decoration: BoxDecoration(
+                                              color:
+                                                  currentStatusBackgroundColor,
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.25),
+                                                  blurRadius: 2,
+                                                  offset: const Offset(0, 0),
+                                                  spreadRadius: 0,
+                                                ),
+                                              ],
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Container(
+                                                  width: 16,
+                                                  height: 16,
+                                                  decoration: BoxDecoration(
+                                                    color: currentStatusColor,
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Text(
+                                                  currentStatusText,
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 14,
+                                                    fontWeight:
+                                                        FontWeight.normal,
+                                                    color: Colors.black,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          SvgPicture.asset(
+                                            'assets/images/Drrrop_down.svg',
+                                            width: 14,
+                                            height: 7,
+                                            fit: BoxFit.contain,
+                                            placeholderBuilder: (context) =>
+                                                const SizedBox(
+                                              width: 14,
+                                              height: 7,
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                              // Dropdown menu - now inline instead of positioned
+                              if (_isStatusDropdownOpen)
+                                const SizedBox(height: 8),
+                              if (_isStatusDropdownOpen)
+                                Container(
+                                  width: 145,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF3F3F3),
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.5),
+                                        blurRadius: 2,
+                                        offset: const Offset(0, 0),
+                                        spreadRadius: 0,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Builder(
+                                    builder: (context) {
+                                      // Read current status fresh for dropdown options
+                                      final currentPlotForDropdown =
+                                          _layouts[_editingLayoutIndex!]
+                                                  ['plots'][_editingPlotIndex!]
+                                              as Map<String, dynamic>;
+                                      final currentStatusDataForDropdown =
+                                          currentPlotForDropdown['status'];
+                                      final currentStatusForDropdown =
+                                          currentStatusDataForDropdown
+                                                  is PlotStatus
+                                              ? currentStatusDataForDropdown
+                                                  as PlotStatus
+                                              : (currentStatusDataForDropdown
+                                                      is String
+                                                  ? PlotStatus.values
+                                                      .firstWhere(
+                                                      (e) =>
+                                                          e.name ==
+                                                          currentStatusDataForDropdown
+                                                              .toString()
+                                                              .toLowerCase(),
+                                                      orElse: () =>
+                                                          PlotStatus.available,
+                                                    )
+                                                  : PlotStatus.available);
+                                      final effectiveStatusForDropdown =
+                                          _editingStatus ??
+                                              currentStatusForDropdown;
+
+                                      print(
+                                          '📋 DROPDOWN OPTIONS: effectiveStatus=$effectiveStatusForDropdown');
+                                      final optionsList =
+                                          (effectiveStatusForDropdown ==
+                                                  PlotStatus.available
+                                              ? [PlotStatus.sold]
+                                              : effectiveStatusForDropdown ==
+                                                      PlotStatus.sold
+                                                  ? [PlotStatus.available]
+                                                  : []);
+                                      print(
+                                          '📋 DROPDOWN OPTIONS: Creating ${optionsList.length} options: $optionsList');
+
+                                      return Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children:
+                                            optionsList.map((statusOption) {
+                                          print(
+                                              '📋 DROPDOWN OPTIONS: Rendering option $statusOption');
+                                          final optionColor =
+                                              _getStatusColor(statusOption);
+                                          final optionText =
+                                              _getStatusString(statusOption);
+                                          final isSelected =
+                                              statusOption == status;
+
+                                          return Material(
+                                            color: Colors.transparent,
+                                            child: InkWell(
+                                              onTap: () async {
+                                                print(
+                                                    '📝 STATUS CHANGE: ✅✅✅ INKWELL TAPPED! User selected $statusOption');
+                                                // Get fresh references to ensure we're updating the right data
+                                                final currentLayout = _layouts[
+                                                    _editingLayoutIndex!];
+                                                final currentPlot =
+                                                    currentLayout['plots']
+                                                            [_editingPlotIndex!]
+                                                        as Map<String, dynamic>;
+                                                final plotNumber =
+                                                    currentPlot['plotNumber']
+                                                            as String? ??
+                                                        '';
+                                                final layoutName =
+                                                    currentLayout['name']
+                                                            as String? ??
+                                                        '';
+                                                print(
+                                                    '📝 STATUS CHANGE: Updating layout=$layoutName, plot=$plotNumber to $statusOption');
+
+                                                // Use the same update pattern as _updatePlotStatus
+                                                setState(() {
+                                                  print(
+                                                      '📝 STATUS CHANGE: Inside setState');
+                                                  _editingStatus = statusOption;
+                                                  // Directly update the plot we're editing (fastest way)
+                                                  _layouts[_editingLayoutIndex!]
+                                                              ['plots']
+                                                          [_editingPlotIndex!]
+                                                      ['status'] = statusOption;
+
+                                                  // First update _allPlots (same as table update)
+                                                  for (var plotData
+                                                      in _allPlots) {
+                                                    if ((plotData['plotNumber']
+                                                                    as String? ??
+                                                                '') ==
+                                                            plotNumber &&
+                                                        (plotData['layout']
+                                                                    as String? ??
+                                                                '') ==
+                                                            layoutName) {
+                                                      plotData['status'] =
+                                                          statusOption;
+                                                      print(
+                                                          '📝 STATUS CHANGE: Updated _allPlots entry');
+                                                      break;
+                                                    }
+                                                  }
+
+                                                  // Then update the corresponding plot in _layouts (same as table update) - this ensures all copies are updated
+                                                  for (var layout in _layouts) {
+                                                    if ((layout['name']
+                                                                as String? ??
+                                                            '') ==
+                                                        layoutName) {
+                                                      final plots = layout[
+                                                                  'plots']
+                                                              as List<
+                                                                  dynamic>? ??
+                                                          [];
+                                                      for (var plotData
+                                                          in plots) {
+                                                        if (plotData is Map<
+                                                            String, dynamic>) {
+                                                          final pn = plotData[
+                                                                      'plotNumber']
+                                                                  as String? ??
+                                                              '';
+                                                          if (pn ==
+                                                              plotNumber) {
+                                                            plotData['status'] =
+                                                                statusOption;
+                                                            break;
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+                                                    }
+                                                  }
+
+                                                  _isStatusDropdownOpen = false;
+                                                  print(
+                                                      '📝 STATUS CHANGE: Calling sync functions');
+                                                  _syncEditingPlotToAllPlots();
+                                                  _rebuildAllPlotsFromLayouts();
+                                                  print(
+                                                      '📝 STATUS CHANGE: setState complete');
+                                                });
+                                              },
+                                              child: Container(
+                                                width: double.infinity,
+                                                height: 40,
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                        horizontal: 4),
+                                                margin: const EdgeInsets.only(
+                                                    bottom: 8),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white,
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black
+                                                          .withOpacity(0.25),
+                                                      blurRadius: 2,
+                                                      offset:
+                                                          const Offset(0, 0),
+                                                      spreadRadius: 0,
+                                                    ),
+                                                  ],
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    Container(
+                                                      padding: const EdgeInsets
+                                                          .symmetric(
+                                                          horizontal: 8,
+                                                          vertical: 8),
+                                                      decoration: BoxDecoration(
+                                                        color:
+                                                            _getStatusBackgroundColor(
+                                                                statusOption),
+                                                        borderRadius:
+                                                            BorderRadius
+                                                                .circular(8),
+                                                        boxShadow: [
+                                                          BoxShadow(
+                                                            color: Colors.black
+                                                                .withOpacity(
+                                                                    0.25),
+                                                            blurRadius: 2,
+                                                            offset:
+                                                                const Offset(
+                                                                    0, 0),
+                                                            spreadRadius: 0,
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      child: Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          Container(
+                                                            width: 16,
+                                                            height: 16,
+                                                            decoration:
+                                                                BoxDecoration(
+                                                              color:
+                                                                  optionColor,
+                                                              shape: BoxShape
+                                                                  .circle,
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                              width: 8),
+                                                          Text(
+                                                            optionText,
+                                                            style: GoogleFonts
+                                                                .inter(
+                                                              fontSize: 14,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .normal,
+                                                              color:
+                                                                  Colors.black,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        }).toList(),
                                       );
                                     },
                                   ),
@@ -1100,207 +5145,428 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                           ),
                         ],
                       ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        // Horizontal line from sidebar to end of screen
-        Transform.translate(
-          offset: const Offset(-22, 0), // Move left to start from sidebar shadow end
-          child: Container(
-            width: MediaQuery.of(context).size.width - 0 + 24, // Full screen width minus sidebar+shadow, plus extend 24px to right edge
-            height: 1,
-            color: const Color(0xFF5C5C5C),
-          ),
-        ),
-        const SizedBox(height: 24),
-        // Content - Scrollable
-        Expanded(
-          child: ScrollConfiguration(
-            behavior: ScrollConfiguration.of(context).copyWith(
-              scrollbars: false,
-            ),
-            child: SingleChildScrollView(
-              clipBehavior: Clip.hardEdge,
-              padding: const EdgeInsets.only(
-                left: 0,
-                bottom: 24,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-        // Overall Sales card
-        Builder(
-          builder: (context) {
-            // Calculate totals from all layouts
-            double totalAreaSold = 0.0;
-            double totalSalesPrice = 0.0; // Sum of sale price column (₹/sqft)
-            double totalSaleValue = 0.0; // Sum of sale value column (₹)
-            for (var layout in _layouts) {
-              final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
-              for (var plot in plots) {
-                final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-                if (status == PlotStatus.sold) {
-                  final area = double.tryParse(plot['area'] as String? ?? '0.00') ?? 0.0;
-                  final salePriceStr = (plot['salePrice'] as String? ?? '0.00').replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                  final salePrice = double.tryParse(salePriceStr) ?? 0.0;
-                  totalAreaSold += area;
-                  totalSalesPrice += salePrice; // Sum of sale price per sqft
-                  totalSaleValue += salePrice * area; // Sum of sale value (price * area)
-                }
-              }
-            }
-            
-            return Container(
-              width: 686,
-              margin: const EdgeInsets.only(bottom: 24),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.25),
-                    blurRadius: 2,
-                    offset: const Offset(0, 0),
-                    spreadRadius: 0,
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Overall Sales",
-                    style: GoogleFonts.inter(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black,
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(
-                          text: "Total Area Sold: ",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black,
+                    // Additional sale fields (always visible). For non-sold, show blurred/disabled preview.
+                    const SizedBox(height: 24),
+                    IgnorePointer(
+                      ignoring: effectiveStatus != PlotStatus.sold,
+                      child: Opacity(
+                        opacity: effectiveStatus == PlotStatus.sold ? 1.0 : 0.2,
+                        child: ImageFiltered(
+                          imageFilter: ImageFilter.blur(
+                            sigmaX:
+                                effectiveStatus == PlotStatus.sold ? 0 : 1.2,
+                            sigmaY:
+                                effectiveStatus == PlotStatus.sold ? 0 : 1.2,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Sale date field
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          'Sale date ',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.black,
+                                          ),
+                                        ),
+                                        Text(
+                                          '*',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildSaleDateField(),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Agent field
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          'Agent ',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.black,
+                                          ),
+                                        ),
+                                        Text(
+                                          '*',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildAgentField(),
+                                    if (_isAgentDropdownOpen) ...[
+                                      const SizedBox(height: 4),
+                                      _buildAgentDropdownInDialog(
+                                        (_layouts[_editingLayoutIndex!]['plots']
+                                                        [_editingPlotIndex!]
+                                                    as Map<String, dynamic>)[
+                                                'agent'] as String? ??
+                                            '',
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Sale Price and Sale Value side by side
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Text(
+                                                'Sale Price (₹/$_areaUnitSuffix) ',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w500,
+                                                  color: Colors.black,
+                                                ),
+                                              ),
+                                              Text(
+                                                '*',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w500,
+                                                  color: Colors.red,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 8),
+                                          _buildSalePriceField(),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 24),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Sale Value (₹)',
+                                            style: GoogleFonts.inter(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w500,
+                                              color: Colors.black,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          _buildSaleValueField(),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Buyer Name field
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          'Buyer Name ',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.black,
+                                          ),
+                                        ),
+                                        Text(
+                                          '*',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildBuyerNameField(),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              // Payment section
+                              Padding(
+                                key: _paymentMethodFieldKey,
+                                padding:
+                                    const EdgeInsets.only(left: 16, right: 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          'Payment ',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.black,
+                                          ),
+                                        ),
+                                        Text(
+                                          '*',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Builder(
+                                      builder: (context) {
+                                        final plot =
+                                            _layouts[_editingLayoutIndex!]
+                                                        ['plots']
+                                                    [_editingPlotIndex!]
+                                                as Map<String, dynamic>;
+                                        final payments = plot['payments']
+                                                as List<dynamic>? ??
+                                            [];
+                                        final area = double.tryParse(
+                                                (plot['area'] as String? ?? '0')
+                                                    .replaceAll(',', '')) ??
+                                            0.0;
+                                        final salePriceStr =
+                                            (plot['salePrice'] as String? ??
+                                                    '0')
+                                                .replaceAll(',', '')
+                                                .replaceAll('₹', '')
+                                                .replaceAll(' ', '')
+                                                .trim();
+                                        final salePrice =
+                                            double.tryParse(salePriceStr) ??
+                                                0.0;
+                                        final saleValue = area * salePrice;
+
+                                        double totalAmount = 0.0;
+                                        for (final payment in payments) {
+                                          final paymentMap =
+                                              payment as Map<String, dynamic>;
+                                          final amountStr =
+                                              (paymentMap['paymentAmount'] ??
+                                                      '0')
+                                                  .toString();
+                                          final cleaned = amountStr
+                                              .replaceAll(',', '')
+                                              .replaceAll('₹', '')
+                                              .replaceAll(' ', '')
+                                              .trim();
+                                          totalAmount +=
+                                              double.tryParse(cleaned) ?? 0.0;
+                                        }
+
+                                        final remainingAmount =
+                                            saleValue - totalAmount;
+                                        final totalExceeds =
+                                            totalAmount > saleValue;
+                                        final remainingIsNegative =
+                                            remainingAmount < 0;
+
+                                        final totalText = totalExceeds
+                                            ? 'Total Amount: ₹ ${_formatAmount(totalAmount.toStringAsFixed(2))} [Exceeding Sale Value]'
+                                            : 'Total Amount: ₹ ${_formatAmount(totalAmount.toStringAsFixed(2))}';
+                                        final remainingText = remainingIsNegative
+                                            ? 'Remaining Amount: - ₹ ${_formatAmount(remainingAmount.abs().toStringAsFixed(2))} [Exceeding Sale Value]'
+                                            : 'Remaining Amount: ₹ ${_formatAmount(remainingAmount.toStringAsFixed(2))}';
+
+                                        final totalColor = totalExceeds
+                                            ? Colors.red
+                                            : const Color(0xFF1A8F3E);
+                                        final remainingColor =
+                                            remainingIsNegative
+                                                ? Colors.red
+                                                : const Color(0xFF1A8F3E);
+
+                                        return Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              totalText,
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.normal,
+                                                color: totalColor,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            _buildPaymentMethodContent(),
+                                            const SizedBox(height: 16),
+                                            Text(
+                                              remainingText,
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.normal,
+                                                color: remainingColor,
+                                              ),
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
+                                    const SizedBox(height: 8),
+                                    GestureDetector(
+                                      onTap: () {
+                                        final plot =
+                                            _layouts[_editingLayoutIndex!]
+                                                        ['plots']
+                                                    [_editingPlotIndex!]
+                                                as Map<String, dynamic>;
+                                        if (plot['payments'] == null) {
+                                          plot['payments'] = [];
+                                        }
+                                        final payments =
+                                            plot['payments'] as List<dynamic>;
+                                        payments.add({
+                                          'paymentMethod': '',
+                                          'paymentAmount': '0',
+                                          'chequeDate': '',
+                                          'chequeNumber': '',
+                                          'transferDate': '',
+                                          'transactionId': '',
+                                          'paymentDate': '',
+                                          'upiTransactionId': '',
+                                          'upiApp': '',
+                                          'ddDate': '',
+                                          'ddNumber': '',
+                                          'otherPaymentDate': '',
+                                          'otherPaymentMethod': '',
+                                          'referenceNumber': '',
+                                          'bankName': '',
+                                        });
+                                        setState(() {
+                                          _syncEditingPlotToAllPlots();
+                                        });
+                                        _saveLayoutsData();
+                                      },
+                                      child: Builder(
+                                        builder: (context) {
+                                          final plot =
+                                              _layouts[_editingLayoutIndex!]
+                                                          ['plots']
+                                                      [_editingPlotIndex!]
+                                                  as Map<String, dynamic>;
+                                          final payments = plot['payments']
+                                                  as List<dynamic>? ??
+                                              [];
+                                          final hasPaymentMethod = payments
+                                                  .isNotEmpty &&
+                                              payments.any((p) =>
+                                                  (p as Map<String, dynamic>)[
+                                                          'paymentMethod']
+                                                      ?.toString()
+                                                      .isNotEmpty ??
+                                                  false);
+
+                                          return Container(
+                                            height: 36,
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 16, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: hasPaymentMethod
+                                                  ? const Color(0xFF0C8CE9)
+                                                  : const Color(0xFF0C8CE9)
+                                                      .withOpacity(0.5),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.25),
+                                                  blurRadius: 2,
+                                                  offset: const Offset(0, 0),
+                                                  spreadRadius: 0,
+                                                ),
+                                              ],
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'Add Payment Method',
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 14,
+                                                    fontWeight:
+                                                        FontWeight.normal,
+                                                    color: Colors.white,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Icon(
+                                                  Icons.add,
+                                                  size: 12,
+                                                  color: Colors.white,
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                            ],
                           ),
                         ),
-                        TextSpan(
-                          text: "${_formatAmount(totalAreaSold.toString())} sqft",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(
-                          text: "Total Sales Price: ",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black,
-                          ),
-                        ),
-                        TextSpan(
-                          text: "₹/sqft ${_formatAmount(totalSalesPrice.toString())}",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(
-                          text: "Total Sale Value: ",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black,
-                          ),
-                        ),
-                        TextSpan(
-                          text: "₹ ${_formatAmount(totalSaleValue.toString())}",
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-        const SizedBox(height: 24),
-        // Layout cards with tables
-        if (_layouts.isEmpty)
-          Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.inbox_outlined,
-                  size: 64,
-                  color: Colors.black.withOpacity(0.3),
+                  ],
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  'No layouts found',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black.withOpacity(0.5),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Add layouts and plots in the Site tab to view their status here',
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black.withOpacity(0.4),
-                  ),
-                ),
-              ],
-            ),
-          )
-        else
-          ...List.generate(_layouts.length, (layoutIndex) {
-            return Container(
-              margin: const EdgeInsets.only(bottom: 24),
-              child: _buildLayoutCard(layoutIndex, _layouts[layoutIndex]),
-            );
-          }),
-                ],
               ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -1321,7 +5587,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             Text(
               'No plots found',
               style: GoogleFonts.inter(
-                fontSize: 16,
+                fontSize: 14,
                 fontWeight: FontWeight.normal,
                 color: Colors.black.withOpacity(0.5),
               ),
@@ -1361,7 +5627,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     '${index + 1}',
                     textAlign: TextAlign.center,
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.w500,
                       fontStyle: FontStyle.normal,
                       color: Colors.black, // #000
@@ -1383,7 +5649,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   content: Text(
                     layout.isEmpty ? '-' : layout,
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.normal,
                       color: Colors.black,
                     ),
@@ -1398,13 +5664,14 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               header: 'Plot Number',
               width: 215,
               children: List.generate(filteredPlots.length, (index) {
-                final plotNumber = filteredPlots[index]['plotNumber'] as String? ?? '';
+                final plotNumber =
+                    filteredPlots[index]['plotNumber'] as String? ?? '';
                 return _buildCell(
                   width: 215,
                   content: Text(
                     plotNumber.isEmpty ? '-' : plotNumber,
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.normal,
                       color: Colors.black,
                     ),
@@ -1416,7 +5683,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             ),
             // Area column
             _buildColumn(
-              header: 'Area (Sqft)',
+              header: 'Area ($_areaUnitSuffix)',
               width: 180,
               children: List.generate(filteredPlots.length, (index) {
                 final area = filteredPlots[index]['area'] as String? ?? '0.00';
@@ -1425,7 +5692,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   content: Text(
                     _formatAmount(area),
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.normal,
                       color: Colors.black,
                     ),
@@ -1440,13 +5707,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               header: 'Purchase Rate',
               width: 215,
               children: List.generate(filteredPlots.length, (index) {
-                final rate = filteredPlots[index]['purchaseRate'] as String? ?? '0.00';
+                final rate =
+                    filteredPlots[index]['purchaseRate'] as String? ?? '0.00';
                 return _buildCell(
                   width: 215,
                   content: Text(
-                    rate.isEmpty || rate == '0.00' ? '-' : '₹ ${_formatAmount(rate)}',
+                    rate.isEmpty || rate == '0.00'
+                        ? '-'
+                        : '₹ ${_formatAmount(rate)}',
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.normal,
                       color: Colors.black,
                     ),
@@ -1462,7 +5732,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               width: 320,
               isLast: true,
               children: List.generate(filteredPlots.length, (index) {
-                final status = filteredPlots[index]['status'] as PlotStatus? ?? PlotStatus.available;
+                final status = _parsePlotStatus(filteredPlots[index]['status']);
                 final statusColor = _getStatusColor(status);
                 final statusText = _getStatusString(status);
                 final statusBackgroundColor = _getStatusBackgroundColor(status);
@@ -1472,147 +5742,59 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     builder: (builderContext) {
                       final statusKey = GlobalKey();
                       final iconKey = GlobalKey();
-                      
-                      if (status == PlotStatus.sold) {
-                        return Row(
-                          children: [
-                            GestureDetector(
-                              onTap: () => _showStatusChangeDialogForFiltered(builderContext, index, status, statusKey),
-                              child: Container(
-                                key: statusKey,
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                decoration: BoxDecoration(
-                                  color: statusBackgroundColor,
-                                  borderRadius: BorderRadius.circular(8),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.25),
-                                      blurRadius: 2,
-                                      offset: const Offset(0, 0),
-                                      spreadRadius: 0,
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 16,
-                                      height: 16,
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: Center(
-                                        child: Container(
-                                          width: 12,
-                                          height: 12,
-                                          decoration: BoxDecoration(
-                                            color: statusColor,
-                                            shape: BoxShape.circle,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      statusText,
-                                      textAlign: TextAlign.center,
-                                      style: GoogleFonts.inter(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.normal,
-                                        fontStyle: FontStyle.normal,
-                                        color: Colors.black, // #000
-                                        height: 1.0, // normal line-height
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            const Spacer(),
-                            GestureDetector(
-                              key: iconKey,
-                              onTap: () => _showStatusChangeDialogForFiltered(builderContext, index, status, statusKey),
-                              child: Icon(
-                                Icons.keyboard_arrow_down,
-                                size: 20,
-                                color: const Color(0xFF212121), // Dark grey icon
-                              ),
+
+                      // Read-only status display - no editing in table
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: statusBackgroundColor,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                              spreadRadius: 0,
                             ),
                           ],
-                        );
-                      } else {
-                        return Row(
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Expanded(
-                              child: GestureDetector(
-                                onTap: () => _showStatusChangeDialogForFiltered(builderContext, index, status, statusKey),
+                            Container(
+                              width: 16,
+                              height: 16,
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                              ),
+                              child: Center(
                                 child: Container(
-                                  key: statusKey,
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  width: 12,
+                                  height: 12,
                                   decoration: BoxDecoration(
-                                    color: statusBackgroundColor,
-                                    borderRadius: BorderRadius.circular(8),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Colors.black.withOpacity(0.25),
-                                        blurRadius: 2,
-                                        offset: const Offset(0, 0),
-                                        spreadRadius: 0,
-                                      ),
-                                    ],
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Container(
-                                        width: 16,
-                                        height: 16,
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: Center(
-                                          child: Container(
-                                            width: 12,
-                                            height: 12,
-                                            decoration: BoxDecoration(
-                                              color: statusColor,
-                                              shape: BoxShape.circle,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Text(
-                                        statusText,
-                                        textAlign: TextAlign.center,
-                                        style: GoogleFonts.inter(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.normal,
-                                          fontStyle: FontStyle.normal,
-                                          color: Colors.black, // #000
-                                          height: 1.0, // normal line-height
-                                        ),
-                                      ),
-                                    ],
+                                    color: statusColor,
+                                    shape: BoxShape.circle,
                                   ),
                                 ),
                               ),
                             ),
-                            GestureDetector(
-                              key: iconKey,
-                              onTap: () => _showStatusChangeDialogForFiltered(builderContext, index, status, statusKey),
-                              child: Icon(
-                                Icons.keyboard_arrow_down,
-                                size: 20,
-                                color: const Color(0xFF212121), // Dark grey icon
+                            const SizedBox(width: 8),
+                            Text(
+                              statusText,
+                              textAlign: TextAlign.center,
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                fontStyle: FontStyle.normal,
+                                color: Colors.black, // #000
+                                height: 1.0, // normal line-height
                               ),
                             ),
                           ],
-                        );
-                      }
+                        ),
+                      );
                     },
                   ),
                   isLast: index == filteredPlots.length - 1,
@@ -1651,7 +5833,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             child: Text(
               header,
               style: GoogleFonts.inter(
-                fontSize: 16,
+                fontSize: 14,
                 fontWeight: FontWeight.w500,
                 color: Colors.black,
               ),
@@ -1695,28 +5877,58 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   Widget _buildLayoutCard(int layoutIndex, Map<String, dynamic> layout) {
     final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
     final layoutName = layout['name'] as String? ?? 'Layout ${layoutIndex + 1}';
-    
-    // Calculate totals
+
+    // Apply filter to get counts for display
+    List<Map<String, dynamic>> filteredPlots = plots;
+    if (_selectedStatus != 'All Status') {
+      filteredPlots = plots.where((plot) {
+        final plotStatus = _parsePlotStatus(plot['status']);
+        final statusString = _getStatusString(plotStatus);
+        return statusString == _selectedStatus;
+      }).toList();
+    }
+
+    // Calculate totals and counts
     double totalAreaSold = 0.0;
     double totalSalesPrice = 0.0; // Sum of sale price column (₹/sqft)
     double totalSaleValue = 0.0; // Sum of sale value column (₹)
-    for (var plot in plots) {
-      final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
+    int availablePlots = 0;
+    int soldPlots = 0;
+
+    for (var plot in filteredPlots) {
+      final status = _parsePlotStatus(plot['status']);
       if (status == PlotStatus.sold) {
         final area = double.tryParse(plot['area'] as String? ?? '0.00') ?? 0.0;
-        final salePriceStr = (plot['salePrice'] as String? ?? '0.00').replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
+        final salePriceStr = (plot['salePrice'] as String? ?? '0.00')
+            .replaceAll(',', '')
+            .replaceAll('₹', '')
+            .replaceAll(' ', '')
+            .trim();
         final salePrice = double.tryParse(salePriceStr) ?? 0.0;
         totalAreaSold += area;
         totalSalesPrice += salePrice; // Sum of sale price per sqft
         totalSaleValue += salePrice * area; // Sum of sale value (price * area)
+        soldPlots++;
+      } else if (status == PlotStatus.available) {
+        availablePlots++;
       }
     }
-    
+
+    // Helper widget for separator dot
+    Widget separatorDot = Container(
+      width: 4,
+      height: 4,
+      decoration: const BoxDecoration(
+        color: Colors.black,
+        shape: BoxShape.circle,
+      ),
+    );
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFFF8F9FA),
         borderRadius: BorderRadius.circular(8),
         boxShadow: [
           BoxShadow(
@@ -1732,855 +5944,957 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         children: [
           // Layout header
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Text(
-                '${layoutIndex + 1}. Layout: ',
-                style: GoogleFonts.inter(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
-                ),
-              ),
-              Text(
-                layoutName,
-                style: GoogleFonts.inter(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              Text(
-                '${layoutIndex + 1}. ',
-                style: GoogleFonts.inter(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.transparent,
-                ),
-              ),
-              Text(
-                '${plots.length} plots',
+                '${layoutIndex + 1}.',
                 style: GoogleFonts.inter(
                   fontSize: 14,
-                  fontWeight: FontWeight.normal,
-                  color: Colors.black.withOpacity(0.6),
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                  height: 1.0,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Text(
+                'Layout:',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                  height: 1.0,
+                ),
+              ),
+              const SizedBox(width: 26),
+              Container(
+                width: 304,
+                height: 36,
+                constraints: const BoxConstraints(minHeight: 36),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  layoutName,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.black,
+                    height: 1.0,
+                  ),
+                  textAlign: TextAlign.left,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          // Table
-          Builder(
-            builder: (context) {
-              // Initialize scroll controller for this layout if it doesn't exist
-              if (!_layoutTableScrollControllers.containsKey(layoutIndex)) {
-                _layoutTableScrollControllers[layoutIndex] = ScrollController();
-              }
-              final scrollController = _layoutTableScrollControllers[layoutIndex]!;
-              
-              return Scrollbar(
-                controller: scrollController,
-                thumbVisibility: true,
-                child: SingleChildScrollView(
-                  controller: scrollController,
-                  scrollDirection: Axis.horizontal,
-                  child: _buildLayoutTable(layoutIndex, plots),
-                ),
-              );
-            },
-          ),
-          const SizedBox(height: 16),
-          // Footer totals
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          // Summary bar
+          Row(
             children: [
-              Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: 'Total Area Sold: ',
+              // Total plots
+              Row(
+                children: [
+                  Transform(
+                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
+                    child: Text(
+                      '${plots.length}',
                       style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.black,
-                      ),
-                    ),
-                    TextSpan(
-                      text: '${_formatAmount(totalAreaSold.toString())} sqft',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
+                        fontSize: 14,
                         fontWeight: FontWeight.normal,
                         color: Colors.black,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  Text(
+                    ' plots',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      color: Colors.black,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
-              Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: 'Total Sales Price: ',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.black,
-                      ),
+              const SizedBox(width: 16),
+              separatorDot,
+              const SizedBox(width: 16),
+              // Available
+              Row(
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF4CAF50),
+                      shape: BoxShape.circle,
                     ),
-                    TextSpan(
-                      text: '₹/sqft ${_formatAmount(totalSalesPrice.toString())}',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.normal,
-                        color: Colors.black,
+                  ),
+                  const SizedBox(width: 8),
+                  Row(
+                    children: [
+                      Transform(
+                        transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
+                        child: Text(
+                          '$availablePlots',
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            fontWeight: FontWeight.normal,
+                            color: Colors.black,
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
-                ),
+                      Text(
+                        ' Available',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
-              Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: 'Total Sale Value: ',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.black,
-                      ),
+              const SizedBox(width: 16),
+              separatorDot,
+              const SizedBox(width: 16),
+              // Sold
+              Row(
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF44336),
+                      shape: BoxShape.circle,
                     ),
-                    TextSpan(
-                      text: '₹ ${_formatAmount(totalSaleValue.toString())}',
+                  ),
+                  const SizedBox(width: 8),
+                  Row(
+                    children: [
+                      Transform(
+                        transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
+                        child: Text(
+                          '$soldPlots',
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            fontWeight: FontWeight.normal,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        ' Sold',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(width: 16),
+              separatorDot,
+              const SizedBox(width: 16),
+              // Total Area Sold
+              Row(
+                children: [
+                  Text(
+                    'Total Area Sold: ',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.black,
+                    ),
+                  ),
+                  Transform(
+                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
+                    child: Text(
+                      _formatAmountNoTrailingZeros(
+                          AreaUnitUtils.areaFromSqftToDisplay(
+                                  totalAreaSold, _isSqm)
+                              .toString()),
                       style: GoogleFonts.inter(
-                        fontSize: 16,
+                        fontSize: 14,
                         fontWeight: FontWeight.normal,
-                        color: Colors.black,
+                        color: Colors.black.withOpacity(0.75),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _areaUnitSuffix,
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      color: Colors.black,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 16),
+              separatorDot,
+              const SizedBox(width: 16),
+              // Total Sale Value
+              Row(
+                children: [
+                  Text(
+                    'Total Sale Value: ',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.black,
+                    ),
+                  ),
+                  Text(
+                    '₹',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      color: Colors.black,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Transform(
+                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
+                    child: Text(
+                      _formatAmountNoTrailingZeros(totalSaleValue.toString()),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black.withOpacity(0.75),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
+          const SizedBox(height: 16),
+          // Table - only show if layout is not collapsed
+          if (!_collapsedLayouts.contains(layoutIndex))
+            Builder(
+              builder: (context) {
+                // Initialize scroll controller for this layout if it doesn't exist
+                if (!_layoutTableScrollControllers.containsKey(layoutIndex)) {
+                  _layoutTableScrollControllers[layoutIndex] =
+                      ScrollController();
+                }
+                final scrollController =
+                    _layoutTableScrollControllers[layoutIndex]!;
+
+                // Calculate dynamic height based on number of plots
+                // Header row: 48px, each plot row: 48px
+                double baseHeaderHeight = 48.0;
+                double baseRowHeight = 48.0;
+                double calculatedHeight =
+                    baseHeaderHeight + (plots.length * baseRowHeight);
+                // Store base height (same as when zoom = 1.0)
+                final baseHeight = calculatedHeight;
+                // Calculate scaled height for outer container
+                // Only scale up, never scale down to prevent overflow when zooming out
+                double scaledHeight = _tableZoomLevel >= 1.0
+                    ? calculatedHeight * _tableZoomLevel
+                    : calculatedHeight;
+                // Only apply minimum height if calculated height is very small (less than header + 1 row)
+                final minHeight =
+                    (baseHeaderHeight + baseRowHeight) * _tableZoomLevel;
+                if (scaledHeight < minHeight) {
+                  scaledHeight = minHeight;
+                }
+                // Add buffer for scaled border to prevent clipping
+                final borderBuffer = _tableZoomLevel > 1.0 ? 10.0 : 0.0;
+                scaledHeight = scaledHeight + borderBuffer;
+
+                return SizedBox(
+                  width: double.infinity,
+                  height: scaledHeight,
+                  child: Scrollbar(
+                    controller: scrollController,
+                    thumbVisibility: true,
+                    child: SingleChildScrollView(
+                      controller: scrollController,
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      clipBehavior: Clip.hardEdge,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          left:
+                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                          right: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0) +
+                              ((_tableZoomLevel - 1.0) * 1350.0).clamp(0.0,
+                                  1350.0), // Extra right padding when zoomed to allow full scrolling to last column
+                          top:
+                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                          bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0) +
+                              ((_tableZoomLevel - 1.0) * 100.0).clamp(0.0,
+                                  100.0), // Extra bottom padding for scaled borders to prevent clipping
+                        ),
+                        child: Transform.scale(
+                          scale: _tableZoomLevel,
+                          alignment: Alignment.topLeft,
+                          child: SizedBox(
+                            height:
+                                baseHeight, // Use base height (same as when zoom = 1.0), Transform.scale will handle scaling
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: _buildLayoutTable(layoutIndex, plots),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
         ],
       ),
     );
   }
 
   Widget _buildLayoutTable(int layoutIndex, List<Map<String, dynamic>> plots) {
-    if (plots.isEmpty) {
+    // Apply filter based on selected status
+    List<Map<String, dynamic>> filteredPlots = plots;
+    if (_selectedStatus != 'All Status') {
+      filteredPlots = plots.where((plot) {
+        final plotStatus = _parsePlotStatus(plot['status']);
+        final statusString = _getStatusString(plotStatus);
+        return statusString == _selectedStatus;
+      }).toList();
+    }
+
+    if (filteredPlots.isEmpty) {
       return const SizedBox.shrink();
     }
 
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Sl. No. column
-          Column(
-            children: [
-              Container(
-                width: 70,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Edit column
+        Column(
+          children: [
+            Container(
+              width: 60,
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF707070).withOpacity(0.2),
+                border: Border(
+                  left: const BorderSide(color: Colors.black, width: 1.0),
+                  top: const BorderSide(color: Colors.black, width: 1.0),
+                  bottom: const BorderSide(color: Colors.black, width: 1.0),
+                  right: BorderSide.none,
+                ),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(8),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  'Edit',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    fontStyle: FontStyle.normal,
+                    color: Colors.black,
+                    height: 1.0,
+                  ),
+                ),
+              ),
+            ),
+            ...List.generate(filteredPlots.length, (index) {
+              final isLast = index == filteredPlots.length - 1;
+              final rowPlot = filteredPlots[index];
+              final hasRowError = _rowHasRequiredSoldFieldError(rowPlot);
+              return Container(
+                width: 60,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF707070).withOpacity(0.2),
-                  border: Border.all(color: Colors.black, width: 1.0),
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(8),
+                  border: Border(
+                    left: const BorderSide(color: Colors.black, width: 1.0),
+                    bottom: const BorderSide(color: Colors.black, width: 1.0),
+                    top: BorderSide.none,
+                    right: BorderSide.none,
+                  ),
+                  borderRadius: isLast
+                      ? const BorderRadius.only(
+                          bottomLeft: Radius.circular(8),
+                        )
+                      : null,
+                ),
+                child: GestureDetector(
+                  onTap: () {
+                    final originalIndex = plots.indexOf(rowPlot);
+                    if (originalIndex < 0) return;
+                    setState(() {
+                      _editingLayoutIndex = layoutIndex;
+                      _editingPlotIndex = originalIndex;
+                      final plot = _layouts[layoutIndex]['plots'][originalIndex]
+                          as Map<String, dynamic>;
+                      final statusData = plot['status'];
+                      _editingStatus = statusData is PlotStatus
+                          ? statusData
+                          : (statusData is String
+                              ? PlotStatus.values.firstWhere(
+                                  (e) =>
+                                      e.name ==
+                                      statusData.toString().toLowerCase(),
+                                  orElse: () => PlotStatus.available,
+                                )
+                              : PlotStatus.available);
+                    });
+                  },
+                  child: Center(
+                    child: SvgPicture.asset(
+                      'assets/images/Eddit.svg',
+                      width: 16,
+                      height: 15,
+                      colorFilter: ColorFilter.mode(
+                        hasRowError ? Colors.red : const Color(0xFF0C8CE9),
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+        // Sl. No. column
+        Column(
+          children: [
+            Container(
+              width: 60,
+              height: 48,
+              decoration: BoxDecoration(
+                color: const Color(0xFF707070).withOpacity(0.2),
+                border: Border.all(color: Colors.black, width: 1.0),
+              ),
+              child: Center(
+                child: Text(
+                  'Sl. No.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    fontStyle: FontStyle.normal,
+                    color: Colors.black, // #000
+                    height: 1.0, // normal line-height
+                  ),
+                ),
+              ),
+            ),
+            ...List.generate(filteredPlots.length, (index) {
+              return Container(
+                width: 60,
+                height: 48,
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: const BorderSide(color: Colors.black, width: 1.0),
+                    right: const BorderSide(color: Colors.black, width: 1.0),
+                    bottom: const BorderSide(color: Colors.black, width: 1.0),
+                    top: BorderSide.none,
                   ),
                 ),
                 child: Center(
                   child: Text(
-                    'Sl. No.',
+                    '${index + 1}',
                     textAlign: TextAlign.center,
                     style: GoogleFonts.inter(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
                       fontStyle: FontStyle.normal,
                       color: Colors.black, // #000
                       height: 1.0, // normal line-height
                     ),
                   ),
                 ),
-              ),
-              ...List.generate(plots.length, (index) {
-                final isLast = index == plots.length - 1;
-                return Container(
-                  width: 70,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    border: Border(
-                      left: const BorderSide(color: Colors.black, width: 1.0),
-                      right: const BorderSide(color: Colors.black, width: 1.0),
-                      bottom: const BorderSide(color: Colors.black, width: 1.0),
-                      top: BorderSide.none,
-                    ),
-                    borderRadius: isLast
-                        ? const BorderRadius.only(
-                            bottomLeft: Radius.circular(8),
-                          )
-                        : null,
-                  ),
-                  child: Center(
-                    child: Text(
-                      '${index + 1}',
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                        fontStyle: FontStyle.normal,
-                        color: Colors.black, // #000
-                        height: 1.0, // normal line-height
-                      ),
-                    ),
-                  ),
-                );
-              }),
-            ],
+              );
+            }),
+          ],
+        ),
+        // Plot Number column
+        _buildTableColumn(
+          header: 'Plot Number',
+          width: 186,
+          plots: filteredPlots,
+          builder: (plot, index) => Text(
+            (plot['plotNumber'] as String? ?? '').isEmpty
+                ? '-'
+                : (plot['plotNumber'] as String? ?? ''),
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.normal,
+              color: Colors.black,
+            ),
+            textAlign: TextAlign.center,
           ),
-          // Plot Number column
-          _buildTableColumn(
-            header: 'Plot Number',
-            width: 186,
-            plots: plots,
-            builder: (plot, index) => Text(
-              (plot['plotNumber'] as String? ?? '').isEmpty ? '-' : (plot['plotNumber'] as String? ?? ''),
+        ),
+        // Area column
+        _buildTableColumn(
+          header: 'Area ($_areaUnitSuffix)',
+          width: 215,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final areaSqft = double.tryParse(
+                    (plot['area'] as String? ?? '0.00').replaceAll(',', '')) ??
+                0.0;
+            final areaDisplay =
+                AreaUnitUtils.areaFromSqftToDisplay(areaSqft, _isSqm);
+            return Text(
+              '$_areaUnitSuffix ${_formatAmount(areaDisplay.toString())}',
               style: GoogleFonts.inter(
-                fontSize: 16,
+                fontSize: 14,
                 fontWeight: FontWeight.normal,
                 color: Colors.black,
               ),
               textAlign: TextAlign.center,
-            ),
-          ),
-          // Area (sqft) column
-          _buildTableColumn(
-            header: 'Area (sqft)',
-            width: 215,
-            plots: plots,
-            builder: (plot, index) => Text(
-              'sqft ${_formatAmount(plot['area'] as String? ?? '0.00')}',
-              style: GoogleFonts.inter(
-                fontSize: 16,
-                fontWeight: FontWeight.normal,
-                color: Colors.black,
+            );
+          },
+        ),
+        // Status * column
+        _buildTableColumn(
+          header: 'Status *',
+          width: 180,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            final statusColor = _getStatusColor(status);
+            final statusBackgroundColor = _getStatusBackgroundColor(status);
+            final statusText = _getStatusString(status);
+            final statusKey = GlobalKey();
+            final iconKey = GlobalKey();
+
+            // Read-only status display - no editing in table
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: statusBackgroundColor,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
               ),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          // Status * column
-          _buildTableColumn(
-            header: 'Status *',
-            width: 180,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              final statusColor = _getStatusColor(status);
-              final statusBackgroundColor = _getStatusBackgroundColor(status);
-              final statusText = _getStatusString(status);
-              final statusKey = GlobalKey();
-              final iconKey = GlobalKey();
-              
-              if (status == PlotStatus.sold) {
-                return Row(
-                  children: [
-                    GestureDetector(
-                      onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Center(
                       child: Container(
-                        key: statusKey,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        width: 12,
+                        height: 12,
                         decoration: BoxDecoration(
-                          color: statusBackgroundColor,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 16,
-                              height: 16,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Center(
-                                child: Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: statusColor,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              statusText,
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                fontStyle: FontStyle.normal,
-                                color: Colors.black, // #000
-                                height: 1.0, // normal line-height
-                              ),
-                            ),
-                          ],
+                          color: statusColor,
+                          shape: BoxShape.circle,
                         ),
                       ),
                     ),
-                    const Spacer(),
-                    GestureDetector(
-                      key: iconKey,
-                      onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
-                      child: Icon(
-                        Icons.keyboard_arrow_down,
-                        size: 20,
-                        color: const Color(0xFF212121), // Dark grey icon
-                      ),
-                    ),
-                  ],
-                );
-              } else {
-                return Row(
-                  children: [
-                    GestureDetector(
-                      onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
-                      child: Container(
-                        key: statusKey,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: statusBackgroundColor,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 16,
-                              height: 16,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Center(
-                                child: Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: statusColor,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              statusText,
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                fontSize: 16,
-                                fontWeight: FontWeight.normal,
-                                fontStyle: FontStyle.normal,
-                                color: Colors.black, // #000
-                                height: 1.0, // normal line-height
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const Spacer(),
-                    GestureDetector(
-                      key: iconKey,
-                      onTap: () => _showStatusChangeDialog(context, layoutIndex, index, status, statusKey),
-                      child: Icon(
-                        Icons.keyboard_arrow_down,
-                        size: 20,
-                        color: const Color(0xFF212121), // Dark grey icon
-                      ),
-                    ),
-                  ],
-                );
-              }
-            },
-          ),
-          // Sale Price (₹/sqft) * column
-          _buildTableColumn(
-            header: 'Sale Price (₹/sqft) *',
-            width: 215,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              final key = '${layoutIndex}_${index}_price';
-              if (status == PlotStatus.sold) {
-                if (!_salePriceControllers.containsKey(key)) {
-                  _salePriceControllers[key] = TextEditingController(
-                    text: plot['salePrice'] as String? ?? '0.00',
-                  );
-                  _salePriceFocusNodes[key] = FocusNode();
-                } else {
-                  // Don't update controller during rebuilds - let the formatter and onChanged handle it
-                  // This prevents the controller from being reset while user is typing
-                }
-                final controller = _salePriceControllers[key]!;
-                final focusNode = _salePriceFocusNodes[key]!;
-                final salePriceEmpty = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim().isEmpty ||
-                                      controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim() == '0' ||
-                                      controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim() == '0.00' ||
-                                      (plot['salePrice']?.toString().trim().isEmpty ?? true) ||
-                                      plot['salePrice'] == '0.00';
-                return _buildFocusAwareInputContainer(
-                  focusNode: focusNode,
-                  width: 200,
-                  height: 32,
-                  backgroundColor: const Color(0xFFF8F9FA),
-                  borderRadius: 4,
-                  child: Builder(
-                    builder: (context) {
-                      final cleanedText = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                      final isEmpty = cleanedText.isEmpty || cleanedText == '0' || cleanedText == '0.00';
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Text(
-                            '₹ ',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.normal,
-                              color: Colors.black,
-                            ),
-                          ),
-                          Expanded(
-                            child: DecimalInputField(
-                              controller: controller,
-                              focusNode: focusNode,
-                              hintText: '0.00',
-                              inputFormatters: [IndianNumberFormatter()],
-                              onTap: () {
-                                // Clear '0.00' when field is tapped
-                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                if (cleaned == '0' || cleaned == '0.00') {
-                                  controller.text = '';
-                                  controller.selection = TextSelection.collapsed(offset: 0);
-                                  setState(() {});
-                                }
-                              },
-                              onChanged: (value) {
-                                // Remove commas, format, then store with commas
-                                final rawValue = value.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '');
-                                final formatted = rawValue.isEmpty ? '0.00' : _formatAmount(rawValue);
-                                setState(() {
-                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                });
-                                _saveLayoutsData();
-                              },
-                              onEditingComplete: () {
-                                // Remove commas before formatting
-                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                // Format the amount (this ensures .00 is added and adds commas)
-                                final formatted = _formatAmount(cleaned);
-                                // Store value WITH commas
-                                // Apply formatter to ensure commas are displayed
-                                // Pass the cleaned value (without commas) to formatter so it can add them
-                                final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
-                                final oldValue = controller.value;
-                                final newValue = TextEditingValue(
-                                  text: cleanedForFormatter,
-                                  selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
-                                );
-                                final formattedValue = IndianNumberFormatter().formatEditUpdate(
-                                  oldValue,
-                                  newValue,
-                                );
-                                controller.value = formattedValue;
-                                setState(() {
-                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                });
-                                _saveLayoutsData();
-                                FocusScope.of(context).nextFocus();
-                              },
-                              onTapOutside: () {
-                                // Remove commas before formatting
-                                final cleaned = controller.text.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim();
-                                // Format the amount (this ensures .00 is added and adds commas)
-                                final formatted = _formatAmount(cleaned);
-                                // Store value WITH commas
-                                // Apply formatter to ensure commas are displayed
-                                // Pass the cleaned value (without commas) to formatter so it can add them
-                                final cleanedForFormatter = formatted.replaceAll(',', ''); // Already has .00 format
-                                final oldValue = controller.value;
-                                final newValue = TextEditingValue(
-                                  text: cleanedForFormatter,
-                                  selection: TextSelection.collapsed(offset: cleanedForFormatter.length),
-                                );
-                                final formattedValue = IndianNumberFormatter().formatEditUpdate(
-                                  oldValue,
-                                  newValue,
-                                );
-                                controller.value = formattedValue;
-                                setState(() {
-                                  _layouts[layoutIndex]['plots'][index]['salePrice'] = formatted;
-                                });
-                                _saveLayoutsData();
-                              },
-                              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
                   ),
-                );
-              } else {
-                return Text(
-                  '-',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
-                  ),
-                  textAlign: TextAlign.center,
-                );
-              }
-            },
-          ),
-          // Sale Value (₹) column
-          _buildTableColumn(
-            header: 'Sale Value (₹)',
-            width: 215,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              if (status == PlotStatus.sold) {
-                // Calculate sale value = sale price * area
-                final salePriceStr = plot['salePrice'] as String? ?? '0.00';
-                final areaStr = plot['area'] as String? ?? '0.00';
-                
-                // Parse values (remove commas and format)
-                final salePrice = double.tryParse(
-                  salePriceStr.replaceAll(',', '').replaceAll('₹', '').replaceAll(' ', '').trim()
-                ) ?? 0.0;
-                final area = double.tryParse(
-                  areaStr.replaceAll(',', '').replaceAll(' ', '').trim()
-                ) ?? 0.0;
-                
-                final saleValue = salePrice * area;
-                final formattedValue = saleValue > 0 ? _formatAmount(saleValue.toStringAsFixed(2)) : '0.00';
-                
-                return Container(
-                  width: 200,
-                  height: 32,
-                  child: Center(
-                    child: Text(
-                      '₹ $formattedValue',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.normal,
-                        color: Colors.black,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                );
-              } else {
-                return Text(
-                  '-',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
-                  ),
-                  textAlign: TextAlign.center,
-                );
-              }
-            },
-          ),
-          // Buyer Name * column
-          _buildTableColumn(
-            header: 'Buyer Name *',
-            width: 320,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              final key = '${layoutIndex}_${index}_buyer';
-              if (status == PlotStatus.sold) {
-                if (!_buyerNameControllers.containsKey(key)) {
-                  _buyerNameControllers[key] = TextEditingController(
-                    text: plot['buyerName'] as String? ?? '',
-                  );
-                  _buyerNameFocusNodes[key] = FocusNode();
-                } else {
-                  // Update controller if data has changed
-                  final currentValue = plot['buyerName'] as String? ?? '';
-                  if (_buyerNameControllers[key]!.text != currentValue) {
-                    _buyerNameControllers[key]!.text = currentValue;
-                  }
-                }
-                final buyerNameEmpty = _buyerNameControllers[key]?.text.trim().isEmpty ?? true;
-                return _buildFocusAwareInputContainer(
-                  focusNode: _buyerNameFocusNodes[key]!,
-                  width: 300,
-                  height: 32,
-                  backgroundColor: const Color(0xFFF8F9FA),
-                  borderRadius: 4,
-                  child: TextField(
-                    controller: _buyerNameControllers[key],
-                    focusNode: _buyerNameFocusNodes[key],
-                    onChanged: (value) {
-                      setState(() {
-                        _layouts[layoutIndex]['plots'][index]['buyerName'] = value;
-                      });
-                      _saveLayoutsData();
-                    },
-                    textAlignVertical: TextAlignVertical.center,
+                  const SizedBox(width: 8),
+                  Text(
+                    statusText,
+                    textAlign: TextAlign.center,
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      fontStyle: FontStyle.normal,
+                      color: Colors.black, // #000
+                      height: 1.0, // normal line-height
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        // Sale Price (₹/sqft) * column
+        _buildTableColumn(
+          header: 'Sale Price (₹/$_areaUnitSuffix) *',
+          width: 215,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (status == PlotStatus.sold) {
+              final salePriceRaw = (plot['salePrice'] as String? ?? '')
+                  .replaceAll(',', '')
+                  .replaceAll('₹', '')
+                  .replaceAll(' ', '')
+                  .trim();
+              final salePriceEmpty = salePriceRaw.isEmpty ||
+                  salePriceRaw == '0' ||
+                  salePriceRaw == '0.00';
+              final salePriceValue = double.tryParse(salePriceRaw) ?? 0.0;
+              final displayPrice =
+                  _formatAmount(salePriceValue.toStringAsFixed(2));
+              return Container(
+                width: 200,
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: salePriceEmpty
+                          ? Colors.red
+                          : Colors.black.withOpacity(0.15),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                      spreadRadius: 0,
+                    ),
+                  ],
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '₹ $displayPrice',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color:
+                        salePriceEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+                  ),
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+        // Sale Value (₹) column
+        _buildTableColumn(
+          header: 'Sale Value (₹)',
+          width: 215,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (status == PlotStatus.sold) {
+              // Calculate sale value = sale price * area
+              final salePriceStr = plot['salePrice'] as String? ?? '0.00';
+              final areaStr = plot['area'] as String? ?? '0.00';
+
+              // Parse values (remove commas and format)
+              final salePrice = double.tryParse(salePriceStr
+                      .replaceAll(',', '')
+                      .replaceAll('₹', '')
+                      .replaceAll(' ', '')
+                      .trim()) ??
+                  0.0;
+              final area = double.tryParse(
+                      areaStr.replaceAll(',', '').replaceAll(' ', '').trim()) ??
+                  0.0;
+
+              final saleValue = salePrice * area;
+              final formattedValue = saleValue > 0
+                  ? _formatAmount(saleValue.toStringAsFixed(2))
+                  : '0.00';
+
+              return Container(
+                width: 200,
+                height: 32,
+                child: Center(
+                  child: Text(
+                    '₹ $formattedValue',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
                       fontWeight: FontWeight.normal,
                       color: Colors.black,
                     ),
-                    decoration: InputDecoration(
-                      hintText: "Enter buyer's name",
-                      hintStyle: GoogleFonts.inter(
-                        fontSize: 16,
-                        fontWeight: FontWeight.normal,
-                        color: const Color(0xFF5D5D5D),
-                      ),
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+        // Buyer Name * column
+        _buildTableColumn(
+          header: 'Buyer Name *',
+          width: 320,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (status == PlotStatus.sold) {
+              final currentBuyer = (plot['buyerName'] as String? ?? '').trim();
+              final buyerNameEmpty = currentBuyer.isEmpty;
+              return Container(
+                width: 300,
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: buyerNameEmpty
+                          ? Colors.red
+                          : Colors.black.withOpacity(0.15),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                      spreadRadius: 0,
                     ),
-                  ),
-                );
-              } else {
-                return Text(
-                  '-',
+                  ],
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  buyerNameEmpty ? "Enter buyer's name" : currentBuyer,
                   style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color:
+                        buyerNameEmpty ? const Color(0xFFC1C1C1) : Colors.black,
                   ),
-                  textAlign: TextAlign.center,
-                );
-              }
-            },
-          ),
-          // Agent * column
-          _buildTableColumn(
-            header: 'Agent *',
-            width: 241,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              final currentAgent = plot['agent'] as String? ?? '';
-              if (status == PlotStatus.sold) {
-                final agentKey = GlobalKey();
-                return Builder(
-                  builder: (builderContext) {
-                    return Center(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: GestureDetector(
-                              onTap: () => _showAgentDropdown(builderContext, layoutIndex, index, currentAgent, agentKey),
-                              child: Container(
-                                key: agentKey,
-                                constraints: const BoxConstraints(maxWidth: 200),
-                                height: 32,
-                                padding: const EdgeInsets.symmetric(horizontal: 8),
-                                decoration: BoxDecoration(
-                                  color: currentAgent.isEmpty
-                                      ? const Color(0xFFF8F9FA)
-                                      : const Color(0xFFE3F2FD),
-                                  borderRadius: BorderRadius.circular(4),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: currentAgent.isEmpty ? Colors.red : Colors.black.withOpacity(0.15),
-                                      blurRadius: 2,
-                                      offset: const Offset(0, 0),
-                                      spreadRadius: 0,
-                                    ),
-                                  ],
-                                ),
-                                child: Center(
-                                  child: Text(
-                                    currentAgent.isEmpty ? 'Select Agent' : currentAgent,
-                                    style: GoogleFonts.inter(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.normal,
-                                      color: currentAgent.isEmpty
-                                          ? const Color(0xFF5D5D5D)
-                                          : Colors.black,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Align(
-                            alignment: Alignment.center,
-                            child: GestureDetector(
-                              onTap: () => _showAgentDropdown(builderContext, layoutIndex, index, currentAgent, agentKey),
-                              child: Icon(
-                                Icons.keyboard_arrow_down,
-                                size: 20,
-                                color: const Color(0xFF212121),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                );
-              } else {
-                return Text(
-                  '-',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
-                  ),
-                  textAlign: TextAlign.center,
-                );
-              }
-            },
-          ),
-          // Sale date * column
-          _buildTableColumn(
-            header: 'Sale date *',
-            width: 220,
-            isLast: true,
-            plots: plots,
-            builder: (plot, index) {
-              final status = plot['status'] as PlotStatus? ?? PlotStatus.available;
-              final key = '${layoutIndex}_${index}_date';
-              if (status == PlotStatus.sold) {
-                if (!_saleDateControllers.containsKey(key)) {
-                  _saleDateControllers[key] = TextEditingController(
-                    text: plot['saleDate'] as String? ?? '',
-                  );
-                  _saleDateFocusNodes[key] = FocusNode();
-                } else {
-                  // Update controller if data has changed
-                  final currentValue = plot['saleDate'] as String? ?? '';
-                  if (_saleDateControllers[key]!.text != currentValue) {
-                    _saleDateControllers[key]!.text = currentValue;
-                  }
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+        // Payment * column
+        _buildTableColumn(
+          header: 'Payment * ',
+          width: 340,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (status == PlotStatus.sold) {
+              // Extract payment methods from payments array
+              final payments = plot['payments'] as List<dynamic>? ?? [];
+              final paymentMethods = <String>[];
+
+              for (final payment in payments) {
+                final paymentMap = payment as Map<String, dynamic>;
+                final method = paymentMap['paymentMethod'] as String? ?? '';
+                if (method.isNotEmpty && !paymentMethods.contains(method)) {
+                  paymentMethods.add(method);
                 }
-                return Center(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: GestureDetector(
-                          onTap: () => _selectSaleDate(layoutIndex, index, key),
-                          child: _buildFocusAwareInputContainer(
-                            focusNode: _saleDateFocusNodes[key]!,
-                            width: 180,
-                            height: 32,
-                            backgroundColor: const Color(0xFFF8F9FA),
-                            borderRadius: 4,
-                            child: Row(
-                              children: [
-                                Icon(
-                                  Icons.calendar_today,
-                                  size: 16,
-                                  color: Colors.black.withOpacity(0.6),
-                                ),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: TextField(
-                                    controller: _saleDateControllers[key],
-                                    focusNode: _saleDateFocusNodes[key],
-                                    readOnly: true,
-                                    textAlign: TextAlign.center,
-                                    style: GoogleFonts.inter(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.normal,
-                                      color: Colors.black,
-                                    ),
-                                    decoration: InputDecoration(
-                                      hintText: 'dd/mm/yyyy',
-                                      hintStyle: GoogleFonts.inter(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.normal,
-                                        color: const Color(0xFF5D5D5D),
-                                      ),
-                                      border: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Align(
-                        alignment: Alignment.center,
-                        child: GestureDetector(
-                          onTap: () => _selectSaleDate(layoutIndex, index, key),
-                          child: Icon(
-                            Icons.keyboard_arrow_down,
-                            size: 20,
-                            color: const Color(0xFF212121),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              } else {
-                return Text(
-                  '-',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
-                  ),
-                  textAlign: TextAlign.center,
-                );
               }
-            },
-          ),
-        ],
-      ),
+
+              final isEmpty = paymentMethods.isEmpty;
+              final paymentText =
+                  isEmpty ? 'Select Payment Method' : paymentMethods.join(', ');
+
+              return Container(
+                width: 320,
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color:
+                          isEmpty ? Colors.red : Colors.black.withOpacity(0.15),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                      spreadRadius: 0,
+                    ),
+                  ],
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  paymentText,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: isEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+                  ),
+                  textAlign: TextAlign.left,
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+        // Agent * column
+        _buildTableColumn(
+          header: 'Agent *',
+          width: 241,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            final currentAgent = plot['agent'] as String? ?? '';
+            if (status == PlotStatus.sold) {
+              final agentEmpty = currentAgent.trim().isEmpty;
+              return Container(
+                width: 220,
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: agentEmpty
+                          ? Colors.red
+                          : Colors.black.withOpacity(0.15),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                      spreadRadius: 0,
+                    ),
+                  ],
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  agentEmpty ? 'Select Agent' : currentAgent,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: agentEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+        // Sale date * column
+        _buildTableColumn(
+          header: 'Sale date *',
+          width: 220,
+          isLast: true,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (status == PlotStatus.sold) {
+              final currentSaleDate =
+                  (plot['saleDate'] as String? ?? '').trim();
+              final saleDateEmpty = currentSaleDate.isEmpty;
+              return Center(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Container(
+                        width: 180,
+                        height: 32,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(4),
+                          boxShadow: [
+                            BoxShadow(
+                              color: saleDateEmpty
+                                  ? Colors.red
+                                  : Colors.black.withOpacity(0.15),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                              spreadRadius: 0,
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.calendar_today,
+                              size: 16,
+                              color: Colors.black.withOpacity(0.6),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                saleDateEmpty ? 'dd/mm/yyyy' : currentSaleDate,
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.normal,
+                                  color: saleDateEmpty
+                                      ? const Color(0xFFC1C1C1)
+                                      : Colors.black,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
+      ],
     );
   }
 
@@ -2619,7 +6933,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   TextSpan(
                     text: header.replaceAll(' *', ''),
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.w500,
                       color: Colors.black,
                     ),
@@ -2628,7 +6942,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     TextSpan(
                       text: ' *',
                       style: GoogleFonts.inter(
-                        fontSize: 16,
+                        fontSize: 14,
                         fontWeight: FontWeight.w500,
                         color: Colors.red,
                       ),
@@ -2664,21 +6978,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     );
   }
 
-  void _showStatusChangeDialog(BuildContext context, int layoutIndex, int plotIndex, PlotStatus currentStatus, GlobalKey statusKey) {
-    final RenderBox? renderBox = statusKey.currentContext?.findRenderObject() as RenderBox?;
+  void _showStatusChangeDialog(BuildContext context, int layoutIndex,
+      int plotIndex, PlotStatus currentStatus, GlobalKey statusKey) {
+    final RenderBox? renderBox =
+        statusKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
-    
+
     final overlay = Overlay.of(context);
     final offset = renderBox.localToGlobal(Offset.zero);
-    
+
     OverlayEntry? backdropEntry;
     OverlayEntry? overlayEntry;
-    
+
     void closeDropdown() {
       overlayEntry?.remove();
       backdropEntry?.remove();
     }
-    
+
     backdropEntry = OverlayEntry(
       builder: (context) => Positioned.fill(
         child: GestureDetector(
@@ -2687,7 +7003,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ),
       ),
     );
-    
+
     overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
         left: offset.dx - 50,
@@ -2717,7 +7033,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 children: [
                   // Header section
                   Container(
-                    padding: const EdgeInsets.only(top: 4, left: 8, right: 8, bottom: 0),
+                    padding: const EdgeInsets.only(
+                        top: 4, left: 8, right: 8, bottom: 0),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -2751,15 +7068,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         // Status options - Only show Available and Sold (matching Figma)
-                        ...([PlotStatus.available, PlotStatus.sold].map((status) {
+                        ...([PlotStatus.available, PlotStatus.sold]
+                            .map((status) {
                           final statusColor = _getStatusColor(status);
                           final statusText = _getStatusString(status);
-                          final backgroundColor = _getStatusBackgroundColor(status);
-                          
+                          final backgroundColor =
+                              _getStatusBackgroundColor(status);
+
                           return GestureDetector(
                             onTap: () {
                               setState(() {
-                                _layouts[layoutIndex]['plots'][plotIndex]['status'] = status;
+                                _layouts[layoutIndex]['plots'][plotIndex]
+                                    ['status'] = status;
                               });
                               _saveLayoutsData();
                               _savePlotsToDatabase(); // Save to database
@@ -2767,7 +7087,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                             },
                             child: Container(
                               margin: const EdgeInsets.only(bottom: 8),
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
                               decoration: BoxDecoration(
                                 color: backgroundColor,
                                 borderRadius: BorderRadius.circular(8),
@@ -2828,28 +7149,30 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ),
       ),
     );
-    
+
     overlay.insert(backdropEntry);
     overlay.insert(overlayEntry);
   }
 
-  void _showStatusChangeDialogForFiltered(BuildContext context, int index, PlotStatus currentStatus, GlobalKey statusKey) {
+  void _showStatusChangeDialogForFiltered(BuildContext context, int index,
+      PlotStatus currentStatus, GlobalKey statusKey) {
     if (index >= _filteredPlots.length) return;
-    
-    final RenderBox? renderBox = statusKey.currentContext?.findRenderObject() as RenderBox?;
+
+    final RenderBox? renderBox =
+        statusKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
-    
+
     final overlay = Overlay.of(context);
     final offset = renderBox.localToGlobal(Offset.zero);
-    
+
     OverlayEntry? backdropEntry;
     OverlayEntry? overlayEntry;
-    
+
     void closeDropdown() {
       overlayEntry?.remove();
       backdropEntry?.remove();
     }
-    
+
     backdropEntry = OverlayEntry(
       builder: (context) => Positioned.fill(
         child: GestureDetector(
@@ -2858,7 +7181,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ),
       ),
     );
-    
+
     overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
         left: offset.dx - 50,
@@ -2888,7 +7211,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 children: [
                   // Header section
                   Container(
-                    padding: const EdgeInsets.only(top: 4, left: 8, right: 8, bottom: 0),
+                    padding: const EdgeInsets.only(
+                        top: 4, left: 8, right: 8, bottom: 0),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -2922,18 +7246,20 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         // Status options - Only show Available and Sold (matching Figma)
-                        ...([PlotStatus.available, PlotStatus.sold].map((status) {
+                        ...([PlotStatus.available, PlotStatus.sold]
+                            .map((status) {
                           final statusColor = _getStatusColor(status);
                           final statusText = _getStatusString(status);
-                          final backgroundColor = _getStatusBackgroundColor(status);
-                          
+                          final backgroundColor =
+                              _getStatusBackgroundColor(status);
+
                           return GestureDetector(
                             onTap: () async {
                               final filteredPlot = _filteredPlots[index];
-                              final actualIndex = _allPlots.indexWhere((p) => 
-                                p['plotNumber'] == filteredPlot['plotNumber'] &&
-                                p['layout'] == filteredPlot['layout']
-                              );
+                              final actualIndex = _allPlots.indexWhere((p) =>
+                                  p['plotNumber'] ==
+                                      filteredPlot['plotNumber'] &&
+                                  p['layout'] == filteredPlot['layout']);
                               if (actualIndex >= 0) {
                                 _updatePlotStatus(actualIndex, status);
                               }
@@ -2941,7 +7267,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                             },
                             child: Container(
                               margin: const EdgeInsets.only(bottom: 8),
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
                               decoration: BoxDecoration(
                                 color: backgroundColor,
                                 borderRadius: BorderRadius.circular(8),
@@ -2955,7 +7282,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 ],
                               ),
                               child: Row(
-                                mainAxisSize: status == PlotStatus.sold ? MainAxisSize.min : MainAxisSize.max,
+                                mainAxisSize: status == PlotStatus.sold
+                                    ? MainAxisSize.min
+                                    : MainAxisSize.max,
                                 children: [
                                   Container(
                                     width: 16,
@@ -3002,27 +7331,32 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ),
       ),
     );
-    
+
     overlay.insert(backdropEntry);
     overlay.insert(overlayEntry);
   }
 
-  void _showAgentDropdown(BuildContext context, int layoutIndex, int plotIndex, String currentAgent, GlobalKey cellKey) {
-    final RenderBox? renderBox = cellKey.currentContext?.findRenderObject() as RenderBox?;
+  void _showAgentDropdown(BuildContext context, int layoutIndex, int plotIndex,
+      String currentAgent, GlobalKey cellKey) {
+    final RenderBox? renderBox =
+        cellKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
-    
+
     final agents = _availableAgents;
     final overlay = Overlay.of(context);
     final offset = renderBox.localToGlobal(Offset.zero);
-    
+
     OverlayEntry? backdropEntry;
     OverlayEntry? overlayEntry;
-    
+
     void closeDropdown() {
+      setState(() {
+        _isAgentDropdownOpen = false;
+      });
       overlayEntry?.remove();
       backdropEntry?.remove();
     }
-    
+
     backdropEntry = OverlayEntry(
       builder: (context) => Positioned.fill(
         child: GestureDetector(
@@ -3031,16 +7365,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ),
       ),
     );
-    
+
     overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
-        left: offset.dx - 50,
-        top: offset.dy + renderBox.size.height - 40,
+        left: offset.dx,
+        top: offset.dy + renderBox.size.height + 4,
         child: Material(
           color: Colors.transparent,
           child: Container(
-            width: renderBox.size.width + 100,
-            constraints: const BoxConstraints(maxHeight: 400),
+            width: renderBox.size.width,
+            constraints: const BoxConstraints(maxHeight: 300),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(8),
@@ -3053,15 +7387,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 ),
               ],
             ),
-            child: Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Header section
-                  Container(
-                    padding: const EdgeInsets.only(top: 4, left: 8, right: 8, bottom: 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header
+                GestureDetector(
+                  onTap: closeDropdown,
+                  child: Container(
+                    height: 48,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -3070,90 +7404,107 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                             'Select Agent',
                             style: GoogleFonts.inter(
                               fontSize: 14,
-                              fontWeight: FontWeight.normal,
+                              fontWeight: FontWeight.w500,
                               color: Colors.black,
                             ),
-                            textAlign: TextAlign.center,
                           ),
                         ),
-                        Transform.rotate(
-                          angle: 180 * 3.14159 / 180, // Rotate 180 degrees
-                          child: Icon(
-                            Icons.keyboard_arrow_down,
-                            size: 20,
-                            color: Colors.black,
+                        GestureDetector(
+                          onTap: closeDropdown,
+                          child: Transform.rotate(
+                            angle: 3.14159,
+                            child: SvgPicture.asset(
+                              'assets/images/Drrrop_down.svg',
+                              width: 14,
+                              height: 7,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 14,
+                                height: 7,
+                              ),
+                            ),
                           ),
                         ),
                       ],
                     ),
                   ),
-                  // Options section
-                  Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ...agents.asMap().entries.map((entry) {
-                          final agentIndex = entry.key;
-                          final agent = entry.value;
-                          final isLast = agentIndex == agents.length - 1;
-                          final isDirectSale = agent == 'Direct Sale';
-                          final isSelected = agent == currentAgent;
-                          
-                          return GestureDetector(
-                            onTap: () {
-                              setState(() {
-                                _layouts[layoutIndex]['plots'][plotIndex]['agent'] = agent;
-                              });
-                              _saveLayoutsData();
-                              _savePlotsToDatabase(); // Save to database
-                              closeDropdown();
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              margin: EdgeInsets.only(bottom: isLast ? 0 : 8),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                  color: Colors.black.withOpacity(0.1),
-                                  width: 1,
-                                ),
+                ),
+                // Options section
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ...agents.asMap().entries.map((entry) {
+                        final agentIndex = entry.key;
+                        final agent = entry.value;
+                        final isLast = agentIndex == agents.length - 1;
+                        final isDirectSale = agent == 'Direct Sale';
+                        final isSelected = agent == currentAgent;
+
+                        return GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              _layouts[layoutIndex]['plots'][plotIndex]
+                                  ['agent'] = agent;
+                              _isAgentDropdownOpen = false;
+                            });
+                            _saveLayoutsData();
+                            _savePlotsToDatabase();
+                            closeDropdown();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            margin: EdgeInsets.only(
+                                left: 8, right: 8, bottom: isLast ? 0 : 8),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(
+                                color: Colors.black.withOpacity(0.1),
+                                width: 1,
                               ),
-                              child: Row(
-                                children: [
-                                  Text(
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
                                     agent,
                                     style: GoogleFonts.inter(
                                       fontSize: 14,
                                       fontWeight: FontWeight.w500,
-                                      color: isDirectSale 
-                                          ? const Color(0xFF0C8CE9) // Blue for Direct Sale
+                                      color: isDirectSale
+                                          ? const Color(0xFF0C8CE9)
                                           : Colors.black,
                                     ),
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
-                          );
-                        }),
-                      ],
-                    ),
+                          ),
+                        );
+                      }),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
-    
+
+    setState(() {
+      _isAgentDropdownOpen = true;
+    });
     overlay.insert(backdropEntry);
     overlay.insert(overlayEntry);
   }
 
-  Future<void> _selectSaleDate(int layoutIndex, int plotIndex, String key) async {
+  Future<void> _selectSaleDate(
+      int layoutIndex, int plotIndex, String key) async {
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: DateTime.now(),
@@ -3172,9 +7523,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         );
       },
     );
-    
+
     if (picked != null) {
-      final formattedDate = '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+      final formattedDate =
+          '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
       setState(() {
         _layouts[layoutIndex]['plots'][plotIndex]['saleDate'] = formattedDate;
         _saleDateControllers[key]?.text = formattedDate;
@@ -3182,7 +7534,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       _saveLayoutsData();
     }
   }
-
 }
 
 // Focus-aware input container widget that dynamically changes shadow based on focus state
@@ -3194,6 +7545,7 @@ class _FocusAwareInputContainer extends StatefulWidget {
   final double height;
   final Color backgroundColor;
   final double borderRadius;
+  final bool hasError;
 
   const _FocusAwareInputContainer({
     required this.focusNode,
@@ -3203,6 +7555,7 @@ class _FocusAwareInputContainer extends StatefulWidget {
     this.height = 40,
     this.backgroundColor = const Color(0xFFF8F9FA),
     this.borderRadius = 8,
+    this.hasError = false,
   });
 
   @override
@@ -3220,7 +7573,9 @@ class _FocusAwareInputContainerState extends State<_FocusAwareInputContainer> {
     _hadFocus = widget.focusNode.hasFocus;
     _focusListener = () {
       // Call onFocusLost when focus changes from true to false
-      if (_hadFocus && !widget.focusNode.hasFocus && widget.onFocusLost != null) {
+      if (_hadFocus &&
+          !widget.focusNode.hasFocus &&
+          widget.onFocusLost != null) {
         widget.onFocusLost!();
       }
       _hadFocus = widget.focusNode.hasFocus;
@@ -3247,8 +7602,11 @@ class _FocusAwareInputContainerState extends State<_FocusAwareInputContainer> {
         boxShadow: [
           BoxShadow(
             color: widget.focusNode.hasFocus
-                ? const Color(0xFF0C8CE9) // Focus color: #0C8CE9 (solid blue)
-                : Colors.black.withOpacity(0.15), // Default color
+                ? const Color(
+                    0xFF0C8CE9) // Match Project Details focus behavior
+                : (widget.hasError
+                    ? Colors.red
+                    : Colors.black.withOpacity(0.15)),
             blurRadius: 2,
             offset: const Offset(0, 0),
             spreadRadius: 0,
@@ -3259,4 +7617,3 @@ class _FocusAwareInputContainerState extends State<_FocusAwareInputContainer> {
     );
   }
 }
-

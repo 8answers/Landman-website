@@ -2,6 +2,7 @@ enum NavigationPage {
   account,
   notifications,
   toDoList,
+  report,
   recentProjects,
   allProjects,
   trash,
@@ -12,6 +13,7 @@ enum NavigationPage {
   dashboard,
   dataEntry,
   plotStatus,
+  documents,
   settings,
 }
 

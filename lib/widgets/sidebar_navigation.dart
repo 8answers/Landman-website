@@ -12,6 +12,15 @@ class SidebarNavigation extends StatefulWidget {
   final ProjectSaveStatusType? saveStatus;
   final String? savedTimeAgo;
   final bool? hasDataEntryErrors;
+  final bool? hasPlotStatusErrors;
+  final bool? hasAreaErrors;
+  final bool? hasPartnerErrors;
+  final bool? hasExpenseErrors;
+  final bool? hasSiteErrors;
+  final bool? hasProjectManagerErrors;
+  final bool? hasAgentErrors;
+  final bool? hasAboutErrors;
+  final bool isLoading;
 
   const SidebarNavigation({
     super.key,
@@ -21,6 +30,15 @@ class SidebarNavigation extends StatefulWidget {
     this.saveStatus,
     this.savedTimeAgo,
     this.hasDataEntryErrors,
+    this.hasPlotStatusErrors,
+    this.hasAreaErrors,
+    this.hasPartnerErrors,
+    this.hasExpenseErrors,
+    this.hasSiteErrors,
+    this.hasProjectManagerErrors,
+    this.hasAgentErrors,
+    this.hasAboutErrors,
+    this.isLoading = false,
   });
 
   @override
@@ -31,20 +49,119 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
   bool _isHomeHovered = false;
   bool _isDataEntryHovered = false;
 
+  Widget _skeletonBlock({required double width, required double height}) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE3E7EB),
+        borderRadius: BorderRadius.circular(8),
+      ),
+    );
+  }
+
+  Widget _buildProjectDetailsSidebarSkeleton() {
+    return Container(
+      width: 252,
+      height: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F4F4),
+        border: const Border(
+          right: BorderSide(
+            color: Color(0xFF5C5C5C),
+            width: 0.5,
+          ),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _skeletonBlock(width: 174, height: 35),
+            const SizedBox(height: 24),
+            _skeletonBlock(width: 52, height: 14),
+            const SizedBox(height: 8),
+            _skeletonBlock(width: 140, height: 16),
+            const SizedBox(height: 8),
+            _skeletonBlock(width: 96, height: 14),
+            const SizedBox(height: 40),
+            _skeletonBlock(width: 84, height: 24),
+            const SizedBox(height: 40),
+            _skeletonBlock(width: 120, height: 14),
+            const SizedBox(height: 16),
+            ...List.generate(
+              6,
+              (index) => Padding(
+                padding: EdgeInsets.only(bottom: index == 5 ? 0 : 16),
+                child: _skeletonBlock(width: 160, height: 24),
+              ),
+            ),
+            const Spacer(),
+            _skeletonBlock(width: 90, height: 24),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOriginalSidebarSkeleton() {
+    return Container(
+      width: 252,
+      height: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFAFA),
+        border: const Border(
+          right: BorderSide(
+            color: Color(0xFF5C5C5C),
+            width: 0.5,
+          ),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _skeletonBlock(width: 174, height: 35),
+            const SizedBox(height: 24),
+            _skeletonBlock(width: 120, height: 24),
+            const SizedBox(height: 40),
+            _skeletonBlock(width: 70, height: 14),
+            const SizedBox(height: 16),
+            _skeletonBlock(width: 150, height: 24),
+            const SizedBox(height: 16),
+            _skeletonBlock(width: 130, height: 24),
+            const SizedBox(height: 40),
+            _skeletonBlock(width: 40, height: 14),
+            const SizedBox(height: 16),
+            _skeletonBlock(width: 120, height: 24),
+            const SizedBox(height: 40),
+            _skeletonBlock(width: 64, height: 14),
+            const SizedBox(height: 16),
+            _skeletonBlock(width: 80, height: 24),
+            const Spacer(),
+            _skeletonBlock(width: 80, height: 24),
+            const SizedBox(height: 16),
+            _skeletonBlock(width: 100, height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildProjectDetailsSidebar() {
     return Container(
       width: 252,
       height: double.infinity,
       decoration: BoxDecoration(
         color: const Color(0xFFF4F4F4),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.25),
-            blurRadius: 2,
-            offset: const Offset(1, 0),
-            spreadRadius: 0,
+        border: const Border(
+          right: BorderSide(
+            color: Color(0xFF5C5C5C),
+            width: 0.5,
           ),
-        ],
+        ),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
@@ -54,86 +171,17 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 8answers title
-                Text(
-                  '8answers',
-                  style: GoogleFonts.inter(
-                    fontSize: 20,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.black,
+                // 8answers logo
+                SizedBox(
+                  width: 174,
+                  height: 35,
+                  child: SvgPicture.asset(
+                    'assets/images/8answers.svg',
+                    fit: BoxFit.contain,
+                    alignment: Alignment.centerLeft,
                   ),
                 ),
-                const SizedBox(height: 40),
-                // Home link
-                MouseRegion(
-                  onEnter: (_) => setState(() => _isHomeHovered = true),
-                  onExit: (_) => setState(() => _isHomeHovered = false),
-                  child: GestureDetector(
-                    onTap: () => widget.onPageChanged(NavigationPage.home),
-                    child: Container(
-                      height: 24,
-                      child: Row(
-                        children: [
-                          // Back arrow icon
-                          Container(
-                            width: 7,
-                            height: 14,
-                            child: Icon(
-                              Icons.arrow_back_ios,
-                              size: 14,
-                              color: const Color(0xFF5C5C5C),
-                            ),
-                          ),
-                          const SizedBox(width: 24),
-                          // Home icon
-                          SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: SvgPicture.asset(
-                              _isHomeHovered
-                                  ? 'assets/images/Home_hover.svg'
-                                  : (widget.currentPage == NavigationPage.home
-                                      ? 'assets/images/Home_active.svg'
-                                      : 'assets/images/Home_inactive.svg'),
-                              width: 16,
-                              height: 16,
-                              fit: BoxFit.contain,
-                              placeholderBuilder: (context) => const SizedBox(
-                                width: 16,
-                                height: 16,
-                              ),
-                              errorBuilder: (context, error, stackTrace) {
-                                print('Error loading Home icon: $error');
-                                return const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: Icon(Icons.home, size: 16, color: Color(0xFF5C5C5C)),
-                                );
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Home text
-                          Text(
-                            'Home',
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: widget.currentPage == NavigationPage.home
-                                  ? FontWeight.w500
-                                  : FontWeight.normal,
-                              color: widget.currentPage == NavigationPage.home
-                                  ? const Color(0xFF000000)
-                                  : (_isHomeHovered
-                                      ? const Color(0xCC000000)
-                                      : const Color(0xFF5C5C5C)),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 40),
+                const SizedBox(height: 24),
                 // Project section
                 if (widget.projectName != null) ...[
                   Column(
@@ -171,6 +219,78 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   ),
                   const SizedBox(height: 40),
                 ],
+                // Home link
+                MouseRegion(
+                  onEnter: (_) => setState(() => _isHomeHovered = true),
+                  onExit: (_) => setState(() => _isHomeHovered = false),
+                  child: GestureDetector(
+                    onTap: () => widget.onPageChanged(NavigationPage.home),
+                    child: SizedBox(
+                      height: 24,
+                      child: Row(
+                        children: [
+                          // Back arrow icon
+                          SizedBox(
+                            width: 7,
+                            height: 14,
+                            child: Icon(
+                              Icons.arrow_back_ios,
+                              size: 14,
+                              color: const Color(0xFF5C5C5C),
+                            ),
+                          ),
+                          const SizedBox(width: 24),
+                          // Home icon
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: SvgPicture.asset(
+                              _isHomeHovered
+                                  ? 'assets/images/Home_hover.svg'
+                                  : (widget.currentPage == NavigationPage.home
+                                      ? 'assets/images/Home_active.svg'
+                                      : 'assets/images/Home_inactive.svg'),
+                              width: 16,
+                              height: 16,
+                              fit: BoxFit.contain,
+                              placeholderBuilder: (context) => const SizedBox(
+                                width: 16,
+                                height: 16,
+                              ),
+                              errorBuilder: (context, error, stackTrace) {
+                                print('Error loading Home icon: $error');
+                                return const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: Icon(Icons.home,
+                                      size: 16, color: Color(0xFF5C5C5C)),
+                                );
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          // Home text
+                          Text(
+                            'Home',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight:
+                                  widget.currentPage == NavigationPage.home
+                                      ? FontWeight.w500
+                                      : FontWeight.normal,
+                              color: widget.currentPage == NavigationPage.home
+                                  ? const Color(0xFF000000)
+                                  : (_isHomeHovered
+                                      ? const Color(0xCC000000)
+                                      : const Color(0xFF5C5C5C)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 40),
                 // Data Visualization section
                 Text(
                   'Data Visualization',
@@ -190,9 +310,9 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   onTap: () => widget.onPageChanged(NavigationPage.dashboard),
                 ),
                 const SizedBox(height: 40),
-                // Edit section
+                // Project Details section
                 Text(
-                  'Edit',
+                  'Project Details',
                   style: GoogleFonts.inter(
                     fontSize: 14,
                     fontWeight: FontWeight.normal,
@@ -234,18 +354,26 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                             'Data Entry',
                             style: GoogleFonts.inter(
                               fontSize: 16,
-                              fontWeight: widget.currentPage == NavigationPage.dataEntry
-                                  ? FontWeight.w500
-                                  : FontWeight.w400,
-                              color: widget.currentPage == NavigationPage.dataEntry
-                                  ? Colors.black
-                                  : (_isDataEntryHovered
-                                      ? const Color(0xCC000000)
-                                      : const Color(0xA3000000)),
+                              fontWeight:
+                                  widget.currentPage == NavigationPage.dataEntry
+                                      ? FontWeight.w500
+                                      : FontWeight.w400,
+                              color:
+                                  widget.currentPage == NavigationPage.dataEntry
+                                      ? Colors.black
+                                      : (_isDataEntryHovered
+                                          ? const Color(0xCC000000)
+                                          : const Color(0xA3000000)),
                               letterSpacing: 0,
                             ),
                           ),
-                          if (widget.hasDataEntryErrors == true) ...[
+                          if ((widget.hasAreaErrors == true ||
+                              widget.hasPartnerErrors == true ||
+                              widget.hasExpenseErrors == true ||
+                              widget.hasSiteErrors == true ||
+                              widget.hasProjectManagerErrors == true ||
+                              widget.hasAgentErrors == true ||
+                              widget.hasAboutErrors == true)) ...[
                             const SizedBox(width: 8),
                             SvgPicture.asset(
                               'assets/images/Error_msg.svg',
@@ -273,7 +401,17 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   activeIconPath: 'assets/images/Plot_status_active.svg',
                   label: 'Plot Status',
                   isActive: widget.currentPage == NavigationPage.plotStatus,
+                  hasError: widget.hasPlotStatusErrors ?? false,
                   onTap: () => widget.onPageChanged(NavigationPage.plotStatus),
+                ),
+                const SizedBox(height: 8),
+                NavLink(
+                  inactiveIconPath: 'assets/images/Document_inactive.svg',
+                  hoverIconPath: 'assets/images/Document_inactive.svg',
+                  activeIconPath: 'assets/images/Document_active.svg',
+                  label: 'Documents',
+                  isActive: widget.currentPage == NavigationPage.documents,
+                  onTap: () => widget.onPageChanged(NavigationPage.documents),
                 ),
                 const SizedBox(height: 40),
                 // Task section
@@ -294,13 +432,31 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   isActive: widget.currentPage == NavigationPage.toDoList,
                   onTap: () => widget.onPageChanged(NavigationPage.toDoList),
                 ),
+                const SizedBox(height: 40),
+                Text(
+                  'Report Generator',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: const Color(0xFF5D5D5D),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                NavLink(
+                  inactiveIconPath: 'assets/images/Report_inactive.svg',
+                  hoverIconPath: 'assets/images/Report_hover.svg',
+                  activeIconPath: 'assets/images/Report_active.svg',
+                  label: 'Reports',
+                  isActive: widget.currentPage == NavigationPage.report,
+                  onTap: () => widget.onPageChanged(NavigationPage.report),
+                ),
               ],
             ),
             // Settings at bottom
             NavLink(
-              inactiveIconPath: 'assets/images/Account_inactive.svg', // Placeholder - will need Settings icon
-              hoverIconPath: 'assets/images/Account_.hoversvg.svg',
-              activeIconPath: 'assets/images/Account_active.svg',
+              inactiveIconPath: '/Users/prajna/Documents/settings_inactive.svg',
+              hoverIconPath: '/Users/prajna/Documents/settings_hover.svg',
+              activeIconPath: '/Users/prajna/Documents/settings_active.svg',
               label: 'Settings',
               isActive: widget.currentPage == NavigationPage.settings,
               onTap: () => widget.onPageChanged(NavigationPage.settings),
@@ -317,14 +473,12 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
       height: double.infinity,
       decoration: BoxDecoration(
         color: const Color(0xFFFAFAFA),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.25),
-            blurRadius: 2,
-            offset: const Offset(1, 0),
-            spreadRadius: 0,
+        border: const Border(
+          right: BorderSide(
+            color: Color(0xFF5C5C5C),
+            width: 0.5,
           ),
-        ],
+        ),
       ),
       child: Column(
         children: [
@@ -333,12 +487,13 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
             padding: const EdgeInsets.all(24),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: Text(
-                '8answers',
-                style: GoogleFonts.inter(
-                  fontSize: 20,
-                  fontWeight: FontWeight.normal,
-                  color: Colors.black,
+              child: SizedBox(
+                width: 174,
+                height: 35,
+                child: SvgPicture.asset(
+                  'assets/images/8answers.svg',
+                  fit: BoxFit.contain,
+                  alignment: Alignment.centerLeft,
                 ),
               ),
             ),
@@ -355,41 +510,15 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                     children: [
                       // Account (Active)
                       NavLink(
-                        key: ValueKey('account_${widget.currentPage == NavigationPage.account}'),
+                        key: ValueKey(
+                            'account_${widget.currentPage == NavigationPage.account}'),
                         inactiveIconPath: 'assets/images/Account_inactive.svg',
                         hoverIconPath: 'assets/images/Account_.hoversvg.svg',
                         activeIconPath: 'assets/images/Account_active.svg',
                         label: 'Account',
                         isActive: widget.currentPage == NavigationPage.account,
-                        onTap: () => widget.onPageChanged(NavigationPage.account),
-                      ),
-                      const SizedBox(height: 40),
-                      // Task section
-                      Text(
-                        'Task',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.normal,
-                          color: Colors.black.withOpacity(0.4),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      NavLink(
-                        inactiveIconPath: 'assets/images/Notifications_inactive.svg',
-                        hoverIconPath: 'assets/images/Notifications_hover.svg',
-                        activeIconPath: 'assets/images/Notificatons_active.svg',
-                        label: 'Notifications',
-                        isActive: widget.currentPage == NavigationPage.notifications,
-                        onTap: () => widget.onPageChanged(NavigationPage.notifications),
-                      ),
-                      const SizedBox(height: 16),
-                      NavLink(
-                        inactiveIconPath: 'assets/images/To-do_inactive.svg',
-                        hoverIconPath: 'assets/images/To-do_hover.svg',
-                        activeIconPath: 'assets/images/To-do_active.svg',
-                        label: 'To-Do List',
-                        isActive: widget.currentPage == NavigationPage.toDoList,
-                        onTap: () => widget.onPageChanged(NavigationPage.toDoList),
+                        onTap: () =>
+                            widget.onPageChanged(NavigationPage.account),
                       ),
                       const SizedBox(height: 40),
                       // Projects section
@@ -403,26 +532,34 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                       ),
                       const SizedBox(height: 16),
                       NavLink(
-                        inactiveIconPath: 'assets/images/Recent projects_inactive.svg',
-                        hoverIconPath: 'assets/images/Recent projects_hover.svg',
-                        activeIconPath: 'assets/images/Recent projects_active.svg',
+                        inactiveIconPath:
+                            'assets/images/Recent projects_inactive.svg',
+                        hoverIconPath:
+                            'assets/images/Recent projects_hover.svg',
+                        activeIconPath:
+                            'assets/images/Recent projects_active.svg',
                         label: 'Recent Projects',
-                        isActive: widget.currentPage == NavigationPage.recentProjects,
-                        onTap: () => widget.onPageChanged(NavigationPage.recentProjects),
+                        isActive:
+                            widget.currentPage == NavigationPage.recentProjects,
+                        onTap: () =>
+                            widget.onPageChanged(NavigationPage.recentProjects),
                       ),
                       const SizedBox(height: 16),
                       NavLink(
-                        inactiveIconPath: 'assets/images/All projects_inactive.svg',
+                        inactiveIconPath:
+                            'assets/images/All projects_inactive.svg',
                         hoverIconPath: 'assets/images/All_projects_hover.svg',
                         activeIconPath: 'assets/images/All projects_active.svg',
                         label: 'All Projects',
-                        isActive: widget.currentPage == NavigationPage.allProjects,
-                        onTap: () => widget.onPageChanged(NavigationPage.allProjects),
+                        isActive:
+                            widget.currentPage == NavigationPage.allProjects,
+                        onTap: () =>
+                            widget.onPageChanged(NavigationPage.allProjects),
                       ),
                       const SizedBox(height: 40),
-                      // Recover section
+                      // Task section
                       Text(
-                        'Recover',
+                        'Task',
                         style: GoogleFonts.inter(
                           fontSize: 14,
                           fontWeight: FontWeight.normal,
@@ -431,17 +568,18 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                       ),
                       const SizedBox(height: 16),
                       NavLink(
-                        inactiveIconPath: 'assets/images/Trash_inactive.svg',
-                        hoverIconPath: 'assets/images/Trash_hover.svg',
-                        activeIconPath: 'assets/images/Trash_active.svg',
-                        label: 'Trash',
-                        isActive: widget.currentPage == NavigationPage.trash,
-                        onTap: () => widget.onPageChanged(NavigationPage.trash),
+                        inactiveIconPath: 'assets/images/To-do_inactive.svg',
+                        hoverIconPath: 'assets/images/To-do_hover.svg',
+                        activeIconPath: 'assets/images/To-do_active.svg',
+                        label: 'To-Do List',
+                        isActive: widget.currentPage == NavigationPage.toDoList,
+                        onTap: () =>
+                            widget.onPageChanged(NavigationPage.toDoList),
                       ),
                       const SizedBox(height: 40),
-                      // About section
+                      // Support section
                       Text(
-                        'About',
+                        'Support',
                         style: GoogleFonts.inter(
                           fontSize: 14,
                           fontWeight: FontWeight.normal,
@@ -470,7 +608,8 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                         label: 'Log Out',
                         iconRotation: 0,
                         isActive: widget.currentPage == NavigationPage.logout,
-                        onTap: () => widget.onPageChanged(NavigationPage.logout),
+                        onTap: () =>
+                            widget.onPageChanged(NavigationPage.logout),
                       ),
                       const SizedBox(height: 16),
                       Padding(
@@ -497,14 +636,29 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
 
   @override
   Widget build(BuildContext context) {
-    // Show new sidebar design when on project details, dashboard, data entry, or plot status pages
+    if (widget.isLoading) {
+      if (widget.currentPage == NavigationPage.projectDetails ||
+          widget.currentPage == NavigationPage.dashboard ||
+          widget.currentPage == NavigationPage.dataEntry ||
+          widget.currentPage == NavigationPage.plotStatus ||
+          widget.currentPage == NavigationPage.documents ||
+          widget.currentPage == NavigationPage.settings ||
+          widget.currentPage == NavigationPage.report) {
+        return _buildProjectDetailsSidebarSkeleton();
+      }
+      return _buildOriginalSidebarSkeleton();
+    }
+
+    // Show new sidebar design when on project details, dashboard, data entry, plot status, documents, or settings pages
     if (widget.currentPage == NavigationPage.projectDetails ||
         widget.currentPage == NavigationPage.dashboard ||
         widget.currentPage == NavigationPage.dataEntry ||
-        widget.currentPage == NavigationPage.plotStatus) {
+        widget.currentPage == NavigationPage.plotStatus ||
+        widget.currentPage == NavigationPage.documents ||
+        widget.currentPage == NavigationPage.settings ||
+        widget.currentPage == NavigationPage.report) {
       return _buildProjectDetailsSidebar();
     }
     return _buildOriginalSidebar();
   }
 }
-

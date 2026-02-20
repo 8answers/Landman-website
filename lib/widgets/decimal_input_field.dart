@@ -20,6 +20,7 @@ class DecimalInputField extends StatefulWidget {
   final TextStyle? suffixStyle;
   final EdgeInsets? contentPadding;
   final bool isDense;
+  final int decimalPlaces;
 
   const DecimalInputField({
     required this.controller,
@@ -37,6 +38,7 @@ class DecimalInputField extends StatefulWidget {
     this.suffixStyle,
     this.contentPadding,
     this.isDense = true,
+    this.decimalPlaces = 2,
   });
 
   @override
@@ -56,8 +58,8 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
     _internalFocusNode.addListener(_handleFocusChange);
     widget.controller.addListener(_handleTextChange);
     
-    // Create a display controller that syncs with the original
-    _displayController = TextEditingController(text: _getDisplayText());
+    // Create a display controller that syncs with the original (full text)
+    _displayController = TextEditingController(text: widget.controller.text);
     _displayController.addListener(_handleDisplayTextChange);
   }
 
@@ -74,14 +76,27 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
   }
 
   void _handleFocusChange() {
+    final hadFocus = _hasFocus;
     setState(() {
       _hasFocus = _internalFocusNode.hasFocus;
       _updateDisplayController();
       
-      // When focus is gained, position cursor at the end of the visible text (before .00)
+      // When focus is gained, position cursor appropriately
       if (_hasFocus) {
-        final displayText = _getDisplayText();
-        _displayController.selection = TextSelection.collapsed(offset: displayText.length);
+        final text = _displayController.text;
+        // Position cursor at the end of the text
+        final cursorPosition = text.length;
+        _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+        // Request focus to ensure cursor is visible
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_internalFocusNode.hasFocus) {
+            _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+          }
+        });
+      }
+      // When focus is lost, trigger onEditingComplete (acts like pressing Enter)
+      else if (hadFocus && !_hasFocus) {
+        widget.onEditingComplete?.call();
       }
     });
   }
@@ -97,12 +112,40 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
   void _handleDisplayTextChange() {
     if (!_isUpdatingController) {
       _isUpdatingController = true;
-      final displayText = _displayController.text;
+      String displayText = _displayController.text;
       
-      // Always update the original controller with the display text
-      // (the display text already has ".00" removed if it was there)
-      widget.controller.text = displayText;
-      widget.onChanged?.call(displayText);
+      // If user typed decimal digits, limit to 2 decimal places
+      if (displayText.contains('.')) {
+        final parts = displayText.split('.');
+        final integerPart = parts[0];
+        final decimalDigits = parts.length > 1 ? parts[1] : '';
+        
+        // Limit to specified decimal places
+        final limitedDecimalDigits = decimalDigits.length > widget.decimalPlaces ? decimalDigits.substring(0, widget.decimalPlaces) : decimalDigits;
+        final fullText = integerPart + '.' + limitedDecimalDigits;
+        
+        // Update widget controller with the full text
+        widget.controller.text = fullText;
+        widget.onChanged?.call(fullText);
+        
+        // If we had to truncate, update the display controller
+        if (decimalDigits.length > widget.decimalPlaces) {
+          final currentSelection = _displayController.selection;
+          _displayController.value = TextEditingValue(
+            text: fullText,
+            selection: TextSelection.collapsed(
+              offset: currentSelection.baseOffset <= fullText.length 
+                ? currentSelection.baseOffset 
+                : fullText.length,
+            ),
+          );
+        }
+      } else {
+        // No decimal point, just update normally
+        widget.controller.text = displayText;
+        widget.onChanged?.call(displayText);
+      }
+      
       _isUpdatingController = false;
     }
   }
@@ -110,15 +153,15 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
   void _updateDisplayController() {
     if (!_isUpdatingController) {
       _isUpdatingController = true;
-      final displayText = _getDisplayText();
+      final fullText = widget.controller.text;
       final selection = _displayController.selection;
       
-      if (_displayController.text != displayText) {
+      if (_displayController.text != fullText) {
         _displayController.value = TextEditingValue(
-          text: displayText,
-          selection: selection.baseOffset <= displayText.length 
+          text: fullText,
+          selection: selection.baseOffset <= fullText.length 
               ? selection 
-              : TextSelection.collapsed(offset: displayText.length),
+              : TextSelection.collapsed(offset: fullText.length),
         );
       }
       _isUpdatingController = false;
@@ -128,63 +171,79 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
   String _getDisplayDecimalSuffix() {
     final text = widget.controller.text;
     
-    // Don't show suffix if field is empty
-    if (text.isEmpty) {
+    // Don't show suffix if field is empty OR doesn't contain a decimal point
+    if (text.isEmpty || !text.contains('.')) {
       return '';
     }
 
-    // Check if text already contains a decimal point
+    // Check if text contains a decimal point
     if (text.contains('.')) {
       final parts = text.split('.');
       if (parts.length == 2) {
         final decimalPart = parts[1];
         
-        // If user has entered their own decimal digits, don't show overlay
-        // Only show overlay if decimal part is exactly "00" (auto-added)
-        if (decimalPart == '00') {
-          return '.00';
-        }
-        
-        // If decimal part is incomplete (user typed fewer than 2 digits), don't show overlay
-        // Let the user complete their entry
-        if (decimalPart.length < 2) {
-          return '';
+        // If decimal part is empty (user just typed "."), show zeros in grey while focused
+        if (decimalPart.isEmpty && _hasFocus) {
+          return '0' * widget.decimalPlaces;
         }
       }
-      return '';
     }
 
-    // If no decimal point and has text, show .00
-    return '.00';
+    // Don't show grey suffix if user has typed actual decimal digits
+    return '';
   }
 
-  String _getDisplayText() {
-    final text = widget.controller.text;
-    // If text ends with ".00", hide it from the TextField display (show as overlay instead)
-    if (text.endsWith('.00')) {
-      return text.substring(0, text.length - 3); // Remove ".00"
-    }
-    return text;
+  bool _isZeroValue(String text) {
+    if (text.isEmpty) return false;
+    // Remove commas and spaces for checking
+    final cleaned = text.replaceAll(',', '').replaceAll(' ', '').trim();
+    if (cleaned.isEmpty) return false;
+    // Check if it's "0", "0.0", "0.00", etc.
+    final numValue = double.tryParse(cleaned);
+    return numValue != null && numValue == 0.0;
   }
 
   @override
   Widget build(BuildContext context) {
     final decimalSuffix = _getDisplayDecimalSuffix();
-    final displayText = _getDisplayText();
+    final text = widget.controller.text;
+    // Calculate what to show in TextField vs overlay
+    // Show all actual typed text in black (integer + decimal point + typed decimal digits)
+    // Only show grey placeholder zeros when user just typed "." with no digits after
+    final displayText = text;
+    // Check if the value is zero - if so, display in grey like a placeholder
+    final isZero = _isZeroValue(text);
     
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        // The actual TextField - use display controller to hide ".00" if present
+        // The actual TextField - decimal digits will be transparent
         TextField(
           controller: _displayController,
           focusNode: _internalFocusNode,
           keyboardType: widget.keyboardType,
           textAlignVertical: TextAlignVertical.center,
           textAlign: TextAlign.left,
+          textInputAction: TextInputAction.next,
           inputFormatters: widget.inputFormatters,
-          onTap: widget.onTap,
+          onTap: () {
+            // Ensure cursor is visible on tap
+            widget.onTap?.call();
+            // Request focus and position cursor
+            if (!_internalFocusNode.hasFocus) {
+              _internalFocusNode.requestFocus();
+            }
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (_internalFocusNode.hasFocus) {
+                final text = _displayController.text;
+                final cursorPosition = text.length;
+                _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+              }
+            });
+          },
           onTapOutside: (event) {
+            // Unfocus the field when tapping outside, which will trigger onEditingComplete
+            _internalFocusNode.unfocus();
             widget.onTapOutside?.call();
           },
           onChanged: (value) {
@@ -193,13 +252,18 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
           onEditingComplete: () {
             widget.onEditingComplete?.call();
           },
+          onSubmitted: (value) {
+            // When user presses Enter, format and move to next field
+            widget.onEditingComplete?.call();
+            FocusScope.of(context).nextFocus();
+          },
           decoration: InputDecoration(
             hintText: widget.hintText,
             hintStyle: widget.hintStyle ??
                 GoogleFonts.inter(
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
-                  color: Color.fromARGB(191, 173, 173, 173),
+                  color: const Color.fromARGB(191, 173, 173, 173),
                 ),
             border: InputBorder.none,
             contentPadding: widget.contentPadding ?? EdgeInsets.zero,
@@ -209,47 +273,12 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
               GoogleFonts.inter(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
+                // Show text in black while typing
                 color: Colors.black,
               ),
         ),
-        // Display the decimal suffix as text overlay - positioned at the start of text input
-        if (decimalSuffix.isNotEmpty)
-          Positioned(
-            left: 0,
-            top: (widget.contentPadding?.top ?? 0) - 3, // Move up by 3 pixels
-            child: IgnorePointer(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Display the entered text (but transparent so it doesn't show)
-                  Text(
-                    displayText,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.transparent,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.clip,
-                  ),
-                  // Display the suffix - grey when focused (editing), black when not focused (completed)
-                  Text(
-                    decimalSuffix,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: _hasFocus 
-                          ? Color.fromARGB(191, 173, 173, 173)  // Grey when editing
-                          : Colors.black,  // Black when completed
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.clip,
-                  ),
-                ],
-              ),
-            ),
-          ),
+        // Removed overlay text - now showing text directly in TextField
+        // Removed decimal suffix overlay - showing text directly in TextField
       ],
     );
   }

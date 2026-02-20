@@ -1,11 +1,14 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'pages/login_page.dart';
 import 'screens/account_settings_screen.dart';
+import 'widgets/app_scale_metrics.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   try {
     await Supabase.initialize(
       url: 'https://xljsafhmsncothpsbfpp.supabase.co',
@@ -17,7 +20,7 @@ void main() async {
   } catch (e) {
     print('Error initializing Supabase: $e');
   }
-  
+
   runApp(const MyApp());
 }
 
@@ -29,12 +32,91 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Landman Website',
       debugShowCheckedModeBanner: false,
+      builder: (context, child) {
+        if (child == null) return const SizedBox.shrink();
+        return AppScaleWrapper(
+          baseWidth: 1440,
+          baseHeight: 1024,
+          child: child,
+        );
+      },
       theme: ThemeData(
         primarySwatch: Colors.blue,
         fontFamily: 'Inter',
         useMaterial3: true,
       ),
       home: const AuthWrapper(),
+    );
+  }
+}
+
+class AppScaleWrapper extends StatelessWidget {
+  const AppScaleWrapper({
+    super.key,
+    required this.child,
+    required this.baseWidth,
+    required this.baseHeight,
+  });
+
+  final Widget child;
+  final double baseWidth;
+  final double baseHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final mediaQuery = MediaQuery.of(context);
+        final availableWidth = constraints.maxWidth;
+        final availableHeight = constraints.maxHeight;
+
+        if (!availableWidth.isFinite || !availableHeight.isFinite) {
+          return child;
+        }
+
+        final widthRatio = availableWidth / baseWidth;
+        final heightRatio = availableHeight / baseHeight;
+        // Keep 1340..1440 width filled edge-to-edge by prioritizing width scale.
+        final useWidthPriorityScale =
+            availableWidth >= 1340 && availableWidth <= baseWidth;
+        final rawScale = useWidthPriorityScale
+            ? widthRatio
+            : math.min(widthRatio, heightRatio);
+        final scale = rawScale.clamp(0.0, 1.0);
+        final shouldStretchHorizontally = availableWidth > baseWidth;
+
+        final designViewportWidthRaw =
+            scale > 0 ? availableWidth / scale : baseWidth;
+        final designViewportWidth =
+            shouldStretchHorizontally ? designViewportWidthRaw : baseWidth;
+        final designCanvasSize = Size(designViewportWidth, baseHeight);
+
+        return SizedBox(
+          width: availableWidth,
+          height: availableHeight,
+          child: ClipRect(
+            child: FittedBox(
+              fit: useWidthPriorityScale ? BoxFit.fitWidth : BoxFit.contain,
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: designCanvasSize.width,
+                height: baseHeight,
+                child: AppScaleMetrics(
+                  designViewportWidth: designViewportWidth,
+                  child: MediaQuery(
+                    // Below 1440 keep fixed-width scaling; above 1440 allow horizontal stretch.
+                    data: mediaQuery.copyWith(
+                      size: designCanvasSize,
+                      textScaler: const TextScaler.linear(1.0),
+                    ),
+                    child: child,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

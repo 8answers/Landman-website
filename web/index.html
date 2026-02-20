@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Landman Website">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, shrink-to-fit=no">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Landman Website">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Landman Website</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    /* Prevent zoom while allowing Flutter to handle scrolling */
+    html, body {
+      touch-action: manipulation !important;
+      -ms-touch-action: manipulation !important;
+      user-zoom: fixed !important;
+      -webkit-user-zoom: fixed !important;
+      overscroll-behavior: none;
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Prevent double-tap zoom on specific elements */
+    * {
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Loading indicator */
+    .loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background-color: #ffffff;
+    }
+
+    .loader {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #3498db;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* Remove native focus outline on Flutter web text inputs */
+    flt-text-editing-host input:focus,
+    flt-text-editing-host textarea:focus,
+    flt-text-editing-host input:focus-visible,
+    flt-text-editing-host textarea:focus-visible {
+      outline: none !important;
+      box-shadow: none !important;
+    }
+  </style>
+
+  <script>
+    // Ultra-strict zoom prevention (Figma-style)
+    (function() {
+      'use strict';
+      
+      // Prevent all zoom attempts
+      function preventZoom(e) {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+      }
+
+      // Prevent wheel zoom
+      document.addEventListener('wheel', preventZoom, { passive: false, capture: true });
+      
+      // Prevent keyboard zoom
+      document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && 
+            (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_' || 
+             e.key === '0' || e.keyCode === 187 || e.keyCode === 189 || e.keyCode === 48)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+      }, { passive: false, capture: true });
+
+      // Prevent pinch zoom
+      document.addEventListener('gesturestart', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }, { passive: false, capture: true });
+
+      document.addEventListener('gesturechange', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }, { passive: false, capture: true });
+
+      document.addEventListener('gestureend', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }, { passive: false, capture: true });
+
+      // Prevent touch-based zoom
+      let lastTouchEnd = 0;
+      document.addEventListener('touchstart', function(e) {
+        if (e.touches.length > 1) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }, { passive: false, capture: true });
+
+      document.addEventListener('touchmove', function(e) {
+        if (e.touches.length > 1) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }, { passive: false, capture: true });
+
+      document.addEventListener('touchend', function(e) {
+        const now = Date.now();
+        if (now - lastTouchEnd <= 300) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        lastTouchEnd = now;
+      }, { passive: false, capture: true });
+
+      // Force zoom to 1.0 continuously
+      let checkInterval = setInterval(function() {
+        if (document.body && document.body.style.zoom && document.body.style.zoom !== '1') {
+          document.body.style.zoom = '1';
+        }
+      }, 100);
+
+      // Disable zoom via CSS while allowing scrolling
+      document.addEventListener('DOMContentLoaded', function() {
+        const style = document.createElement('style');
+        style.textContent = `
+          html, body, flt-glass-pane {
+            touch-action: manipulation !important;
+            -ms-touch-action: manipulation !important;
+            user-zoom: fixed !important;
+            -webkit-user-zoom: fixed !important;
+          }
+        `;
+        document.head.appendChild(style);
+      });
+
+    })();
+  </script>
+
+  <!-- The value below is injected by flutter build, do not touch. -->
+  <script>
+    var serviceWorkerVersion = null;
+  </script>
+  <!-- This script adds the flutter initialization JS code -->
+  <script src="flutter.js" defer></script>
+</head>
+<body>
+  <div class="loading">
+    <div class="loader"></div>
+  </div>
+  <script>
+    window.addEventListener('load', function(ev) {
+      // Download main.dart.js
+      _flutter.loader.loadEntrypoint({
+        serviceWorker: {
+          serviceWorkerVersion: serviceWorkerVersion,
+        },
+        onEntrypointLoaded: function(engineInitializer) {
+          engineInitializer.initializeEngine().then(function(appRunner) {
+            appRunner.runApp();
+          });
+        }
+      });
+    });
+  </script>
+</body>
+</html>

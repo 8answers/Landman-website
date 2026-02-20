@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS plots (
     buyer_name VARCHAR(255) DEFAULT NULL,
     sale_date DATE DEFAULT NULL,
     agent_name VARCHAR(255) DEFAULT NULL,
+    payments JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(layout_id, plot_number)

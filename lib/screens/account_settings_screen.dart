@@ -15,6 +15,8 @@ import '../pages/project_details_page.dart';
 import '../pages/dashboard_page.dart';
 import '../pages/data_entry_page.dart';
 import '../pages/plot_status_page.dart';
+import '../pages/documents_page.dart';
+import '../pages/report_page.dart';
 import '../pages/settings_page.dart';
 import '../pages/login_page.dart';
 
@@ -33,6 +35,14 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   ProjectSaveStatusType _saveStatus = ProjectSaveStatusType.saved;
   String? _savedTimeAgo;
   bool _hasDataEntryErrors = false;
+  bool _hasPlotStatusErrors = false;
+  bool _hasAreaErrors = false;
+  bool _hasPartnerErrors = false;
+  bool _hasExpenseErrors = false;
+  bool _hasSiteErrors = false;
+  bool _hasProjectManagerErrors = false;
+  bool _hasAgentErrors = false;
+  bool _hasAboutErrors = false;
 
   Widget _getPageContentForPage(NavigationPage page) {
     switch (page) {
@@ -42,6 +52,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         return const NotificationsPage();
       case NavigationPage.toDoList:
         return const ToDoListPage();
+      case NavigationPage.report:
+        return ReportPage(projectId: _projectId);
       case NavigationPage.recentProjects:
         return RecentProjectsPage(
           onCreateProject: () => _showCreateProjectDialog(),
@@ -70,9 +82,18 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           projectId: _projectId,
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
+          onAreaErrorsChanged: _handleAreaErrorsChanged,
+          onPartnerErrorsChanged: _handlePartnerErrorsChanged,
+          onExpenseErrorsChanged: _handleExpenseErrorsChanged,
+          onSiteErrorsChanged: _handleSiteErrorsChanged,
+          onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
+          onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onAboutErrorsChanged: _handleAboutErrorsChanged,
         );
       case NavigationPage.home:
-        return _previousPage != null ? _getPageContentForPage(_previousPage!) : const AccountSettingsContent();
+        return _previousPage != null
+            ? _getPageContentForPage(_previousPage!)
+            : const AccountSettingsContent();
       case NavigationPage.dashboard:
         return DashboardPage(projectId: _projectId);
       case NavigationPage.dataEntry:
@@ -81,11 +102,26 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           projectId: _projectId,
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
+          onAreaErrorsChanged: _handleAreaErrorsChanged,
+          onPartnerErrorsChanged: _handlePartnerErrorsChanged,
+          onExpenseErrorsChanged: _handleExpenseErrorsChanged,
+          onSiteErrorsChanged: _handleSiteErrorsChanged,
+          onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
+          onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onAboutErrorsChanged: _handleAboutErrorsChanged,
         ); // Data Entry shows Project Details page
       case NavigationPage.plotStatus:
-        return PlotStatusPage(projectId: _projectId);
+        return PlotStatusPage(
+          projectId: _projectId,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
+        );
+      case NavigationPage.documents:
+        return DocumentsPage(projectId: _projectId);
       case NavigationPage.settings:
-        return const SettingsPage();
+        return SettingsPage(
+          projectId: _projectId,
+          onProjectDeleted: _handleProjectDeleted,
+        );
     }
   }
 
@@ -97,6 +133,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         return const NotificationsPage();
       case NavigationPage.toDoList:
         return const ToDoListPage();
+      case NavigationPage.report:
+        return ReportPage(projectId: _projectId);
       case NavigationPage.recentProjects:
         return RecentProjectsPage(
           onCreateProject: () => _showCreateProjectDialog(),
@@ -124,10 +162,20 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         return ProjectDetailsPage(
           initialProjectName: _projectName,
           onSaveStatusChanged: _handleSaveStatusChanged,
+          onErrorStateChanged: _handleErrorStateChanged,
+          onAreaErrorsChanged: _handleAreaErrorsChanged,
+          onPartnerErrorsChanged: _handlePartnerErrorsChanged,
+          onExpenseErrorsChanged: _handleExpenseErrorsChanged,
+          onSiteErrorsChanged: _handleSiteErrorsChanged,
+          onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
+          onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onAboutErrorsChanged: _handleAboutErrorsChanged,
         );
       case NavigationPage.home:
         // This should not be reached as Home navigates back
-        return _previousPage != null ? _getPageContentForPage(_previousPage!) : const AccountSettingsContent();
+        return _previousPage != null
+            ? _getPageContentForPage(_previousPage!)
+            : const AccountSettingsContent();
       case NavigationPage.dashboard:
         return DashboardPage(projectId: _projectId);
       case NavigationPage.dataEntry:
@@ -135,12 +183,37 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           initialProjectName: _projectName,
           projectId: _projectId,
           onSaveStatusChanged: _handleSaveStatusChanged,
+          onErrorStateChanged: _handleErrorStateChanged,
+          onAreaErrorsChanged: _handleAreaErrorsChanged,
+          onPartnerErrorsChanged: _handlePartnerErrorsChanged,
+          onExpenseErrorsChanged: _handleExpenseErrorsChanged,
+          onSiteErrorsChanged: _handleSiteErrorsChanged,
+          onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
+          onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onAboutErrorsChanged: _handleAboutErrorsChanged,
         ); // Data Entry shows Project Details page
       case NavigationPage.plotStatus:
-        return PlotStatusPage(projectId: _projectId);
+        return PlotStatusPage(
+          projectId: _projectId,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
+        );
+      case NavigationPage.documents:
+        return DocumentsPage(projectId: _projectId);
       case NavigationPage.settings:
-        return const SettingsPage();
+        return SettingsPage(
+          projectId: _projectId,
+          onProjectDeleted: _handleProjectDeleted,
+        );
     }
+  }
+
+  void _handleProjectDeleted() {
+    setState(() {
+      _projectName = null;
+      _projectId = null;
+      _currentPage = NavigationPage.allProjects;
+      _previousPage = null;
+    });
   }
 
   void _showCreateProjectDialog() async {
@@ -152,7 +225,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     if (result != null && result['projectName'] != null) {
       final projectName = result['projectName'] as String;
       final projectId = result['projectId'] as String?;
-      
+
       setState(() {
         _projectName = projectName;
         _projectId = projectId;
@@ -167,6 +240,56 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   void _handleErrorStateChanged(bool hasErrors) {
     setState(() {
       _hasDataEntryErrors = hasErrors;
+    });
+  }
+
+  void _handleAreaErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasAreaErrors = hasErrors;
+    });
+  }
+
+  void _handlePartnerErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasPartnerErrors = hasErrors;
+    });
+  }
+
+  void _handleExpenseErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasExpenseErrors = hasErrors;
+    });
+  }
+
+  void _handleSiteErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasSiteErrors = hasErrors;
+    });
+  }
+
+  void _handleProjectManagerErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasProjectManagerErrors = hasErrors;
+    });
+  }
+
+  void _handleAgentErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasAgentErrors = hasErrors;
+    });
+  }
+
+  void _handleAboutErrorsChanged(bool hasErrors) {
+    setState(() {
+      _hasAboutErrors = hasErrors;
+    });
+  }
+
+  void _handlePlotStatusErrorsChanged(bool hasErrors) {
+    print(
+        '🔴 AccountSettingsScreen._handlePlotStatusErrorsChanged: hasErrors=$hasErrors');
+    setState(() {
+      _hasPlotStatusErrors = hasErrors;
     });
   }
 
@@ -189,7 +312,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     } catch (e) {
       print('Error signing out: $e');
     }
-    
+
     // Clear any session data and navigate to login page
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(
@@ -207,12 +330,10 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     }
 
     if (page == NavigationPage.home) {
-      if (_previousPage != null) {
-        setState(() {
-          _currentPage = _previousPage!;
-          _previousPage = null;
-        });
-      }
+      setState(() {
+        _currentPage = NavigationPage.recentProjects;
+        _previousPage = null;
+      });
     } else {
       // Track previous page when navigating to project details context pages
       if (page == NavigationPage.projectDetails ||
@@ -244,6 +365,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isProjectContextPage =
+        _currentPage == NavigationPage.projectDetails ||
+            _currentPage == NavigationPage.dashboard ||
+            _currentPage == NavigationPage.dataEntry ||
+            _currentPage == NavigationPage.plotStatus ||
+            _currentPage == NavigationPage.documents ||
+            _currentPage == NavigationPage.settings ||
+            _currentPage == NavigationPage.report;
+    final isSidebarLoading =
+        isProjectContextPage && (_projectId == null || _projectName == null);
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: LayoutBuilder(
@@ -256,6 +388,16 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               projectName: _projectName,
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
+              hasDataEntryErrors: _hasDataEntryErrors,
+              hasPlotStatusErrors: _hasPlotStatusErrors,
+              hasAreaErrors: _hasAreaErrors,
+              hasPartnerErrors: _hasPartnerErrors,
+              hasExpenseErrors: _hasExpenseErrors,
+              hasSiteErrors: _hasSiteErrors,
+              hasProjectManagerErrors: _hasProjectManagerErrors,
+              hasAgentErrors: _hasAgentErrors,
+              hasAboutErrors: _hasAboutErrors,
+              isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
@@ -267,6 +409,15 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
+              hasPlotStatusErrors: _hasPlotStatusErrors,
+              hasAreaErrors: _hasAreaErrors,
+              hasPartnerErrors: _hasPartnerErrors,
+              hasExpenseErrors: _hasExpenseErrors,
+              hasSiteErrors: _hasSiteErrors,
+              hasProjectManagerErrors: _hasProjectManagerErrors,
+              hasAgentErrors: _hasAgentErrors,
+              hasAboutErrors: _hasAboutErrors,
+              isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
@@ -278,6 +429,15 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               saveStatus: _saveStatus,
               savedTimeAgo: _savedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
+              hasPlotStatusErrors: _hasPlotStatusErrors,
+              hasAreaErrors: _hasAreaErrors,
+              hasPartnerErrors: _hasPartnerErrors,
+              hasExpenseErrors: _hasExpenseErrors,
+              hasSiteErrors: _hasSiteErrors,
+              hasProjectManagerErrors: _hasProjectManagerErrors,
+              hasAgentErrors: _hasAgentErrors,
+              hasAboutErrors: _hasAboutErrors,
+              isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
             );
@@ -296,6 +456,15 @@ class DesktopLayout extends StatelessWidget {
   final ProjectSaveStatusType? saveStatus;
   final String? savedTimeAgo;
   final bool? hasDataEntryErrors;
+  final bool? hasPlotStatusErrors;
+  final bool? hasAreaErrors;
+  final bool? hasPartnerErrors;
+  final bool? hasExpenseErrors;
+  final bool? hasSiteErrors;
+  final bool? hasProjectManagerErrors;
+  final bool? hasAgentErrors;
+  final bool? hasAboutErrors;
+  final bool isSidebarLoading;
 
   const DesktopLayout({
     super.key,
@@ -306,11 +475,20 @@ class DesktopLayout extends StatelessWidget {
     this.saveStatus,
     this.savedTimeAgo,
     this.hasDataEntryErrors,
+    this.hasPlotStatusErrors,
+    this.hasAreaErrors,
+    this.hasPartnerErrors,
+    this.hasExpenseErrors,
+    this.hasSiteErrors,
+    this.hasProjectManagerErrors,
+    this.hasAgentErrors,
+    this.hasAboutErrors,
+    this.isSidebarLoading = false,
   });
 
   @override
   Widget build(BuildContext context) {
-      return Row(
+    return Row(
       children: [
         SidebarNavigation(
           currentPage: currentPage,
@@ -319,17 +497,18 @@ class DesktopLayout extends StatelessWidget {
           saveStatus: saveStatus,
           savedTimeAgo: savedTimeAgo,
           hasDataEntryErrors: hasDataEntryErrors,
+          hasPlotStatusErrors: hasPlotStatusErrors,
+          hasAreaErrors: hasAreaErrors,
+          hasPartnerErrors: hasPartnerErrors,
+          hasExpenseErrors: hasExpenseErrors,
+          hasSiteErrors: hasSiteErrors,
+          hasProjectManagerErrors: hasProjectManagerErrors,
+          hasAgentErrors: hasAgentErrors,
+          hasAboutErrors: hasAboutErrors,
+          isLoading: isSidebarLoading,
         ),
         Expanded(
-          child: Container(
-            padding: const EdgeInsets.only(
-              left: 24,
-              top: 24,
-              right: 24,
-              bottom: 24,
-            ),
-            child: pageContent,
-          ),
+          child: pageContent,
         ),
       ],
     );
@@ -344,6 +523,15 @@ class TabletLayout extends StatelessWidget {
   final ProjectSaveStatusType? saveStatus;
   final String? savedTimeAgo;
   final bool? hasDataEntryErrors;
+  final bool? hasPlotStatusErrors;
+  final bool? hasAreaErrors;
+  final bool? hasPartnerErrors;
+  final bool? hasExpenseErrors;
+  final bool? hasSiteErrors;
+  final bool? hasProjectManagerErrors;
+  final bool? hasAgentErrors;
+  final bool? hasAboutErrors;
+  final bool isSidebarLoading;
 
   const TabletLayout({
     super.key,
@@ -354,6 +542,15 @@ class TabletLayout extends StatelessWidget {
     this.saveStatus,
     this.savedTimeAgo,
     this.hasDataEntryErrors,
+    this.hasPlotStatusErrors,
+    this.hasAreaErrors,
+    this.hasPartnerErrors,
+    this.hasExpenseErrors,
+    this.hasSiteErrors,
+    this.hasProjectManagerErrors,
+    this.hasAgentErrors,
+    this.hasAboutErrors,
+    this.isSidebarLoading = false,
   });
 
   @override
@@ -367,6 +564,15 @@ class TabletLayout extends StatelessWidget {
           saveStatus: saveStatus,
           savedTimeAgo: savedTimeAgo,
           hasDataEntryErrors: hasDataEntryErrors,
+          hasPlotStatusErrors: hasPlotStatusErrors,
+          hasAreaErrors: hasAreaErrors,
+          hasPartnerErrors: hasPartnerErrors,
+          hasExpenseErrors: hasExpenseErrors,
+          hasSiteErrors: hasSiteErrors,
+          hasProjectManagerErrors: hasProjectManagerErrors,
+          hasAgentErrors: hasAgentErrors,
+          hasAboutErrors: hasAboutErrors,
+          isLoading: isSidebarLoading,
         ),
         Expanded(
           child: Container(
@@ -391,6 +597,16 @@ class MobileLayout extends StatefulWidget {
   final String? projectName;
   final ProjectSaveStatusType? saveStatus;
   final String? savedTimeAgo;
+  final bool? hasDataEntryErrors;
+  final bool? hasPlotStatusErrors;
+  final bool? hasAreaErrors;
+  final bool? hasPartnerErrors;
+  final bool? hasExpenseErrors;
+  final bool? hasSiteErrors;
+  final bool? hasProjectManagerErrors;
+  final bool? hasAgentErrors;
+  final bool? hasAboutErrors;
+  final bool isSidebarLoading;
 
   const MobileLayout({
     super.key,
@@ -400,6 +616,16 @@ class MobileLayout extends StatefulWidget {
     this.projectName,
     this.saveStatus,
     this.savedTimeAgo,
+    this.hasDataEntryErrors,
+    this.hasPlotStatusErrors,
+    this.hasAreaErrors,
+    this.hasPartnerErrors,
+    this.hasExpenseErrors,
+    this.hasSiteErrors,
+    this.hasProjectManagerErrors,
+    this.hasAgentErrors,
+    this.hasAboutErrors,
+    this.isSidebarLoading = false,
   });
 
   @override
@@ -463,6 +689,16 @@ class _MobileLayoutState extends State<MobileLayout> {
                       projectName: widget.projectName,
                       saveStatus: widget.saveStatus,
                       savedTimeAgo: widget.savedTimeAgo,
+                      hasDataEntryErrors: widget.hasDataEntryErrors,
+                      hasPlotStatusErrors: widget.hasPlotStatusErrors,
+                      hasAreaErrors: widget.hasAreaErrors,
+                      hasPartnerErrors: widget.hasPartnerErrors,
+                      hasExpenseErrors: widget.hasExpenseErrors,
+                      hasSiteErrors: widget.hasSiteErrors,
+                      hasProjectManagerErrors: widget.hasProjectManagerErrors,
+                      hasAgentErrors: widget.hasAgentErrors,
+                      hasAboutErrors: widget.hasAboutErrors,
+                      isLoading: widget.isSidebarLoading,
                     ),
                   ),
                 ),
@@ -473,4 +709,3 @@ class _MobileLayoutState extends State<MobileLayout> {
     );
   }
 }
-

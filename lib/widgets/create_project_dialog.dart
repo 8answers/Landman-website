@@ -268,6 +268,9 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
           .insert({
             'user_id': userId,
             'project_name': projectName,
+            'project_status': 'Active',
+            'project_address': '',
+            'google_maps_link': '',
             'total_area': 0.00,
             'selling_area': 0.00,
             'estimated_development_cost': 0.00,
@@ -297,4 +300,3 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
     }
   }
 }
-

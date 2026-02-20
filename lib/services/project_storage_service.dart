@@ -1,12 +1,218 @@
+
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 
 class ProjectStorageService {
   static final SupabaseClient _supabase = Supabase.instance.client;
 
+  /// Fetch complete project data from Supabase by projectId
+  static Future<Map<String, dynamic>?> fetchProjectDataById(String projectId) async {
+    try {
+      final userId = _supabase.auth.currentUser?.id;
+      if (userId == null) {
+        throw Exception('User not authenticated');
+      }
+
+      // Fetch main project info
+      final project = await _supabase
+          .from('projects')
+          .select()
+          .eq('id', projectId)
+          .eq('user_id', userId)
+          .maybeSingle();
+      if (project == null) return null;
+
+      // Fetch related data
+      final partners = await _supabase
+          .from('partners')
+          .select()
+          .eq('project_id', projectId);
+
+      final expenses = await _supabase
+          .from('expenses')
+          .select()
+          .eq('project_id', projectId);
+
+      final nonSellableAreas = await _supabase
+          .from('non_sellable_areas')
+          .select()
+          .eq('project_id', projectId);
+
+      final layouts = await _supabase
+          .from('layouts')
+          .select()
+          .eq('project_id', projectId);
+
+      final projectManagers = await _supabase
+          .from('project_managers')
+          .select()
+          .eq('project_id', projectId);
+
+      final agents = await _supabase
+          .from('agents')
+          .select()
+          .eq('project_id', projectId);
+
+      // Fetch all plots for calculations
+      final plots = <Map<String, dynamic>>[];
+      final plotIds = <String>[];
+      for (var layout in layouts) {
+        final layoutPlots = await _supabase
+            .from('plots')
+            .select()
+            .eq('layout_id', layout['id'] as String);
+        plots.addAll(layoutPlots);
+        for (var p in layoutPlots) {
+          if (p['id'] != null) plotIds.add(p['id'].toString());
+        }
+      }
+
+      // Fetch plot_partners for all plots
+      List<Map<String, dynamic>> plotPartners = [];
+      if (plotIds.isNotEmpty) {
+        plotPartners = await _supabase
+            .from('plot_partners')
+            .select('plot_id, partner_name')
+            .inFilter('plot_id', plotIds);
+      }
+
+      // Calculate totals
+      final totalArea = (project['total_area'] as num?)?.toDouble() ?? 0.0;
+      final sellingArea = (project['selling_area'] as num?)?.toDouble() ?? 0.0;
+      final estimatedCost = (project['estimated_development_cost'] as num?)?.toDouble() ?? 0.0;
+      final nonSellableArea = nonSellableAreas.fold<double>(
+        0.0,
+        (sum, area) => sum + ((area['area'] as num?)?.toDouble() ?? 0.0),
+      );
+
+      // Calculate total expenses
+      final totalExpenses = expenses.fold<double>(
+        0.0,
+        (sum, expense) => sum + ((expense['amount'] as num?)?.toDouble() ?? 0.0),
+      );
+
+      // Calculate plot statistics
+      final totalPlots = plots.length;
+      final soldPlots = plots.where((p) => p['status'] == 'sold').length;
+      final availablePlots = plots.where((p) => p['status'] == 'available').length;
+
+      // Calculate all-in cost (weighted average per sqft)
+      final totalPlotArea = plots.fold<double>(
+        0.0,
+        (sum, plot) => sum + ((plot['area'] as num?)?.toDouble() ?? 0.0),
+      );
+      final allInCostTotal = plots.fold<double>(
+        0.0,
+        (sum, plot) {
+          final area = ((plot['area'] as num?)?.toDouble() ?? 0.0);
+          final costPerSqft = ((plot['all_in_cost_per_sqft'] as num?)?.toDouble() ?? 0.0);
+          return sum + (area * costPerSqft);
+        },
+      );
+      final allInCost = totalPlotArea > 0 ? allInCostTotal / totalPlotArea : 0.0;
+
+      // Calculate sales value
+      final totalSalesValue = plots
+          .where((p) => p['status'] == 'sold')
+          .fold<double>(
+            0.0,
+            (sum, plot) {
+              final salePrice = ((plot['sale_price'] as num?)?.toDouble() ?? 0.0);
+              final area = ((plot['area'] as num?)?.toDouble() ?? 0.0);
+              return sum + (salePrice * area);
+            },
+          );
+
+      // Calculate average sales price
+      final totalSalePriceSum = plots
+          .where((p) => p['status'] == 'sold')
+          .fold<double>(
+            0.0,
+            (sum, plot) =>
+                sum + ((plot['sale_price'] as num?)?.toDouble() ?? 0.0),
+          );
+      final avgSalesPrice = soldPlots > 0 ? totalSalePriceSum / soldPlots : 0.0;
+
+      // Calculate compensation totals
+      final totalPMCompensation = projectManagers.fold<double>(
+        0.0,
+        (sum, pm) => sum + ((pm['fee'] as num?)?.toDouble() ?? 0.0),
+      );
+
+      final totalAgentCompensation = agents.fold<double>(
+        0.0,
+        (sum, agent) => sum + ((agent['fee'] as num?)?.toDouble() ?? 0.0),
+      );
+
+      final totalCompensation = totalPMCompensation + totalAgentCompensation;
+
+      // Calculate profitability metrics using plot-based gross profit (same as dashboard)
+      // Gross Profit = For each SOLD plot: (sale_price × area) - (area × all_in_cost)
+      final grossProfit = plots
+          .where((p) => p['status'] == 'sold')
+          .fold<double>(
+            0.0,
+            (sum, plot) {
+              final salePrice = ((plot['sale_price'] as num?)?.toDouble() ?? 0.0);
+              final area = ((plot['area'] as num?)?.toDouble() ?? 0.0);
+              final allInCostPerSqft = ((plot['all_in_cost_per_sqft'] as num?)?.toDouble() ?? 0.0);
+              final plotProfit = (salePrice * area) - (area * allInCostPerSqft);
+              return sum + plotProfit;
+            },
+          );
+      final netProfit = grossProfit - totalCompensation;
+      final profitMargin = totalSalesValue > 0
+          ? ((netProfit / totalSalesValue) * 100)
+          : 0.0;
+      final roi = estimatedCost > 0 ? ((netProfit / estimatedCost) * 100) : 0.0;
+
+      // Compose result in the same structure as used in the report
+      return {
+        'projectName': project['project_name'],
+        'projectStatus': project['project_status'],
+        'projectAddress': project['project_address'] ?? project['address'],
+        'googleMapsLink': project['google_maps_link'] ?? project['maps_link'] ?? project['location_link'],
+        'totalArea': totalArea.toStringAsFixed(2),
+        'sellingArea': sellingArea.toStringAsFixed(2),
+        'estimatedDevelopmentCost': estimatedCost.toStringAsFixed(2),
+        'nonSellableArea': nonSellableArea.toStringAsFixed(2),
+        'allInCost': allInCost.toStringAsFixed(2),
+        'totalExpenses': totalExpenses.toStringAsFixed(2),
+        'totalLayouts': layouts.length,
+        'totalPlots': totalPlots,
+        'soldPlots': soldPlots,
+        'availablePlots': availablePlots,
+        'totalSalesValue': totalSalesValue.toStringAsFixed(2),
+        'avgSalesPrice': avgSalesPrice.toStringAsFixed(2),
+        'grossProfit': grossProfit.toStringAsFixed(2),
+        'netProfit': netProfit.toStringAsFixed(2),
+        'profitMargin': profitMargin.toStringAsFixed(2),
+        'roi': roi.toStringAsFixed(2),
+        'totalPMCompensation': totalPMCompensation.toStringAsFixed(2),
+        'totalAgentCompensation': totalAgentCompensation.toStringAsFixed(2),
+        'totalCompensation': totalCompensation.toStringAsFixed(2),
+        'partners': partners,
+        'expenses': expenses,
+        'nonSellableAreas': nonSellableAreas,
+        'plots': plots,
+        'layouts': layouts,
+        'project_managers': projectManagers,
+        'agents': agents,
+        'plot_partners': plotPartners,
+      };
+    } catch (e) {
+      print('Error fetching project data: $e');
+      return null;
+    }
+  }
+
   /// Save complete project data to Supabase
   static Future<void> saveProjectData({
     required String projectId,
-    required String projectName,
+    String? projectName,
+    String? projectStatus,
+    String? projectAddress,
+    String? googleMapsLink,
     String? totalArea,
     String? sellingArea,
     String? estimatedDevelopmentCost,
@@ -57,6 +263,18 @@ class ProjectStorageService {
         updateData['estimated_development_cost'] = parsedEstimatedCost;
         print('ProjectStorageService.saveProjectData: Updating estimated_development_cost: "$estimatedDevelopmentCost" -> $parsedEstimatedCost');
       }
+
+      // Update status/address/location when explicitly provided.
+      // Unlike numeric fields, empty string is valid here (user can clear address/link).
+      if (projectStatus != null) {
+        updateData['project_status'] = projectStatus.trim();
+      }
+      if (projectAddress != null) {
+        updateData['project_address'] = projectAddress.trim();
+      }
+      if (googleMapsLink != null) {
+        updateData['google_maps_link'] = googleMapsLink.trim();
+      }
       
       print('ProjectStorageService.saveProjectData: Update data map: $updateData');
 
@@ -64,7 +282,7 @@ class ProjectStorageService {
       // 1. It's not empty
       // 2. It's different from the current name
       // 3. It doesn't already exist for this user (unless it's the same project)
-      final trimmedProjectName = projectName.trim();
+      final trimmedProjectName = projectName?.trim() ?? '';
       if (trimmedProjectName.isNotEmpty) {
         final currentName = currentProject?['project_name']?.toString().trim() ?? '';
         if (trimmedProjectName != currentName) {
@@ -291,12 +509,29 @@ class ProjectStorageService {
       // Get plots for this layout
       final plots = layoutData['plots'] as List<dynamic>? ?? [];
 
-      // Delete existing plots for this layout
-      await _supabase.from('plots').delete().eq('layout_id', layoutId);
+      // Track incoming plot numbers and existing plots for cleanup
+      final incomingPlotNumbers = <String>{};
+      for (final plot in plots) {
+        if (plot is Map<String, dynamic>) {
+          final plotNumber = (plot['plotNumber'] ?? '').toString().trim();
+          if (plotNumber.isNotEmpty) {
+            incomingPlotNumbers.add(plotNumber);
+          }
+        } else if (plot is Map) {
+          final plotNumber = (plot['plotNumber'] ?? '').toString().trim();
+          if (plotNumber.isNotEmpty) {
+            incomingPlotNumbers.add(plotNumber);
+          }
+        }
+      }
 
-      // Insert new plots with explicit timestamps to preserve order
-      final baseTime = DateTime.now();
-      int insertedPlotIndex = 0; // Track actual inserted plots for timestamp ordering
+      final existingPlots = await _supabase
+          .from('plots')
+          .select('id, plot_number')
+          .eq('layout_id', layoutId);
+
+      // Insert/update plots
+      int insertedPlotIndex = 0; // Track first plot for debug logging
       for (int plotIndex = 0; plotIndex < plots.length; plotIndex++) {
         final plotData = plots[plotIndex];
         final plotNumber = (plotData['plotNumber'] ?? '').toString().trim();
@@ -312,33 +547,49 @@ class ProjectStorageService {
             print('Saving plot: plotNumber=$plotNumber, purchaseRate=$purchaseRate, allInCostPerSqft=$allInCostPerSqft, totalPlotCost=$totalPlotCost');
           }
           
-          // Create sequential timestamps to preserve insertion order
-          // Each plot gets a timestamp slightly after the previous one
-          final plotTimestamp = baseTime.add(Duration(milliseconds: insertedPlotIndex * 10));
+          // Debug payments data
+          final paymentsData = plotData['payments'];
+          print('DEBUG PAYMENTS: Plot $plotNumber - payments type: ${paymentsData.runtimeType}, payments value: $paymentsData');
           
+          final paymentsRaw = plotData['payments'] as List<dynamic>? ?? [];
+          final paymentsToSave = paymentsRaw.map((payment) {
+            if (payment is Map<String, dynamic>) {
+              return Map<String, dynamic>.from(payment);
+            }
+            if (payment is Map) {
+              return Map<String, dynamic>.from(payment.cast<String, dynamic>());
+            }
+            return <String, dynamic>{};
+          }).where((p) => p.isNotEmpty).toList();
+
+          Map<String, dynamic> plotDataToSave = {
+            'layout_id': layoutId,
+            'plot_number': plotNumber,
+            'area': _parseDecimal(plotData['area']?.toString()),
+            'all_in_cost_per_sqft': allInCostPerSqft,
+            'total_plot_cost': totalPlotCost,
+            'status': plotData['status']?.toString() ?? 'available',
+            'sale_price': plotData['salePrice'] != null && plotData['salePrice'].toString().trim().isNotEmpty
+                ? _parseDecimal(plotData['salePrice']?.toString())
+                : null,
+            'buyer_name': plotData['buyerName'] != null && plotData['buyerName'].toString().trim().isNotEmpty
+                ? plotData['buyerName'].toString().trim()
+                : null,
+            'sale_date': plotData['saleDate'] != null && plotData['saleDate'].toString().trim().isNotEmpty
+                ? _parseDate(plotData['saleDate']?.toString())
+                : null,
+            'agent_name': plotData['agent'] != null && plotData['agent'].toString().trim().isNotEmpty
+                ? plotData['agent'].toString().trim()
+                : null,
+            'payments': paymentsToSave,
+          };
+
           final newPlot = await _supabase
               .from('plots')
-              .insert({
-                'layout_id': layoutId,
-                'plot_number': plotNumber,
-                'area': _parseDecimal(plotData['area']?.toString()),
-                'all_in_cost_per_sqft': allInCostPerSqft,
-                'total_plot_cost': totalPlotCost,
-                'status': plotData['status']?.toString() ?? 'available',
-                'sale_price': plotData['salePrice'] != null && plotData['salePrice'].toString().trim().isNotEmpty
-                    ? _parseDecimal(plotData['salePrice']?.toString())
-                    : null,
-                'buyer_name': plotData['buyerName'] != null && plotData['buyerName'].toString().trim().isNotEmpty
-                    ? plotData['buyerName'].toString().trim()
-                    : null,
-                'sale_date': plotData['saleDate'] != null && plotData['saleDate'].toString().trim().isNotEmpty
-                    ? _parseDate(plotData['saleDate']?.toString())
-                    : null,
-                'agent_name': plotData['agent'] != null && plotData['agent'].toString().trim().isNotEmpty
-                    ? plotData['agent'].toString().trim()
-                    : null,
-                'created_at': plotTimestamp.toIso8601String(),
-              })
+              .upsert(
+                plotDataToSave,
+                onConflict: 'layout_id,plot_number',
+              )
               .select()
               .single();
 
@@ -346,9 +597,13 @@ class ProjectStorageService {
 
           final plotId = newPlot['id'];
 
-          // Save plot partners
+          // Save plot partners - delete existing ones first to avoid duplicate key constraint violations
           final plotPartners = plotData['partners'] as List<dynamic>? ?? [];
           print('DEBUG ProjectStorageService: Saving partners for plot ${newPlot['plot_number']}: $plotPartners (${plotPartners.length} partners)');
+          
+          // Always delete existing partners for this plot first
+          await _supabase.from('plot_partners').delete().eq('plot_id', plotId);
+          
           if (plotPartners.isNotEmpty) {
             final partnersToInsert = plotPartners
                 .where((p) => p.toString().trim().isNotEmpty)
@@ -364,51 +619,18 @@ class ProjectStorageService {
             }
           }
         } catch (e) {
-          // If insert fails due to duplicate key, the plot already exists (might be from concurrent save)
-          // Since we delete all plots before inserting, this shouldn't happen, but handle it gracefully
-          if (e.toString().contains('duplicate key') || e.toString().contains('23505')) {
-            print('Warning: Plot $plotNumber already exists in layout, trying to update instead');
-            // Try to get existing plot and update it instead
-            try {
-              final existingPlot = await _supabase
-                  .from('plots')
-                  .select('id')
-                  .eq('layout_id', layoutId)
-                  .eq('plot_number', plotNumber)
-                  .maybeSingle();
-              if (existingPlot != null && existingPlot['id'] != null) {
-                final purchaseRate = plotData['purchaseRate']?.toString() ?? '0.00';
-                final allInCostPerSqft = _parseDecimal(purchaseRate);
-                final totalPlotCost = _parseDecimal(plotData['totalPlotCost']?.toString());
-                print('Updating existing plot: plotNumber=$plotNumber, purchaseRate=$purchaseRate, allInCostPerSqft=$allInCostPerSqft, totalPlotCost=$totalPlotCost');
-                await _supabase
-                    .from('plots')
-                    .update({
-                      'area': _parseDecimal(plotData['area']?.toString()),
-                      'all_in_cost_per_sqft': allInCostPerSqft,
-                      'total_plot_cost': totalPlotCost,
-                      'status': plotData['status']?.toString() ?? 'available',
-                      'sale_price': plotData['salePrice'] != null && plotData['salePrice'].toString().trim().isNotEmpty
-                          ? _parseDecimal(plotData['salePrice']?.toString())
-                          : null,
-                      'buyer_name': plotData['buyerName'] != null && plotData['buyerName'].toString().trim().isNotEmpty
-                          ? plotData['buyerName'].toString().trim()
-                          : null,
-                      'sale_date': plotData['saleDate'] != null && plotData['saleDate'].toString().trim().isNotEmpty
-                          ? _parseDate(plotData['saleDate']?.toString())
-                          : null,
-                      'agent_name': plotData['agent'] != null && plotData['agent'].toString().trim().isNotEmpty
-                          ? plotData['agent'].toString().trim()
-                          : null,
-                    })
-                    .eq('id', existingPlot['id']);
-              }
-            } catch (updateError) {
-              print('Error updating existing plot: $updateError');
-            }
-          } else {
-            rethrow;
-          }
+          print('Error saving plot $plotNumber: $e');
+          rethrow;
+        }
+      }
+
+      // Delete plots that were removed from the incoming payload
+      for (final existingPlot in existingPlots) {
+        final existingPlotNumber = (existingPlot['plot_number'] ?? '').toString().trim();
+        final existingPlotId = existingPlot['id'];
+        if (existingPlotNumber.isNotEmpty && !incomingPlotNumbers.contains(existingPlotNumber)) {
+          print('Deleting plot removed from layout $layoutId: $existingPlotNumber');
+          await _supabase.from('plots').delete().eq('id', existingPlotId);
         }
       }
     }
@@ -449,9 +671,56 @@ class ProjectStorageService {
     final existingManagerIds = existingManagers.map((m) => m['id'] as String).toSet();
     final processedManagerIds = <String>{};
 
-    // Upsert new/updated project managers
-    final errors = <String>[];
+    // Deduplicate project managers by ID before saving to prevent duplicates
+    final seenIds = <String>{};
+    final uniqueManagers = <Map<String, dynamic>>[];
     for (var managerData in projectManagers) {
+      final id = managerData['id']?.toString();
+      if (id != null && seenIds.contains(id)) {
+        print('_saveProjectManagers: Skipping duplicate manager with id=$id');
+        continue;
+      }
+      if (id != null) {
+        seenIds.add(id);
+      }
+      uniqueManagers.add(managerData);
+    }
+    
+    print('_saveProjectManagers: After deduplication: ${uniqueManagers.length} unique managers (original: ${projectManagers.length})');
+
+    // Get existing managers with their created_at to preserve order
+    final existingManagersWithDates = await _supabase
+        .from('project_managers')
+        .select('id, created_at')
+        .eq('project_id', projectId)
+        .order('created_at', ascending: true);
+    final existingManagerDates = <String, DateTime>{};
+    DateTime? latestExistingDate;
+    for (var m in existingManagersWithDates) {
+      final id = m['id']?.toString();
+      final createdAt = m['created_at'];
+      if (id != null && createdAt != null) {
+        try {
+          final date = DateTime.parse(createdAt.toString());
+          existingManagerDates[id] = date;
+          if (latestExistingDate == null || date.isAfter(latestExistingDate)) {
+            latestExistingDate = date;
+          }
+        } catch (e) {
+          print('_saveProjectManagers: Error parsing created_at for manager $id: $e');
+        }
+      }
+    }
+
+    // Process managers: update existing ones, insert new ones with preserved order
+    // For new managers, start timestamps after the latest existing manager
+    final errors = <String>[];
+    final baseTime = latestExistingDate != null 
+        ? latestExistingDate.add(Duration(seconds: 1))
+        : DateTime.now();
+    int insertedManagerIndex = 0; // Track actual inserted managers for timestamp ordering
+    
+    for (var managerData in uniqueManagers) {
       final name = (managerData['name'] ?? '').toString().trim();
       if (name.isEmpty) {
         print('_saveProjectManagers: Skipping manager with empty name');
@@ -478,49 +747,76 @@ class ProjectStorageService {
 
       print('_saveProjectManagers: Mapped values: compensation_type="$finalCompensationType", earning_type="$finalEarningType"');
 
-      final dataToUpsert = {
-        'project_id': projectId,
-        'name': name,
-        'compensation_type': finalCompensationType,
-        'earning_type': finalEarningType,
-        'percentage': finalCompensationType == 'Percentage Bonus'
-            ? _parseDecimal(managerData['percentage']?.toString())
-            : null,
-        'fixed_fee': finalCompensationType == 'Fixed Fee'
-            ? _parseDecimal(managerData['fixedFee']?.toString())
-            : null,
-        'monthly_fee': finalCompensationType == 'Monthly Fee'
-            ? _parseDecimal(managerData['monthlyFee']?.toString())
-            : null,
-        'months': finalCompensationType == 'Monthly Fee'
-            ? _parseInt(managerData['months']?.toString())
-            : null,
-      };
-
-      print('_saveProjectManagers: Data to upsert: $dataToUpsert');
-
-      // If ID exists, add it to update existing record
-      if (managerData['id'] != null) {
-        dataToUpsert['id'] = managerData['id'];
-      }
-
+      final managerId = managerData['id']?.toString();
+      final isNewManager = managerId == null || !existingManagerIds.contains(managerId);
+      
+      String finalManagerId;
+      
       try {
-        final upsertedManager = await _supabase
-            .from('project_managers')
-            .upsert(dataToUpsert)
-            .select()
-            .single();
-        print('_saveProjectManagers: Successfully upserted manager: $upsertedManager');
-
-        final managerId = upsertedManager['id'] as String;
-        processedManagerIds.add(managerId);
+        if (isNewManager) {
+          // Insert new manager with sequential created_at to preserve order
+          final managerTimestamp = baseTime.add(Duration(milliseconds: insertedManagerIndex * 10));
+          final newManager = await _supabase
+              .from('project_managers')
+              .insert({
+                'project_id': projectId,
+                'name': name,
+                'compensation_type': finalCompensationType,
+                'earning_type': finalEarningType,
+                'percentage': finalCompensationType == 'Percentage Bonus'
+                    ? _parseDecimal(managerData['percentage']?.toString())
+                    : null,
+                'fixed_fee': finalCompensationType == 'Fixed Fee'
+                    ? _parseDecimal(managerData['fixedFee']?.toString())
+                    : null,
+                'monthly_fee': finalCompensationType == 'Monthly Fee'
+                    ? _parseDecimal(managerData['monthlyFee']?.toString())
+                    : null,
+                'months': finalCompensationType == 'Monthly Fee'
+                    ? _parseInt(managerData['months']?.toString())
+                    : null,
+                'created_at': managerTimestamp.toIso8601String(),
+              })
+              .select()
+              .single();
+          finalManagerId = newManager['id'] as String;
+          processedManagerIds.add(finalManagerId);
+          insertedManagerIndex++;
+          print('_saveProjectManagers: Successfully inserted new manager: $newManager');
+        } else {
+          // Update existing manager - DO NOT touch created_at to preserve original order
+          await _supabase
+              .from('project_managers')
+              .update({
+                'name': name,
+                'compensation_type': finalCompensationType,
+                'earning_type': finalEarningType,
+                'percentage': finalCompensationType == 'Percentage Bonus'
+                    ? _parseDecimal(managerData['percentage']?.toString())
+                    : null,
+                'fixed_fee': finalCompensationType == 'Fixed Fee'
+                    ? _parseDecimal(managerData['fixedFee']?.toString())
+                    : null,
+                'monthly_fee': finalCompensationType == 'Monthly Fee'
+                    ? _parseDecimal(managerData['monthlyFee']?.toString())
+                    : null,
+                'months': finalCompensationType == 'Monthly Fee'
+                    ? _parseInt(managerData['months']?.toString())
+                    : null,
+                // Explicitly do NOT update created_at to preserve original order
+              })
+              .eq('id', managerId);
+          finalManagerId = managerId!;
+          processedManagerIds.add(finalManagerId);
+          print('_saveProjectManagers: Successfully updated existing manager: id=$managerId');
+        }
 
         // Save selected blocks/plots (always delete existing blocks and re-insert for this manager)
         // First delete existing blocks for this manager
         await _supabase
             .from('project_manager_blocks')
             .delete()
-            .eq('project_manager_id', managerId);
+            .eq('project_manager_id', finalManagerId);
 
         final selectedBlocks = managerData['selectedBlocks'] as List<dynamic>? ?? [];
         if (selectedBlocks.isNotEmpty) {
@@ -585,7 +881,7 @@ class ProjectStorageService {
           // Insert block associations
           if (plotIdsToInsert.isNotEmpty) {
             final blocksToInsert = plotIdsToInsert.map((plotId) => {
-                  'project_manager_id': managerId,
+                  'project_manager_id': finalManagerId,
                   'plot_id': plotId,
                 }).toList();
             await _supabase.from('project_manager_blocks').insert(blocksToInsert);
@@ -906,4 +1202,28 @@ class ProjectStorageService {
     print('Warning: Unrecognized earning type "$cleaned", storing as null to satisfy DB constraint');
     return null;
   }
+
+  /// Delete a project and all its associated data
+  static Future<void> deleteProject(String projectId) async {
+    try {
+      final userId = _supabase.auth.currentUser?.id;
+      if (userId == null) {
+        throw Exception('User not authenticated');
+      }
+
+      // Delete the project - cascade delete should handle related records
+      // (non_sellable_areas, partners, expenses, layouts, project_managers, agents, etc.)
+      await _supabase
+          .from('projects')
+          .delete()
+          .eq('id', projectId)
+          .eq('user_id', userId);
+
+      print('ProjectStorageService.deleteProject: Successfully deleted project $projectId');
+    } catch (e) {
+      print('ProjectStorageService.deleteProject: Error deleting project: $e');
+      rethrow;
+    }
+  }
+
 }

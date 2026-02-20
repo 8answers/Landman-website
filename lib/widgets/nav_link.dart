@@ -11,6 +11,7 @@ class NavLink extends StatefulWidget {
   final bool isActive;
   final double iconRotation;
   final VoidCallback? onTap;
+  final bool hasError;
 
   const NavLink({
     super.key,
@@ -22,6 +23,7 @@ class NavLink extends StatefulWidget {
     this.isActive = false,
     this.iconRotation = 0,
     this.onTap,
+    this.hasError = false,
   }) : assert(inactiveIconPath != null || icon != null, 'Either iconPath or icon must be provided');
 
   @override
@@ -113,6 +115,22 @@ class _NavLinkState extends State<NavLink> {
                 letterSpacing: 0,
               ),
             ),
+            if (widget.hasError) ...[
+              const SizedBox(width: 8),
+              SvgPicture.asset(
+                'assets/images/Error_msg.svg',
+                width: 17,
+                height: 15,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  print('Error loading Error_msg.svg: $error');
+                  return const SizedBox(
+                    width: 17,
+                    height: 15,
+                  );
+                },
+              ),
+            ],
           ],
         ),
         ),

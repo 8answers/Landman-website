@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 class LayoutStorageService {
   static const String _layoutsKey = 'project_layouts_data';
   static const String _projectNameKey = 'current_project_name';
+  static const String _projectAddressKeyPrefix = 'project_address_';
+  static const String _projectMapsLinkKeyPrefix = 'project_maps_link_';
   static const String _agentsKey = 'project_agents_data';
 
   /// Save layout data to local storage (from project details page with controllers)
@@ -13,8 +15,9 @@ class LayoutStorageService {
     Map<int, TextEditingController> layoutNameControllers,
     Map<String, TextEditingController> plotNumberControllers,
     Map<String, TextEditingController> plotAreaControllers,
-    Map<String, TextEditingController> plotPurchaseRateControllers,
-  ) async {
+    Map<String, TextEditingController> plotPurchaseRateControllers, {
+    Map<String, List<String>>? plotPartners,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       
@@ -45,6 +48,7 @@ class LayoutStorageService {
             'buyerName': '',
             'agent': '',
             'saleDate': '',
+            'partners': plotPartners?[key] ?? [],
           });
         }
         
@@ -98,6 +102,42 @@ class LayoutStorageService {
     } catch (e) {
       print('Error loading project name: $e');
       return null;
+    }
+  }
+
+  /// Save project about details (address and maps link)
+  static Future<void> saveProjectAbout({
+    required String projectKey,
+    required String projectAddress,
+    required String googleMapsLink,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('${_projectAddressKeyPrefix}$projectKey', projectAddress);
+      await prefs.setString('${_projectMapsLinkKeyPrefix}$projectKey', googleMapsLink);
+    } catch (e) {
+      print('Error saving project about details: $e');
+    }
+  }
+
+  /// Load project about details (address and maps link)
+  static Future<Map<String, String>> loadProjectAbout({
+    required String projectKey,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final address = prefs.getString('${_projectAddressKeyPrefix}$projectKey') ?? '';
+      final mapsLink = prefs.getString('${_projectMapsLinkKeyPrefix}$projectKey') ?? '';
+      return {
+        'address': address,
+        'mapsLink': mapsLink,
+      };
+    } catch (e) {
+      print('Error loading project about details: $e');
+      return {
+        'address': '',
+        'mapsLink': '',
+      };
     }
   }
 
