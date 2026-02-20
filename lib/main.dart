@@ -76,9 +76,14 @@ class AppScaleWrapper extends StatelessWidget {
 
         final widthRatio = availableWidth / baseWidth;
         final heightRatio = availableHeight / baseHeight;
-        // Keep 1340..1440 width filled edge-to-edge by prioritizing width scale.
-        final useWidthPriorityScale =
+        // Keep 1340..1440 width filled edge-to-edge by prioritizing width scale,
+        // but only when it still fits within the available height.
+        final widthPriorityCandidate =
             availableWidth >= 1340 && availableWidth <= baseWidth;
+        final widthPriorityFitsHeight =
+            (baseHeight * widthRatio) <= availableHeight;
+        final useWidthPriorityScale =
+            widthPriorityCandidate && widthPriorityFitsHeight;
         final rawScale = useWidthPriorityScale
             ? widthRatio
             : math.min(widthRatio, heightRatio);
@@ -97,7 +102,7 @@ class AppScaleWrapper extends StatelessWidget {
           child: ClipRect(
             child: FittedBox(
               fit: useWidthPriorityScale ? BoxFit.fitWidth : BoxFit.contain,
-              alignment: Alignment.centerLeft,
+              alignment: Alignment.topLeft,
               child: SizedBox(
                 width: designCanvasSize.width,
                 height: baseHeight,
