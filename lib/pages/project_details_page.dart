@@ -15610,234 +15610,153 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       return;
     }
 
-    FocusScope.of(context).unfocus();
-
     final RenderBox? renderBox =
         cellKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
 
     final overlay = Overlay.of(context);
-    final screenSize = MediaQuery.of(context).size;
-    const double dropdownTopGap = 4.0;
-    const double dropdownMaxListHeight = 144.0; // 3 rows x 48
-    const double dropdownHeaderHeight = 48.0;
-    const double viewportBottomPadding = 24.0;
-    final double dropdownHeightEstimate = dropdownHeaderHeight +
-        min(availablePartners.length * 48.0, dropdownMaxListHeight);
+    final overlayBox = overlay.context.findRenderObject() as RenderBox;
+    final offset = renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
 
-    void showDropdown() {
-      final RenderBox? updatedRenderBox =
-          cellKey.currentContext?.findRenderObject() as RenderBox?;
-      if (updatedRenderBox == null) return;
-      final cellOffset = updatedRenderBox.localToGlobal(Offset.zero);
+    OverlayEntry? backdropEntry;
+    OverlayEntry? overlayEntry;
 
-      OverlayEntry? backdropEntry;
-      OverlayEntry? overlayEntry;
+    void closeDropdown() {
+      overlayEntry?.remove();
+      backdropEntry?.remove();
+    }
 
-      void closeDropdown() {
-        overlayEntry?.remove();
-        backdropEntry?.remove();
-      }
-
-      backdropEntry = OverlayEntry(
-        builder: (context) => Positioned.fill(
-          child: GestureDetector(
-            onTap: closeDropdown,
-            child: Container(color: Colors.transparent),
-          ),
+    backdropEntry = OverlayEntry(
+      builder: (context) => Positioned.fill(
+        child: GestureDetector(
+          onTap: closeDropdown,
+          child: Container(color: Colors.transparent),
         ),
-      );
+      ),
+    );
 
-      overlayEntry = OverlayEntry(
-        builder: (context) => Positioned(
-          left: cellOffset.dx - 40,
-          top: cellOffset.dy + dropdownTopGap,
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: 320,
-              constraints: const BoxConstraints(maxHeight: 400),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 2,
-                    offset: const Offset(0, 0),
-                    spreadRadius: 0,
+    final double left = offset.dx;
+    final double top = offset.dy + renderBox.size.height + 8;
+    final double dropdownWidth = renderBox.size.width;
+    final bool showHeader = (_plotPartners[key] ?? []).isNotEmpty;
+
+    overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: left,
+        top: top,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width: dropdownWidth,
+            constraints: const BoxConstraints(maxHeight: 220),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (showHeader) ...[
+                    Container(
+                      height: 32,
+                      alignment: Alignment.centerLeft,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        'Select Partner(s)',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 144),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      padding: EdgeInsets.zero,
+                      itemCount: availablePartners.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, itemIndex) {
+                        final partnerName = availablePartners[itemIndex];
+                        final selectedPartners = _plotPartners[key] ?? [];
+                        final isSelected =
+                            selectedPartners.contains(partnerName);
+                        return GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              final currentPartners =
+                                  List<String>.from(_plotPartners[key] ?? []);
+                              if (isSelected) {
+                                currentPartners.remove(partnerName);
+                              } else {
+                                currentPartners.add(partnerName);
+                              }
+                              _plotPartners[key] = currentPartners;
+                            });
+                            _onDataChanged();
+                            closeDropdown();
+                          },
+                          child: Container(
+                            alignment: Alignment.centerLeft,
+                            child: IntrinsicWidth(
+                              child: Container(
+                                height: 32,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF8F9FA),
+                                  borderRadius: BorderRadius.circular(6),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: isSelected
+                                          ? const Color(0xFF0C8CE9)
+                                          : Colors.black.withOpacity(0.25),
+                                      blurRadius: 2,
+                                      offset: const Offset(0, 0),
+                                      spreadRadius: 0,
+                                    ),
+                                  ],
+                                ),
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  partnerName,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ),
                 ],
-              ),
-              child: StatefulBuilder(
-                builder: (context, setOverlayState) {
-                  return Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        height: 48,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                'Select Partner(s)',
-                                style: GoogleFonts.inter(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
-                                  color: Colors.black,
-                                ),
-                              ),
-                            ),
-                            GestureDetector(
-                              onTap: closeDropdown,
-                              child: Transform.rotate(
-                                angle: 3.14159,
-                                child: SvgPicture.asset(
-                                  'assets/images/Drrrop_down.svg',
-                                  width: 14,
-                                  height: 7,
-                                  fit: BoxFit.contain,
-                                  placeholderBuilder: (context) =>
-                                      const SizedBox(
-                                    width: 14,
-                                    height: 7,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 144),
-                        child: SingleChildScrollView(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              ...availablePartners.map((partnerName) {
-                                final selectedPartners =
-                                    _plotPartners[key] ?? [];
-                                final isSelected =
-                                    selectedPartners.contains(partnerName);
-                                return GestureDetector(
-                                  onTap: () {
-                                    setState(() {
-                                      final currentPartners =
-                                          _plotPartners[key] ?? [];
-                                      if (isSelected) {
-                                        currentPartners.remove(partnerName);
-                                        _plotPartners[key] = currentPartners;
-                                      } else {
-                                        _plotPartners[key] = [
-                                          ...currentPartners,
-                                          partnerName
-                                        ];
-                                      }
-                                      print(
-                                          'DEBUG: Partner selection changed for plot $key. Partners now: ${_plotPartners[key]}');
-                                    });
-                                    setState(() {});
-                                    _onDataChanged();
-                                    print(
-                                        'DEBUG: _onDataChanged() called after partner selection for plot $key');
-                                    setOverlayState(() {});
-                                  },
-                                  child: Container(
-                                    height: 48,
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8),
-                                    child: Align(
-                                      alignment: Alignment.center,
-                                      child: Container(
-                                        width: double.infinity,
-                                        height: 32,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 8),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFF8F9FA),
-                                          borderRadius:
-                                              BorderRadius.circular(4),
-                                          boxShadow: isSelected
-                                              ? [
-                                                  BoxShadow(
-                                                    color:
-                                                        const Color(0xFF0C8CE9),
-                                                    blurRadius: 2,
-                                                    offset: const Offset(0, 0),
-                                                    spreadRadius: 0,
-                                                  ),
-                                                ]
-                                              : [
-                                                  BoxShadow(
-                                                    color: Colors.black
-                                                        .withOpacity(0.25),
-                                                    blurRadius: 2,
-                                                    offset: const Offset(0, 0),
-                                                    spreadRadius: 0,
-                                                  ),
-                                                ],
-                                        ),
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Text(
-                                            partnerName,
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.normal,
-                                              color: Colors.black,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              }),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                },
               ),
             ),
           ),
         ),
-      );
+      ),
+    );
 
-      overlay.insert(backdropEntry);
-      overlay.insert(overlayEntry);
-    }
-
-    final cellOffset = renderBox.localToGlobal(Offset.zero);
-    final dropdownBottom =
-        cellOffset.dy + dropdownTopGap + dropdownHeightEstimate;
-    final maxVisibleBottom = screenSize.height - viewportBottomPadding;
-
-    if (_scrollController.hasClients &&
-        _scrollController.position.maxScrollExtent > 0 &&
-        dropdownBottom > maxVisibleBottom) {
-      final scrollDelta = dropdownBottom - maxVisibleBottom;
-      final targetOffset = (_scrollController.offset + scrollDelta).clamp(
-        0.0,
-        _scrollController.position.maxScrollExtent,
-      );
-      if ((targetOffset - _scrollController.offset).abs() > 1.0) {
-        _scrollController
-            .animateTo(
-              targetOffset,
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOut,
-            )
-            .then((_) => showDropdown());
-      } else {
-        showDropdown();
-      }
-    } else {
-      showDropdown();
-    }
+    overlay.insert(backdropEntry);
+    overlay.insert(overlayEntry);
   }
 
   Widget _buildExpensesTable() {
