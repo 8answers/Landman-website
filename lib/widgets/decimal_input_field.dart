@@ -21,8 +21,12 @@ class DecimalInputField extends StatefulWidget {
   final EdgeInsets? contentPadding;
   final bool isDense;
   final int decimalPlaces;
+  final TextAlign textAlign;
+  final TextInputAction textInputAction;
+  final ScrollPhysics? scrollPhysics;
 
   const DecimalInputField({
+    super.key,
     required this.controller,
     this.focusNode,
     this.hintText = '0',
@@ -39,6 +43,9 @@ class DecimalInputField extends StatefulWidget {
     this.contentPadding,
     this.isDense = true,
     this.decimalPlaces = 2,
+    this.textAlign = TextAlign.left,
+    this.textInputAction = TextInputAction.next,
+    this.scrollPhysics,
   });
 
   @override
@@ -48,19 +55,43 @@ class DecimalInputField extends StatefulWidget {
 class _DecimalInputFieldState extends State<DecimalInputField> {
   late FocusNode _internalFocusNode;
   late TextEditingController _displayController;
+  late bool _ownsInternalFocusNode;
   bool _hasFocus = false;
   bool _isUpdatingController = false;
 
   @override
   void initState() {
     super.initState();
+    _ownsInternalFocusNode = widget.focusNode == null;
     _internalFocusNode = widget.focusNode ?? FocusNode();
     _internalFocusNode.addListener(_handleFocusChange);
     widget.controller.addListener(_handleTextChange);
-    
+
     // Create a display controller that syncs with the original (full text)
     _displayController = TextEditingController(text: widget.controller.text);
     _displayController.addListener(_handleDisplayTextChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant DecimalInputField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_handleTextChange);
+      widget.controller.addListener(_handleTextChange);
+      _updateDisplayController();
+    }
+
+    if (oldWidget.focusNode != widget.focusNode) {
+      _internalFocusNode.removeListener(_handleFocusChange);
+      if (_ownsInternalFocusNode) {
+        _internalFocusNode.dispose();
+      }
+      _ownsInternalFocusNode = widget.focusNode == null;
+      _internalFocusNode = widget.focusNode ?? FocusNode();
+      _internalFocusNode.addListener(_handleFocusChange);
+      _hasFocus = _internalFocusNode.hasFocus;
+    }
   }
 
   @override
@@ -69,28 +100,32 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
     _internalFocusNode.removeListener(_handleFocusChange);
     _displayController.removeListener(_handleDisplayTextChange);
     _displayController.dispose();
-    if (widget.focusNode == null) {
+    if (_ownsInternalFocusNode) {
       _internalFocusNode.dispose();
     }
     super.dispose();
   }
 
   void _handleFocusChange() {
+    if (!mounted) return;
     final hadFocus = _hasFocus;
     setState(() {
       _hasFocus = _internalFocusNode.hasFocus;
       _updateDisplayController();
-      
+
       // When focus is gained, position cursor appropriately
       if (_hasFocus) {
         final text = _displayController.text;
         // Position cursor at the end of the text
         final cursorPosition = text.length;
-        _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+        _displayController.selection =
+            TextSelection.collapsed(offset: cursorPosition);
         // Request focus to ensure cursor is visible
         WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
           if (_internalFocusNode.hasFocus) {
-            _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+            _displayController.selection =
+                TextSelection.collapsed(offset: cursorPosition);
           }
         });
       }
@@ -113,30 +148,32 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
     if (!_isUpdatingController) {
       _isUpdatingController = true;
       String displayText = _displayController.text;
-      
+
       // If user typed decimal digits, limit to 2 decimal places
       if (displayText.contains('.')) {
         final parts = displayText.split('.');
         final integerPart = parts[0];
         final decimalDigits = parts.length > 1 ? parts[1] : '';
-        
+
         // Limit to specified decimal places
-        final limitedDecimalDigits = decimalDigits.length > widget.decimalPlaces ? decimalDigits.substring(0, widget.decimalPlaces) : decimalDigits;
+        final limitedDecimalDigits = decimalDigits.length > widget.decimalPlaces
+            ? decimalDigits.substring(0, widget.decimalPlaces)
+            : decimalDigits;
         final fullText = integerPart + '.' + limitedDecimalDigits;
-        
+
         // Update widget controller with the full text
         widget.controller.text = fullText;
         widget.onChanged?.call(fullText);
-        
+
         // If we had to truncate, update the display controller
         if (decimalDigits.length > widget.decimalPlaces) {
           final currentSelection = _displayController.selection;
           _displayController.value = TextEditingValue(
             text: fullText,
             selection: TextSelection.collapsed(
-              offset: currentSelection.baseOffset <= fullText.length 
-                ? currentSelection.baseOffset 
-                : fullText.length,
+              offset: currentSelection.baseOffset <= fullText.length
+                  ? currentSelection.baseOffset
+                  : fullText.length,
             ),
           );
         }
@@ -145,7 +182,7 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
         widget.controller.text = displayText;
         widget.onChanged?.call(displayText);
       }
-      
+
       _isUpdatingController = false;
     }
   }
@@ -155,12 +192,12 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
       _isUpdatingController = true;
       final fullText = widget.controller.text;
       final selection = _displayController.selection;
-      
+
       if (_displayController.text != fullText) {
         _displayController.value = TextEditingValue(
           text: fullText,
-          selection: selection.baseOffset <= fullText.length 
-              ? selection 
+          selection: selection.baseOffset <= fullText.length
+              ? selection
               : TextSelection.collapsed(offset: fullText.length),
         );
       }
@@ -170,7 +207,7 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
 
   String _getDisplayDecimalSuffix() {
     final text = widget.controller.text;
-    
+
     // Don't show suffix if field is empty OR doesn't contain a decimal point
     if (text.isEmpty || !text.contains('.')) {
       return '';
@@ -181,7 +218,7 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
       final parts = text.split('.');
       if (parts.length == 2) {
         final decimalPart = parts[1];
-        
+
         // If decimal part is empty (user just typed "."), show zeros in grey while focused
         if (decimalPart.isEmpty && _hasFocus) {
           return '0' * widget.decimalPlaces;
@@ -213,7 +250,7 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
     final displayText = text;
     // Check if the value is zero - if so, display in grey like a placeholder
     final isZero = _isZeroValue(text);
-    
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -223,8 +260,11 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
           focusNode: _internalFocusNode,
           keyboardType: widget.keyboardType,
           textAlignVertical: TextAlignVertical.center,
-          textAlign: TextAlign.left,
-          textInputAction: TextInputAction.next,
+          scrollPhysics: widget.scrollPhysics,
+          textAlign: widget.textAlign,
+          showCursor: true,
+          cursorColor: Colors.black,
+          textInputAction: widget.textInputAction,
           inputFormatters: widget.inputFormatters,
           onTap: () {
             // Ensure cursor is visible on tap
@@ -234,16 +274,18 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
               _internalFocusNode.requestFocus();
             }
             WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
               if (_internalFocusNode.hasFocus) {
                 final text = _displayController.text;
                 final cursorPosition = text.length;
-                _displayController.selection = TextSelection.collapsed(offset: cursorPosition);
+                _displayController.selection =
+                    TextSelection.collapsed(offset: cursorPosition);
               }
             });
           },
           onTapOutside: (event) {
-            // Unfocus the field when tapping outside, which will trigger onEditingComplete
-            _internalFocusNode.unfocus();
+            // Let parent decide outside-tap behavior; forced unfocus here can
+            // steal first-click cursor in dense table layouts.
             widget.onTapOutside?.call();
           },
           onChanged: (value) {
@@ -253,9 +295,16 @@ class _DecimalInputFieldState extends State<DecimalInputField> {
             widget.onEditingComplete?.call();
           },
           onSubmitted: (value) {
-            // When user presses Enter, format and move to next field
+            // When user presses Enter, format and optionally move to next field.
+            // If caller already unfocused inside onEditingComplete, do not force
+            // a traversal jump (can move focus unpredictably in web tables).
             widget.onEditingComplete?.call();
-            FocusScope.of(context).nextFocus();
+            if (widget.textInputAction == TextInputAction.next &&
+                _internalFocusNode.hasFocus) {
+              FocusScope.of(context).nextFocus();
+            } else {
+              _internalFocusNode.unfocus();
+            }
           },
           decoration: InputDecoration(
             hintText: widget.hintText,

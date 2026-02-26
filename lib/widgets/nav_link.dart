@@ -12,6 +12,7 @@ class NavLink extends StatefulWidget {
   final double iconRotation;
   final VoidCallback? onTap;
   final bool hasError;
+  final String errorIconPath;
 
   const NavLink({
     super.key,
@@ -24,7 +25,9 @@ class NavLink extends StatefulWidget {
     this.iconRotation = 0,
     this.onTap,
     this.hasError = false,
-  }) : assert(inactiveIconPath != null || icon != null, 'Either iconPath or icon must be provided');
+    this.errorIconPath = 'assets/images/Error_msg.svg',
+  }) : assert(inactiveIconPath != null || icon != null,
+            'Either iconPath or icon must be provided');
 
   @override
   State<NavLink> createState() => _NavLinkState();
@@ -53,13 +56,23 @@ class _NavLinkState extends State<NavLink> {
     }
   }
 
+  Color _getBackgroundColor() {
+    if (widget.isActive) {
+      return const Color(0xFFDDDEDE);
+    }
+    if (_isHovered) {
+      return const Color(0xFFF0F0F0);
+    }
+    return Colors.transparent;
+  }
+
   @override
   Widget build(BuildContext context) {
     final fontWeight = widget.isActive ? FontWeight.w500 : FontWeight.w400;
-    
+
     // Debug: Print to verify state changes
     // print('NavLink ${widget.label}: isActive=${widget.isActive}, fontWeight=$fontWeight');
-    
+
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
@@ -67,75 +80,81 @@ class _NavLinkState extends State<NavLink> {
         onTap: widget.onTap,
         child: Container(
           width: double.infinity,
-          height: 24,
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: _getBackgroundColor(),
+            borderRadius: BorderRadius.circular(8),
+          ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: Transform.rotate(
-                angle: widget.iconRotation * 3.14159 / 180,
-                child: widget.inactiveIconPath != null
-                    ? SvgPicture.asset(
-                        _getIconPath() ?? widget.inactiveIconPath!,
-                        width: 16,
-                        height: 16,
-                        fit: BoxFit.contain,
-                        alignment: Alignment.center,
-                        placeholderBuilder: (context) => const SizedBox(
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: Transform.rotate(
+                  angle: widget.iconRotation * 3.14159 / 180,
+                  child: widget.inactiveIconPath != null
+                      ? SvgPicture.asset(
+                          _getIconPath() ?? widget.inactiveIconPath!,
                           width: 16,
                           height: 16,
-                        ),
-                        errorBuilder: (context, error, stackTrace) {
-                          print('Error loading icon ${_getIconPath()}: $error');
-                          return const SizedBox(
+                          fit: BoxFit.contain,
+                          alignment: Alignment.center,
+                          placeholderBuilder: (context) => const SizedBox(
                             width: 16,
                             height: 16,
-                            child: Icon(Icons.error_outline, size: 16, color: Colors.red),
-                          );
-                        },
-                      )
-                    : Icon(
-                        widget.icon!,
-                        size: 16,
-                        color: widget.isActive
-                            ? const Color(0xFF090909)
-                            : Colors.black.withOpacity(0.64),
-                      ),
+                          ),
+                          errorBuilder: (context, error, stackTrace) {
+                            print(
+                                'Error loading icon ${_getIconPath()}: $error');
+                            return const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: Icon(Icons.error_outline,
+                                  size: 16, color: Colors.red),
+                            );
+                          },
+                        )
+                      : Icon(
+                          widget.icon!,
+                          size: 16,
+                          color: widget.isActive
+                              ? const Color(0xFF090909)
+                              : Colors.black.withOpacity(0.64),
+                        ),
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              widget.label,
-              style: GoogleFonts.inter(
-                fontSize: 16,
-                fontWeight: fontWeight,
-                color: _getTextColor(),
-                letterSpacing: 0,
-              ),
-            ),
-            if (widget.hasError) ...[
               const SizedBox(width: 8),
-              SvgPicture.asset(
-                'assets/images/Error_msg.svg',
-                width: 17,
-                height: 15,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) {
-                  print('Error loading Error_msg.svg: $error');
-                  return const SizedBox(
-                    width: 17,
-                    height: 15,
-                  );
-                },
+              Text(
+                widget.label,
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: fontWeight,
+                  color: _getTextColor(),
+                  letterSpacing: 0,
+                ),
               ),
+              if (widget.hasError) ...[
+                const SizedBox(width: 8),
+                SvgPicture.asset(
+                  widget.errorIconPath,
+                  width: 17,
+                  height: 15,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) {
+                    print('Error loading ${widget.errorIconPath}: $error');
+                    return const SizedBox(
+                      width: 17,
+                      height: 15,
+                    );
+                  },
+                ),
+              ],
             ],
-          ],
-        ),
+          ),
         ),
       ),
     );
   }
 }
-

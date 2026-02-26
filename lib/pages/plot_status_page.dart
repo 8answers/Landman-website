@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:ui';
 import '../widgets/decimal_input_field.dart';
@@ -146,6 +147,7 @@ class PlotStatusPage extends StatefulWidget {
   final List<Map<String, dynamic>>? agents;
   final String? projectId;
   final Function(bool)? onPlotStatusErrorsChanged;
+  final ValueChanged<bool>? onLoadingStateChanged;
 
   const PlotStatusPage({
     super.key,
@@ -153,6 +155,7 @@ class PlotStatusPage extends StatefulWidget {
     this.agents,
     this.projectId,
     this.onPlotStatusErrorsChanged,
+    this.onLoadingStateChanged,
   });
 
   @override
@@ -160,12 +163,19 @@ class PlotStatusPage extends StatefulWidget {
 }
 
 class _PlotStatusPageState extends State<PlotStatusPage> {
+  void _notifyLoadingState(bool isLoading) {
+    widget.onLoadingStateChanged?.call(isLoading);
+  }
+
   final SupabaseClient _supabase = Supabase.instance.client;
   final ScrollController _scrollController = ScrollController();
   String _selectedLayout = 'All Layouts';
   String _selectedStatus = 'All Status';
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+
+  // Loading state
+  bool _isLoading = true;
 
   // Plot data structure
   List<Map<String, dynamic>> _allPlots = [];
@@ -176,6 +186,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   // Controllers for editable fields
   final Map<String, TextEditingController> _salePriceControllers = {};
   final Map<String, TextEditingController> _buyerNameControllers = {};
+  final Map<String, TextEditingController> _buyerContactControllers = {};
   final Map<String, TextEditingController> _saleDateControllers = {};
   final Map<String, TextEditingController> _paymentAmountControllers = {};
   final Map<String, TextEditingController> _paymentTextControllers = {};
@@ -183,6 +194,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   // FocusNodes for editable fields
   final Map<String, FocusNode> _salePriceFocusNodes = {};
   final Map<String, FocusNode> _buyerNameFocusNodes = {};
+  final Map<String, FocusNode> _buyerContactFocusNodes = {};
   final Map<String, FocusNode> _saleDateFocusNodes = {};
   final Map<String, FocusNode> _paymentAmountFocusNodes = {};
   final Map<String, FocusNode> _paymentTextFocusNodes = {};
@@ -197,6 +209,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   final ScrollController _editDialogScrollController = ScrollController();
   final GlobalKey _paymentMethodFieldKey = GlobalKey();
   final GlobalKey _agentFieldKey = GlobalKey();
+  final GlobalKey _filterButtonKey = GlobalKey();
 
   // Edit dialog state
   int? _editingLayoutIndex;
@@ -204,6 +217,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   PlotStatus? _editingStatus;
   bool _isStatusDropdownOpen = false;
   final GlobalKey _statusDropdownKey = GlobalKey();
+  final GlobalKey _statusDropdownMenuKey = GlobalKey();
   bool _isPaymentMethodDropdownOpen = false;
   bool _isAgentDropdownOpen = false;
   int _currentPaymentIndex = 0;
@@ -215,6 +229,28 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   String _areaUnit = 'Square Feet (sqft)';
   bool get _isSqm => AreaUnitUtils.isSqm(_areaUnit);
   String get _areaUnitSuffix => AreaUnitUtils.unitSuffix(_isSqm);
+  bool? _supportsBuyerContactNumberColumn;
+
+  double _stepTableZoomLevel(double current, {required bool increase}) {
+    final currentStep = (current * 10).round();
+    final nextStep = (currentStep + (increase ? 1 : -1)).clamp(5, 12);
+    return nextStep / 10.0;
+  }
+
+  Future<bool> _canSaveBuyerContactNumber() async {
+    // Cache only successful detection. If this was false earlier and DB
+    // schema has now been updated, re-check and enable saving automatically.
+    if (_supportsBuyerContactNumberColumn == true) {
+      return true;
+    }
+    try {
+      await _supabase.from('plots').select('buyer_contact_number').limit(1);
+      _supportsBuyerContactNumberColumn = true;
+    } catch (_) {
+      _supportsBuyerContactNumberColumn = false;
+    }
+    return _supportsBuyerContactNumberColumn!;
+  }
 
   // Helper function to format decimal values
   String _formatDecimal(dynamic value) {
@@ -252,12 +288,61 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   PlotStatus _parsePlotStatus(dynamic statusData) {
     if (statusData is PlotStatus) return statusData;
     if (statusData is String) {
-      return PlotStatus.values.firstWhere(
-        (e) => e.name == statusData.toLowerCase(),
-        orElse: () => PlotStatus.available,
-      );
+      final normalized = statusData.trim().toLowerCase();
+      switch (normalized) {
+        case 'sold':
+          return PlotStatus.sold;
+        case 'reserved':
+        case 'pending':
+          return PlotStatus.reserved;
+        case 'blocked':
+          return PlotStatus.blocked;
+        case 'available':
+        default:
+          return PlotStatus.available;
+      }
     }
     return PlotStatus.available;
+  }
+
+  String _plotStatusToDatabaseValue(PlotStatus status) {
+    // DB constraint uses "reserved" for pending-like states.
+    if (status == PlotStatus.reserved || status == PlotStatus.blocked) {
+      return 'reserved';
+    }
+    return status.name; // available, sold
+  }
+
+  bool _isGlobalTapInsideKey(GlobalKey key, Offset globalPosition) {
+    final keyContext = key.currentContext;
+    if (keyContext == null) return false;
+    final renderObject = keyContext.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) return false;
+    final topLeft = renderObject.localToGlobal(Offset.zero);
+    final bounds = topLeft & renderObject.size;
+    return bounds.contains(globalPosition);
+  }
+
+  void _handleEditDialogTapDown(TapDownDetails details) {
+    final tapPosition = details.globalPosition;
+    bool didUpdate = false;
+
+    if (_isStatusDropdownOpen &&
+        !_isGlobalTapInsideKey(_statusDropdownKey, tapPosition) &&
+        !_isGlobalTapInsideKey(_statusDropdownMenuKey, tapPosition)) {
+      _isStatusDropdownOpen = false;
+      didUpdate = true;
+    }
+
+    if (_isPaymentMethodDropdownOpen &&
+        !_isGlobalTapInsideKey(_paymentMethodFieldKey, tapPosition)) {
+      _isPaymentMethodDropdownOpen = false;
+      didUpdate = true;
+    }
+
+    if (didUpdate) {
+      setState(() {});
+    }
   }
 
   void _syncEditingPlotToAllPlots() {
@@ -289,6 +374,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         plotData['status'] = status;
         plotData['salePrice'] = plot['salePrice'] as String? ?? '';
         plotData['buyerName'] = plot['buyerName'] as String? ?? '';
+        plotData['buyerContactNumber'] =
+            plot['buyerContactNumber'] as String? ?? '';
         plotData['agent'] = plot['agent'] as String? ?? '';
         plotData['saleDate'] = plot['saleDate'] as String? ?? '';
         plotData['payments'] = (plot['payments'] as List<dynamic>?) ?? [];
@@ -320,6 +407,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'totalPlotCost': plot['totalPlotCost'] as String? ?? '0.00',
           'salePrice': plot['salePrice'] as String? ?? '',
           'buyerName': plot['buyerName'] as String? ?? '',
+          'buyerContactNumber': plot['buyerContactNumber'] as String? ?? '',
           'agent': plot['agent'] as String? ?? '',
           'saleDate': plot['saleDate'] as String? ?? '',
           'payments': (plot['payments'] as List<dynamic>?) ?? [],
@@ -374,11 +462,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   @override
   void initState() {
     super.initState();
+    _notifyLoadingState(true);
     _loadPlotDataAndNotify();
   }
 
   Future<void> _loadPlotDataAndNotify() async {
+    if (mounted) setState(() => _isLoading = true);
+    _notifyLoadingState(true);
     await _loadPlotData();
+    if (mounted) setState(() => _isLoading = false);
+    _notifyLoadingState(false);
     _notifyErrorState();
   }
 
@@ -398,6 +491,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var controller in _buyerNameControllers.values) {
       controller.dispose();
     }
+    for (var controller in _buyerContactControllers.values) {
+      controller.dispose();
+    }
     for (var controller in _saleDateControllers.values) {
       controller.dispose();
     }
@@ -405,6 +501,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       focusNode.dispose();
     }
     for (var focusNode in _buyerNameFocusNodes.values) {
+      focusNode.dispose();
+    }
+    for (var focusNode in _buyerContactFocusNodes.values) {
       focusNode.dispose();
     }
     for (var focusNode in _saleDateFocusNodes.values) {
@@ -458,7 +557,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final layouts = await _supabase
             .from('layouts')
             .select('id, name')
-            .eq('project_id', widget.projectId!);
+            .eq('project_id', widget.projectId!)
+            .order('created_at', ascending: true);
 
         print('📥 LOADED LAYOUTS FROM DB: ${layouts.length} layouts');
         for (var i = 0; i < layouts.length; i++) {
@@ -491,17 +591,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   .select('partner_name')
                   .eq('plot_id', plot['id']);
 
-              // Parse status string to PlotStatus enum
-              PlotStatus plotStatus = PlotStatus.available;
-              final statusString = (plot['status'] ?? 'available').toString();
-              try {
-                plotStatus = PlotStatus.values.firstWhere(
-                  (e) => e.name == statusString,
-                  orElse: () => PlotStatus.available,
-                );
-              } catch (e) {
-                plotStatus = PlotStatus.available;
-              }
+              // Parse DB status string to PlotStatus enum
+              final plotStatus = _parsePlotStatus(plot['status']);
 
               // Log what payments data is in the database for this plot
               final paymentsFromDb = plot['payments'];
@@ -520,6 +611,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                         ? _formatDecimal(plot['sale_price'])
                         : '',
                 'buyerName': (plot['buyer_name'] ?? '').toString(),
+                'buyerContactNumber': (plot['buyer_contact_number'] ??
+                        plot['buyer_mobile_number'] ??
+                        '')
+                    .toString(),
                 'saleDate': _formatDateFromDatabase(plot['sale_date']),
                 'agent': (plot['agent_name'] ?? '').toString(),
                 'partners': plotPartners
@@ -560,7 +655,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final agentsData = await _supabase
             .from('agents')
             .select('name')
-            .eq('project_id', widget.projectId!);
+            .eq('project_id', widget.projectId!)
+            .order('created_at', ascending: true);
 
         agents = agentsData
             .map((a) => {
@@ -582,6 +678,30 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       print('⚠️ sourceLayouts is empty, loading from local storage');
       sourceLayouts = await LayoutStorageService.loadLayoutsData();
       print('📥 Loaded from local storage: ${sourceLayouts.length} layouts');
+    }
+
+    // If local edits are newer than the last successful remote save, keep
+    // showing local layouts so a refresh does not drop the latest edits.
+    final projectId = widget.projectId?.trim();
+    if (projectId != null && projectId.isNotEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final localEditMs =
+            prefs.getInt('project_${projectId}_last_local_edit_ms') ?? 0;
+        final remoteSaveMs =
+            prefs.getInt('project_${projectId}_last_remote_save_ms') ?? 0;
+        if (localEditMs > remoteSaveMs) {
+          final localLayouts = await LayoutStorageService.loadLayoutsData();
+          if (localLayouts.isNotEmpty) {
+            print(
+                '📥 PlotStatusPage using newer local layouts (local=$localEditMs remote=$remoteSaveMs)');
+            sourceLayouts = localLayouts;
+          }
+        }
+      } catch (e) {
+        print(
+            'PlotStatusPage: Failed to compare local/remote layout timestamps: $e');
+      }
     }
 
     // Fallback to local storage for agents if not loaded from database
@@ -615,16 +735,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             'area': plot['area'] as String? ?? '0.00',
             'status': plot['status'] is PlotStatus
                 ? plot['status'] as PlotStatus
-                : (plot['status'] is String
-                    ? PlotStatus.values.firstWhere(
-                        (e) => e.name == plot['status'].toString(),
-                        orElse: () => PlotStatus.available,
-                      )
-                    : PlotStatus.available),
+                : _parsePlotStatus(plot['status']),
             'purchaseRate': plot['purchaseRate'] as String? ?? '0.00',
             'totalPlotCost': plot['totalPlotCost'] as String? ?? '0.00',
             'salePrice': plot['salePrice'] as String? ?? null,
             'buyerName': plot['buyerName'] as String? ?? '',
+            'buyerContactNumber': plot['buyerContactNumber'] as String? ?? '',
             'agent': plot['agent'] as String? ?? '',
             'saleDate': plot['saleDate'] as String? ?? '',
             'payments': (plot['payments'] as List<dynamic>?) ?? [],
@@ -647,11 +763,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     for (var controller in _buyerNameControllers.values) {
       controller.dispose();
     }
+    for (var controller in _buyerContactControllers.values) {
+      controller.dispose();
+    }
     for (var controller in _saleDateControllers.values) {
       controller.dispose();
     }
     _salePriceControllers.clear();
     _buyerNameControllers.clear();
+    _buyerContactControllers.clear();
     _saleDateControllers.clear();
 
     // Initialize controllers with data from _layouts
@@ -661,12 +781,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final plot = plots[plotIndex] as Map<String, dynamic>;
         final status = plot['status'] is PlotStatus
             ? plot['status'] as PlotStatus
-            : (plot['status'] is String
-                ? PlotStatus.values.firstWhere(
-                    (e) => e.name == plot['status'].toString(),
-                    orElse: () => PlotStatus.available,
-                  )
-                : PlotStatus.available);
+            : _parsePlotStatus(plot['status']);
 
         if (status == PlotStatus.sold) {
           // Initialize sale price controller
@@ -689,6 +804,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           );
           _buyerNameFocusNodes[buyerKey] = _createDialogFocusNode();
 
+          // Initialize buyer contact controller
+          final buyerContactKey = '${layoutIndex}_${plotIndex}_buyer_contact';
+          final buyerContactNumber =
+              plot['buyerContactNumber'] as String? ?? '';
+          _buyerContactControllers[buyerContactKey] = TextEditingController(
+            text: buyerContactNumber,
+          );
+          _buyerContactFocusNodes[buyerContactKey] = _createDialogFocusNode();
+
           // Initialize sale date controller
           final dateKey = '${layoutIndex}_${plotIndex}_date';
           final saleDate = plot['saleDate'] as String? ?? '';
@@ -701,7 +825,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
 
     print(
-        'PlotStatusPage: Initialized ${_salePriceControllers.length} sale price controllers, ${_buyerNameControllers.length} buyer name controllers, ${_saleDateControllers.length} sale date controllers');
+        'PlotStatusPage: Initialized ${_salePriceControllers.length} sale price controllers, ${_buyerNameControllers.length} buyer name controllers, ${_buyerContactControllers.length} buyer contact controllers, ${_saleDateControllers.length} sale date controllers');
   }
 
   Future<void> _cleanupIncompleteSoldPlots() async {
@@ -780,6 +904,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
     // Save updated layout data back to storage
     // Convert _layouts back to the format expected by storage
+    bool didAutoPromotePendingToSold = false;
     final layoutsToSave = _layouts.asMap().entries.map((layoutEntry) {
       final layoutIndex = layoutEntry.key;
       final layout = layoutEntry.value;
@@ -787,14 +912,27 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           (layout['plots'] as List<dynamic>).asMap().entries.map((plotEntry) {
         final plotIndex = plotEntry.key;
         final plotMap = plotEntry.value as Map<String, dynamic>;
+        final currentStatus = _parsePlotStatus(plotMap['status']);
+        final effectiveStatus = _resolveAutoStatusForPlot(plotMap);
+        if (effectiveStatus != currentStatus) {
+          didAutoPromotePendingToSold = true;
+          plotMap['status'] = effectiveStatus;
+          if (_editingLayoutIndex == layoutIndex &&
+              _editingPlotIndex == plotIndex) {
+            _editingStatus = effectiveStatus;
+          }
+        }
 
         // Get values from controllers using the correct key format
         final priceKey = '${layoutIndex}_${plotIndex}_price';
         final buyerKey = '${layoutIndex}_${plotIndex}_buyer';
+        final buyerContactKey = '${layoutIndex}_${plotIndex}_buyer_contact';
         final dateKey = '${layoutIndex}_${plotIndex}_date';
 
         final salePriceController = _salePriceControllers[priceKey];
         final buyerNameController = _buyerNameControllers[buyerKey];
+        final buyerContactController =
+            _buyerContactControllers[buyerContactKey];
         final saleDateController = _saleDateControllers[dateKey];
 
         // Get sale price - convert empty string to null
@@ -817,6 +955,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             plotMap['buyerName']?.toString() ??
             '';
         final buyerName = buyerNameText.isEmpty ? null : buyerNameText;
+
+        // Get buyer contact number - convert empty string to null
+        final buyerContactText = buyerContactController?.text.trim() ??
+            plotMap['buyerContactNumber']?.toString() ??
+            '';
+        final buyerContactNumber =
+            buyerContactText.isEmpty ? null : buyerContactText;
 
         // Get agent - convert empty string to null
         final agentText = plotMap['agent']?.toString() ?? '';
@@ -848,9 +993,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'area': plotMap['area'] as String? ?? '0.00',
           'purchaseRate': plotMap['purchaseRate'] as String? ?? '0.00',
           'totalPlotCost': plotMap['totalPlotCost'] as String? ?? '0.00',
-          'status': (plotMap['status'] as PlotStatus?)?.name ?? 'available',
+          'status': _plotStatusToDatabaseValue(effectiveStatus),
           'salePrice': salePrice,
           'buyerName': buyerName,
+          'buyerContactNumber': buyerContactNumber,
           'agent': agent,
           'saleDate': saleDate,
           'partners': partnersList,
@@ -863,6 +1009,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         'plots': plots,
       };
     }).toList();
+
+    if (didAutoPromotePendingToSold && mounted) {
+      setState(() {
+        _rebuildAllPlotsFromLayouts();
+      });
+    }
+
+    // Persist local draft first and mark it as the newest edit.
+    await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
+    await _markLocalEditTimestamp();
 
     // Save to Supabase if projectId is available, otherwise save to local storage
     print(
@@ -885,10 +1041,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           projectName: '', // Not updating project name
           layouts: layoutsToSave,
         );
+        await _markRemoteSaveTimestamp();
       } catch (e) {
         print('Error saving plot status to Supabase: $e');
-        // Fallback to local storage
-        await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
+        // Local draft is already saved and will be retried on the next save.
       }
     } else {
       // Save to local storage if no projectId
@@ -900,6 +1056,26 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   Future<void> _saveToStorage(List<Map<String, dynamic>> layouts) async {
     await LayoutStorageService.saveLayoutsDataDirect(layouts);
+  }
+
+  Future<void> _markLocalEditTimestamp() async {
+    final projectId = widget.projectId?.trim();
+    if (projectId == null || projectId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+      'project_${projectId}_last_local_edit_ms',
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<void> _markRemoteSaveTimestamp() async {
+    final projectId = widget.projectId?.trim();
+    if (projectId == null || projectId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+      'project_${projectId}_last_remote_save_ms',
+      DateTime.now().millisecondsSinceEpoch,
+    );
   }
 
   List<Map<String, dynamic>> _convertLayoutsData(
@@ -949,16 +1125,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         }
 
         // Handle status - can be PlotStatus enum or string
-        PlotStatus plotStatus = PlotStatus.available;
-        if (plotMap['status'] is PlotStatus) {
-          plotStatus = plotMap['status'] as PlotStatus;
-        } else if (plotMap['status'] is String) {
-          final statusString = plotMap['status'] as String;
-          plotStatus = PlotStatus.values.firstWhere(
-            (e) => e.name == statusString,
-            orElse: () => PlotStatus.available,
-          );
-        }
+        final plotStatus = _parsePlotStatus(plotMap['status']);
 
         return {
           'plotNumber': plotNumber,
@@ -966,10 +1133,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           'status': plotStatus,
           'salePrice': plotMap['salePrice'] as String? ?? '',
           'buyerName': plotMap['buyerName'] as String? ?? '',
+          'buyerContactNumber': (plotMap['buyerContactNumber'] ??
+                  plotMap['buyer_contact_number'] ??
+                  '')
+              .toString(),
           'agent': plotMap['agent'] as String? ?? '',
           'saleDate': plotMap['saleDate'] as String? ?? '',
           'purchaseRate': purchaseRate.isEmpty ? '0.00' : purchaseRate,
           'totalPlotCost': totalPlotCost.isEmpty ? '0.00' : totalPlotCost,
+          'partners': (plotMap['partners'] as List<dynamic>? ?? [])
+              .map((p) => p.toString())
+              .toList(),
           'payments': (plotMap['payments'] as List<dynamic>?) ?? [],
         };
       }).toList();
@@ -994,6 +1168,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     if (widget.projectId == null) return;
 
     try {
+      final canSaveBuyerContactNumber = await _canSaveBuyerContactNumber();
       for (var layout in _layouts) {
         final layoutId = layout['layoutId'] as String?;
         if (layoutId == null) continue;
@@ -1005,14 +1180,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
           // Get values from the plot data
           // Handle status - can be PlotStatus enum or string
-          var status = 'available';
-          if (plot['status'] is PlotStatus) {
-            status = (plot['status'] as PlotStatus).name.toLowerCase();
-          } else {
-            status = (plot['status'] as String? ?? 'available')
-                .toString()
-                .toLowerCase();
-          }
+          final status =
+              _plotStatusToDatabaseValue(_parsePlotStatus(plot['status']));
 
           final agent = (plot['agent'] as String? ?? '').toString().trim();
           final buyerName =
@@ -1025,18 +1194,27 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               .trim();
           final saleDate =
               (plot['saleDate'] as String? ?? '').toString().trim();
+          final buyerContactNumber =
+              (plot['buyerContactNumber'] as String? ?? '').toString().trim();
 
-          // Update the plot in the database
-          await _supabase.from('plots').update({
+          final updateData = <String, dynamic>{
             'status': status,
-            'agent': agent.isEmpty ? null : agent,
+            'agent_name': agent.isEmpty ? null : agent,
             'buyer_name': buyerName.isEmpty ? null : buyerName,
             'sale_price':
                 salePrice.isEmpty || salePrice == '0' || salePrice == '0.00'
                     ? null
                     : double.tryParse(salePrice),
             'sale_date': saleDate.isEmpty ? null : saleDate,
-          }).eq('id', plotId);
+          };
+
+          if (canSaveBuyerContactNumber) {
+            updateData['buyer_contact_number'] =
+                buyerContactNumber.isEmpty ? null : buyerContactNumber;
+          }
+
+          // Update the plot in the database
+          await _supabase.from('plots').update(updateData).eq('id', plotId);
         }
       }
       print('Successfully saved plots to database');
@@ -1187,6 +1365,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             'status': status,
             'salePrice': plot['salePrice'] as String? ?? '0.00',
             'buyerName': plot['buyerName'] as String? ?? '',
+            'buyerContactNumber': plot['buyerContactNumber'] as String? ?? '',
             'agent': plot['agent'] as String? ?? '',
             'saleDate': plot['saleDate'] as String? ?? '',
           });
@@ -1203,10 +1382,14 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       case PlotStatus.sold:
         return 'Sold';
       case PlotStatus.reserved:
-        return 'Reserved';
+        return 'Pending';
       case PlotStatus.blocked:
         return 'Blocked';
     }
+  }
+
+  bool _isSoldLikeStatus(PlotStatus status) {
+    return status == PlotStatus.sold || status == PlotStatus.reserved;
   }
 
   Color _getStatusColor(PlotStatus status) {
@@ -1232,6 +1415,37 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         return const Color(0xFFFFF4E6); // Light orange
       case PlotStatus.blocked:
         return const Color(0xFFFFEBEE); // Light red
+    }
+  }
+
+  String _getStatusDropdownLabel(PlotStatus status) {
+    if (status == PlotStatus.reserved) return 'Pending';
+    return _getStatusString(status);
+  }
+
+  Color _getStatusDropdownDotColor(PlotStatus status) {
+    switch (status) {
+      case PlotStatus.reserved:
+        return const Color(0xFFFEB12A);
+      case PlotStatus.available:
+        return const Color(0xFF53D10C);
+      case PlotStatus.sold:
+        return const Color(0xFFFF0000);
+      case PlotStatus.blocked:
+        return const Color(0xFFFF0000);
+    }
+  }
+
+  Color _getStatusDropdownChipBackgroundColor(PlotStatus status) {
+    switch (status) {
+      case PlotStatus.reserved:
+        return const Color(0xFFFAE8C8);
+      case PlotStatus.available:
+        return const Color(0xFFD1EDD2);
+      case PlotStatus.sold:
+        return const Color(0xFFF9E5E6);
+      case PlotStatus.blocked:
+        return const Color(0xFFF9E5E6);
     }
   }
 
@@ -1326,6 +1540,51 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         : '$formattedInteger.$decimalPart';
   }
 
+  double _parseMoneyLikeValue(dynamic value) {
+    if (value == null) return 0.0;
+    final raw = value
+        .toString()
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .trim();
+    return double.tryParse(raw) ?? 0.0;
+  }
+
+  double _calculateTotalPaidAmount(Map<String, dynamic> plot) {
+    final payments = plot['payments'] as List<dynamic>? ?? const [];
+    double totalAmount = 0.0;
+    for (final payment in payments) {
+      final paymentMap = payment as Map<String, dynamic>;
+      totalAmount += _parseMoneyLikeValue(paymentMap['paymentAmount']);
+    }
+    return totalAmount;
+  }
+
+  PlotStatus _resolveAutoStatusForPlot(Map<String, dynamic> plot) {
+    final currentStatus = _parsePlotStatus(plot['status']);
+    // Respect explicit Available/Blocked selections.
+    if (currentStatus == PlotStatus.available ||
+        currentStatus == PlotStatus.blocked) {
+      return currentStatus;
+    }
+
+    const epsilon = 0.01;
+    final area = _parseMoneyLikeValue(plot['area']);
+    final salePrice = _parseMoneyLikeValue(plot['salePrice']);
+    final saleValue = area * salePrice;
+    if (saleValue <= epsilon) {
+      return currentStatus;
+    }
+
+    final remainingAmount = saleValue - _calculateTotalPaidAmount(plot);
+    if (remainingAmount.abs() <= epsilon) {
+      return PlotStatus.sold;
+    }
+
+    return PlotStatus.reserved;
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1343,29 +1602,14 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
   bool _hasValidationErrors() {
-    // Check if any sold plot has empty required fields (Buyer Name, Agent, Sale Price, Sale Date)
+    // Keep this in sync with row-level red shadow rules used in the table.
+    // If any sold row would show a red required-field shadow, surface a
+    // section-level error badge on the "Site" tab header.
     for (var layout in _layouts) {
       final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
       for (var plot in plots) {
-        final status = _parsePlotStatus(plot['status']);
-        if (status == PlotStatus.sold) {
-          final buyerName = (plot['buyerName'] as String? ?? '').trim();
-          final agent = (plot['agent'] as String? ?? '').trim();
-          final salePrice = (plot['salePrice'] as String? ?? '')
-              .replaceAll(',', '')
-              .replaceAll('₹', '')
-              .replaceAll(' ', '')
-              .trim();
-          final saleDate = (plot['saleDate'] as String? ?? '').trim();
-
-          if (buyerName.isEmpty ||
-              agent.isEmpty ||
-              salePrice.isEmpty ||
-              salePrice == '0' ||
-              salePrice == '0.00' ||
-              saleDate.isEmpty) {
-            return true;
-          }
+        if (_rowHasRequiredSoldFieldError(plot)) {
+          return true;
         }
       }
     }
@@ -1397,7 +1641,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   bool _rowHasRequiredSoldFieldError(Map<String, dynamic> plot) {
     final status = _parsePlotStatus(plot['status']);
-    if (status != PlotStatus.sold) return false;
+    if (status != PlotStatus.sold && status != PlotStatus.reserved) {
+      return false;
+    }
 
     final salePrice = (plot['salePrice'] as String? ?? '')
         .replaceAll(',', '')
@@ -1423,10 +1669,27 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
   void _showFilterDropdown(BuildContext context) {
+    final RenderBox? buttonRenderBox =
+        _filterButtonKey.currentContext?.findRenderObject() as RenderBox?;
+    if (buttonRenderBox == null) return;
+    final buttonOffset = buttonRenderBox.localToGlobal(Offset.zero);
+    final screenWidth = MediaQuery.of(context).size.width;
+
+    const popupWidth = 160.0;
+    var popupLeft = buttonOffset.dx;
+    if (popupLeft + popupWidth > screenWidth - 16) {
+      popupLeft = screenWidth - popupWidth - 16;
+    }
+    if (popupLeft < 16) {
+      popupLeft = 16;
+    }
+    final popupTop = buttonOffset.dy + buttonRenderBox.size.height + 4;
+
     // Calculate totals
     int totalPlots = 0;
     int availablePlots = 0;
     int soldPlots = 0;
+    int pendingPlots = 0;
 
     for (var layout in _layouts) {
       final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
@@ -1438,6 +1701,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           soldPlots++;
         } else if (status == PlotStatus.available) {
           availablePlots++;
+        } else if (status == PlotStatus.reserved) {
+          pendingPlots++;
         }
       }
     }
@@ -1458,12 +1723,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               ),
             ),
             Positioned(
-              top: 200,
-              right: 650,
+              top: popupTop,
+              left: popupLeft,
               child: Material(
                 type: MaterialType.transparency,
                 child: Container(
-                  width: 160,
+                  width: popupWidth,
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
                     color: const Color(0xFFF8F9FA),
@@ -1480,15 +1745,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Sold option
+                      // Pending option
                       _buildFilterOption(
-                        label: 'Sold ($soldPlots)',
-                        color: const Color(0xFFF44336),
-                        isSelected: _selectedStatus == 'Sold',
+                        label: 'Pending ($pendingPlots)',
+                        color: const Color(0xFFFEB12A),
+                        isSelected: _selectedStatus == 'Pending',
                         onTap: () {
-                          print('Selected: Sold');
+                          print('Selected: Pending');
                           setState(() {
-                            _selectedStatus = 'Sold';
+                            _selectedStatus = 'Pending';
                           });
                           Navigator.of(dialogContext).pop();
                         },
@@ -1503,6 +1768,20 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                           print('Selected: Available');
                           setState(() {
                             _selectedStatus = 'Available';
+                          });
+                          Navigator.of(dialogContext).pop();
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      // Sold option
+                      _buildFilterOption(
+                        label: 'Sold ($soldPlots)',
+                        color: const Color(0xFFF44336),
+                        isSelected: _selectedStatus == 'Sold',
+                        onTap: () {
+                          print('Selected: Sold');
+                          setState(() {
+                            _selectedStatus = 'Sold';
                           });
                           Navigator.of(dialogContext).pop();
                         },
@@ -1541,14 +1820,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }) {
     final bool isSold = color.value == const Color(0xFFF44336).value;
     final bool isAvailable = color.value == const Color(0xFF4CAF50).value;
+    final bool isPending = color.value == const Color(0xFFFEB12A).value;
     final bool isAll = color.value == const Color(0xFF0C8CE9).value;
 
     final Color backgroundColor = isSelected
-        ? (isSold
-            ? const Color(0xFFF9E5E6)
-            : isAvailable
-                ? const Color(0xFFD1EDD2)
-                : const Color(0xFFEFF5F9))
+        ? (isPending
+            ? const Color(0xFFFAE8C8)
+            : isSold
+                ? const Color(0xFFF9E5E6)
+                : isAvailable
+                    ? const Color(0xFFD1EDD2)
+                    : const Color(0xFFEFF5F9))
         : Colors.white;
 
     final List<BoxShadow> optionShadow = isSelected
@@ -1764,395 +2046,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Overall Sales card
-                        Builder(
-                          builder: (context) {
-                            // Calculate totals from all layouts
-                            double totalAreaSold = 0.0;
-                            double totalSalesPrice =
-                                0.0; // Sum of sale price column (₹/sqft)
-                            double totalSaleValue =
-                                0.0; // Sum of sale value column (₹)
-                            int totalPlots = 0;
-                            int availablePlots = 0;
-                            int soldPlots = 0;
-
-                            for (var layout in _layouts) {
-                              final plots = layout['plots']
-                                      as List<Map<String, dynamic>>? ??
-                                  [];
-                              for (var plot in plots) {
-                                final status = _parsePlotStatus(plot['status']);
-                                totalPlots++;
-
-                                if (status == PlotStatus.sold) {
-                                  final area = double.tryParse(
-                                          plot['area'] as String? ?? '0.00') ??
-                                      0.0;
-                                  final salePriceStr =
-                                      (plot['salePrice'] as String? ?? '0.00')
-                                          .replaceAll(',', '')
-                                          .replaceAll('₹', '')
-                                          .replaceAll(' ', '')
-                                          .trim();
-                                  final salePrice =
-                                      double.tryParse(salePriceStr) ?? 0.0;
-                                  totalAreaSold += area;
-                                  totalSalesPrice +=
-                                      salePrice; // Sum of sale price per sqft
-                                  totalSaleValue += salePrice *
-                                      area; // Sum of sale value (price * area)
-                                  soldPlots++;
-                                } else if (status == PlotStatus.available) {
-                                  availablePlots++;
-                                }
-                              }
-                            }
-
-                            // Calculate average sale price
-                            double avgSalePrice = 0.0;
-                            if (totalAreaSold > 0) {
-                              avgSalePrice = totalSaleValue / totalAreaSold;
-                            }
-
-                            return Container(
-                              width: 904,
-                              margin: const EdgeInsets.only(bottom: 24),
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF8F9FA),
-                                borderRadius: BorderRadius.circular(8),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.25),
-                                    blurRadius: 2,
-                                    offset: const Offset(0, 0),
-                                    spreadRadius: 0,
-                                  ),
-                                ],
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  // Title
-                                  Text(
-                                    "Overall Sales",
-                                    style: GoogleFonts.inter(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w500,
-                                      color: const Color(0xFF5C5C5C),
-                                      height: 1.0,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  // Three columns layout
-                                  Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      // Column 1: Total Sale Value and Total Area Sold
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            // Total Sale Value
-                                            SizedBox(
-                                              height: 36,
-                                              child: Row(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.center,
-                                                children: [
-                                                  Text(
-                                                    "Total Sale Value: ",
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.w500,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  Row(
-                                                    children: [
-                                                      Text(
-                                                        "₹",
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: const Color(
-                                                              0xFF5C5C5C),
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 8),
-                                                      Text(
-                                                        _formatAmountNoTrailingZeros(
-                                                            totalSaleValue
-                                                                .toString()),
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.black,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(height: 8),
-                                            // Total Area Sold
-                                            Row(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.center,
-                                              children: [
-                                                Text(
-                                                  "Total Area Sold:",
-                                                  style: GoogleFonts.inter(
-                                                    fontSize: 14,
-                                                    fontWeight: FontWeight.w500,
-                                                    color: Colors.black,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 8),
-                                                Container(
-                                                  padding: const EdgeInsets
-                                                      .symmetric(horizontal: 8),
-                                                  constraints:
-                                                      const BoxConstraints(
-                                                          minHeight: 36),
-                                                  child: Row(
-                                                    mainAxisSize:
-                                                        MainAxisSize.min,
-                                                    children: [
-                                                      Text(
-                                                        _formatAmountNoTrailingZeros(
-                                                            AreaUnitUtils
-                                                                    .areaFromSqftToDisplay(
-                                                                        totalAreaSold,
-                                                                        _isSqm)
-                                                                .toString()),
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.black,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 8),
-                                                      Text(
-                                                        _areaUnitSuffix,
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: const Color(
-                                                              0xFF5C5C5C),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 24),
-                                      // Column 2: Avg Sale Price and Total Plots
-                                      SizedBox(
-                                        width: 301,
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            // Avg Sale Price
-                                            SizedBox(
-                                              height: 36,
-                                              child: Row(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.center,
-                                                children: [
-                                                  Text(
-                                                    "Avg Sale Price: ",
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.w500,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  Row(
-                                                    children: [
-                                                      Text(
-                                                        "₹/$_areaUnitSuffix",
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: const Color(
-                                                              0xFF5C5C5C),
-                                                        ),
-                                                      ),
-                                                      const SizedBox(width: 8),
-                                                      Text(
-                                                        _formatAmountNoTrailingZeros(
-                                                            AreaUnitUtils
-                                                                    .rateFromSqftToDisplay(
-                                                                        avgSalePrice,
-                                                                        _isSqm)
-                                                                .toString()),
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.black,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(height: 8),
-                                            // Total Plots
-                                            Row(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.center,
-                                              children: [
-                                                Text(
-                                                  "Total Plots:",
-                                                  style: GoogleFonts.inter(
-                                                    fontSize: 14,
-                                                    fontWeight: FontWeight.w500,
-                                                    color: Colors.black,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 8),
-                                                Container(
-                                                  padding: const EdgeInsets
-                                                      .symmetric(horizontal: 8),
-                                                  height: 36,
-                                                  alignment:
-                                                      Alignment.centerLeft,
-                                                  child: Text(
-                                                    totalPlots.toString(),
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(width: 24),
-                                      // Column 3: Available and Sold
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            // Available
-                                            SizedBox(
-                                              height: 36,
-                                              child: Row(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.center,
-                                                children: [
-                                                  Container(
-                                                    width: 16,
-                                                    height: 16,
-                                                    decoration: BoxDecoration(
-                                                      color: const Color(
-                                                          0xFF4CAF50),
-                                                      shape: BoxShape.circle,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    "Available:",
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.w500,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    availablePlots.toString(),
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(height: 8),
-                                            // Sold
-                                            SizedBox(
-                                              height: 36,
-                                              child: Row(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.center,
-                                                children: [
-                                                  Container(
-                                                    width: 16,
-                                                    height: 16,
-                                                    decoration: BoxDecoration(
-                                                      color: const Color(
-                                                          0xFFF44336),
-                                                      shape: BoxShape.circle,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    "Sold:",
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.w500,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    soldPlots.toString(),
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
+                        _buildTopOverallSalesAndSiteStatusCards(),
                         const SizedBox(height: 24),
                         // Layouts heading with expand/collapse/zoom controls
                         Stack(
@@ -2181,6 +2075,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                         _showFilterDropdown(context);
                                       },
                                       child: Container(
+                                        key: _filterButtonKey,
                                         height: 36,
                                         padding: const EdgeInsets.symmetric(
                                             horizontal: 16, vertical: 8),
@@ -2373,9 +2268,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     GestureDetector(
                                       onTap: () {
                                         setState(() {
-                                          _tableZoomLevel =
-                                              (_tableZoomLevel - 0.1)
-                                                  .clamp(0.5, 1.2);
+                                          _tableZoomLevel = _stepTableZoomLevel(
+                                              _tableZoomLevel,
+                                              increase: false);
                                         });
                                       },
                                       child: Container(
@@ -2413,7 +2308,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     SizedBox(
                                       width: 50,
                                       child: Text(
-                                        '${(_tableZoomLevel * 100).toInt()}%',
+                                        '${(_tableZoomLevel * 100).round()}%',
                                         style: GoogleFonts.inter(
                                           fontSize: 14,
                                           fontWeight: FontWeight.w400,
@@ -2427,9 +2322,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     GestureDetector(
                                       onTap: () {
                                         setState(() {
-                                          _tableZoomLevel =
-                                              (_tableZoomLevel + 0.1)
-                                                  .clamp(0.5, 1.2);
+                                          _tableZoomLevel = _stepTableZoomLevel(
+                                              _tableZoomLevel,
+                                              increase: true);
                                         });
                                       },
                                       child: Container(
@@ -2469,7 +2364,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                           ],
                         ),
                         const SizedBox(height: 24),
-                        if (_layouts.isEmpty)
+                        if (_isLoading && _layouts.isEmpty)
+                          _buildLayoutsLoadingSkeleton()
+                        else if (_layouts.isEmpty)
                           Center(
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
@@ -3032,7 +2929,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           ),
           border: InputBorder.none,
           isDense: true,
-          contentPadding: const EdgeInsets.only(top: 12, bottom: 8),
+          contentPadding: const EdgeInsets.symmetric(vertical: 10),
         ),
         onChanged: (value) {
           setState(() {
@@ -3042,6 +2939,88 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           });
           _saveLayoutsData();
         },
+      ),
+    );
+  }
+
+  Widget _buildBuyerContactNumberField() {
+    final key = '${_editingLayoutIndex!}_${_editingPlotIndex!}_buyer_contact';
+    if (!_buyerContactControllers.containsKey(key)) {
+      final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+          as Map<String, dynamic>;
+      _buyerContactControllers[key] = TextEditingController(
+          text: (plot['buyerContactNumber'] as String? ?? '').trim());
+      _buyerContactFocusNodes[key] = _createDialogFocusNode();
+    }
+    final controller = _buyerContactControllers[key]!;
+    final isEmpty = controller.text.trim().isEmpty;
+
+    return Container(
+      height: 40,
+      width: 304,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: _buyerContactFocusNodes[key]!.hasFocus
+                ? const Color(0xFF0C8CE9)
+                : (isEmpty ? Colors.red : Colors.black.withOpacity(0.25)),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Text(
+            '+91',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: Colors.black,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: _buyerContactFocusNodes[key],
+              textAlignVertical: TextAlignVertical.center,
+              keyboardType: TextInputType.phone,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(10),
+              ],
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: isEmpty ? const Color(0xFFC1C1C1) : Colors.black,
+              ),
+              decoration: InputDecoration(
+                hintText: '0',
+                hintStyle: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: const Color(0xFFC1C1C1),
+                ),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+                      ['buyerContactNumber'] = value;
+                  _syncEditingPlotToAllPlots();
+                });
+                _saveLayoutsData();
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3140,6 +3119,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   Widget _buildSinglePaymentBlock(
       int paymentIndex, Map<String, dynamic> payment) {
     final currentPaymentMethod = payment['paymentMethod'] as String? ?? '';
+    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
+        as Map<String, dynamic>;
+    final payments = plot['payments'] as List<dynamic>? ?? const [];
+    final canRemovePayment = payments.length > 1;
 
     return Container(
       width: 321,
@@ -3183,7 +3166,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   ),
                 ],
               ),
-              if (paymentIndex > 0)
+              if (canRemovePayment)
                 GestureDetector(
                   onTap: () => _removePaymentBlock(paymentIndex),
                   child: Container(
@@ -3671,236 +3654,32 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           width: 273, paymentIndex: paymentIndex);
 
   Widget _buildBankNameField([int paymentIndex = 0]) {
-    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
-        as Map<String, dynamic>;
-    if (plot['payments'] == null) {
-      plot['payments'] = [];
-    }
-    final payments = plot['payments'] as List<dynamic>;
-    if (paymentIndex >= payments.length) {
-      payments.add({
-        'paymentMethod': '',
-        'paymentAmount': '0',
-      });
-    }
-    final payment = payments[paymentIndex] as Map<String, dynamic>;
-    final value = payment['bankName'] as String? ?? '';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Bank Name',
-          style: GoogleFonts.inter(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: Colors.black,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          width: 304,
-          height: 40,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.95),
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.25),
-                blurRadius: 2,
-                offset: const Offset(0, 0),
-                spreadRadius: 0,
-              ),
-            ],
-          ),
-          child: TextField(
-            controller: TextEditingController(text: value),
-            textAlignVertical: TextAlignVertical.center,
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-              color: value.isEmpty
-                  ? const Color.fromARGB(191, 173, 173, 173)
-                  : Colors.black,
-            ),
-            decoration: InputDecoration(
-              hintText: 'Enter a bank name',
-              hintStyle: GoogleFonts.inter(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: const Color.fromARGB(191, 173, 173, 173),
-              ),
-              border: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            onChanged: (text) {
-              setState(() {
-                payment['bankName'] = text;
-                _syncEditingPlotToAllPlots();
-              });
-              _saveLayoutsData();
-            },
-          ),
-        ),
-      ],
+    return _buildTextInputField(
+      'Bank Name',
+      'bankName',
+      'Enter a bank name',
+      width: 304,
+      paymentIndex: paymentIndex,
     );
   }
 
   Widget _buildUpiAppField([int paymentIndex = 0]) {
-    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
-        as Map<String, dynamic>;
-    if (plot['payments'] == null) {
-      plot['payments'] = [];
-    }
-    final payments = plot['payments'] as List<dynamic>;
-    if (paymentIndex >= payments.length) {
-      payments.add({
-        'paymentMethod': '',
-        'paymentAmount': '0',
-      });
-    }
-    final payment = payments[paymentIndex] as Map<String, dynamic>;
-    final value = payment['upiApp'] as String? ?? '';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'UPI App',
-          style: GoogleFonts.inter(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: Colors.black,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          width: 304,
-          height: 40,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.95),
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.25),
-                blurRadius: 2,
-                offset: const Offset(0, 0),
-                spreadRadius: 0,
-              ),
-            ],
-          ),
-          child: TextField(
-            controller: TextEditingController(text: value),
-            textAlignVertical: TextAlignVertical.center,
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-              color: value.isEmpty
-                  ? const Color.fromARGB(191, 173, 173, 173)
-                  : Colors.black,
-            ),
-            decoration: InputDecoration(
-              hintText: 'Enter a bank name',
-              hintStyle: GoogleFonts.inter(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: const Color.fromARGB(191, 173, 173, 173),
-              ),
-              border: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            onChanged: (text) {
-              setState(() {
-                payment['upiApp'] = text;
-                _syncEditingPlotToAllPlots();
-              });
-              _saveLayoutsData();
-            },
-          ),
-        ),
-      ],
+    return _buildTextInputField(
+      'UPI App',
+      'upiApp',
+      'Enter UPI App',
+      width: 304,
+      paymentIndex: paymentIndex,
     );
   }
 
   Widget _buildOtherPaymentMethodField([int paymentIndex = 0]) {
-    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
-        as Map<String, dynamic>;
-    if (plot['payments'] == null) {
-      plot['payments'] = [];
-    }
-    final payments = plot['payments'] as List<dynamic>;
-    if (paymentIndex >= payments.length) {
-      payments.add({
-        'paymentMethod': '',
-        'paymentAmount': '0',
-      });
-    }
-    final payment = payments[paymentIndex] as Map<String, dynamic>;
-    final value = payment['otherPaymentMethod'] as String? ?? '';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Payment Method',
-          style: GoogleFonts.inter(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: Colors.black,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          width: 304,
-          height: 40,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.95),
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.25),
-                blurRadius: 2,
-                offset: const Offset(0, 0),
-                spreadRadius: 0,
-              ),
-            ],
-          ),
-          child: TextField(
-            controller: TextEditingController(text: value),
-            textAlignVertical: TextAlignVertical.center,
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-              color: value.isEmpty
-                  ? const Color.fromARGB(191, 173, 173, 173)
-                  : Colors.black,
-            ),
-            decoration: InputDecoration(
-              hintText: 'Enter Payment Method ',
-              hintStyle: GoogleFonts.inter(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: const Color.fromARGB(191, 173, 173, 173),
-              ),
-              border: InputBorder.none,
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            onChanged: (text) {
-              setState(() {
-                payment['otherPaymentMethod'] = text;
-                _syncEditingPlotToAllPlots();
-              });
-              _saveLayoutsData();
-            },
-          ),
-        ),
-      ],
+    return _buildTextInputField(
+      'Payment Method',
+      'otherPaymentMethod',
+      'Enter Payment Method',
+      width: 304,
+      paymentIndex: paymentIndex,
     );
   }
 
@@ -4428,15 +4207,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     final area = plot['area'] as String? ?? '0';
     // Read status fresh from the plot data
     final statusData = plot['status'];
-    final status = statusData is PlotStatus
-        ? statusData as PlotStatus
-        : (statusData is String
-            ? PlotStatus.values.firstWhere(
-                (e) => e.name == statusData.toString().toLowerCase(),
-                orElse: () => PlotStatus.available,
-              )
-            : PlotStatus.available);
+    final status = _parsePlotStatus(statusData);
     final effectiveStatus = _editingStatus ?? status;
+    final isSoldLikeStatus = _isSoldLikeStatus(effectiveStatus);
     final statusColor = _getStatusColor(effectiveStatus);
     final statusText = _getStatusString(effectiveStatus);
     final statusBackgroundColor = _getStatusBackgroundColor(effectiveStatus);
@@ -4462,158 +4235,152 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           ),
         ],
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Header
-          Container(
-            height: 48,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(8),
-                topRight: Radius.circular(8),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.25),
-                  blurRadius: 2,
-                  offset: const Offset(0, 0),
-                  spreadRadius: 0,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTapDown: _handleEditDialogTapDown,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header
+            Container(
+              height: 48,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(8),
+                  topRight: Radius.circular(8),
                 ),
-              ],
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Plot Status Details',
-                  style: GoogleFonts.inter(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
                   ),
-                ),
-                Row(
-                  children: [
-                    // Discard button
-                    GestureDetector(
-                      onTap: () {
-                        setState(() {
-                          _editingLayoutIndex = null;
-                          _editingPlotIndex = null;
-                          _editingStatus = null;
-                          _isStatusDropdownOpen = false;
-                          _isPaymentMethodDropdownOpen = false;
-                        });
-                      },
-                      child: Container(
-                        height: 36,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Center(
-                          child: Text(
-                            'Discard',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.normal,
-                              color: const Color(0xFF0C8CE9),
+                ],
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Plot Status Details',
+                    style: GoogleFonts.inter(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black,
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      // Discard button
+                      GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _editingLayoutIndex = null;
+                            _editingPlotIndex = null;
+                            _editingStatus = null;
+                            _isStatusDropdownOpen = false;
+                            _isPaymentMethodDropdownOpen = false;
+                          });
+                        },
+                        child: Container(
+                          height: 36,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 2,
+                                offset: const Offset(0, 0),
+                                spreadRadius: 0,
+                              ),
+                            ],
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Discard',
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: const Color(0xFF0C8CE9),
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    // Update button
-                    GestureDetector(
-                      onTap: () async {
-                        print('💾 UPDATE BUTTON: Clicked');
-                        // Close dialog immediately on Update click.
-                        setState(() {
-                          _syncEditingPlotToAllPlots();
-                          _rebuildAllPlotsFromLayouts();
-                          _editingLayoutIndex = null;
-                          _editingPlotIndex = null;
-                          _editingStatus = null;
-                          _isStatusDropdownOpen = false;
-                          _isPaymentMethodDropdownOpen = false;
-                        });
-                        // Save all changes in background after closing dialog.
-                        await _saveLayoutsData();
-                        await _savePlotsToDatabase();
-                        print('💾 UPDATE BUTTON: Complete');
-                      },
-                      child: Container(
-                        height: 36,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF0C8CE9),
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Update',
-                              style: GoogleFonts.inter(
-                                fontSize: 14,
-                                fontWeight: FontWeight.normal,
-                                color: Colors.white,
+                      const SizedBox(width: 16),
+                      // Update button
+                      GestureDetector(
+                        onTap: () async {
+                          print('💾 UPDATE BUTTON: Clicked');
+                          // Close dialog immediately on Update click.
+                          setState(() {
+                            _syncEditingPlotToAllPlots();
+                            _rebuildAllPlotsFromLayouts();
+                            _editingLayoutIndex = null;
+                            _editingPlotIndex = null;
+                            _editingStatus = null;
+                            _isStatusDropdownOpen = false;
+                            _isPaymentMethodDropdownOpen = false;
+                          });
+                          // Save all changes in background after closing dialog.
+                          await _saveLayoutsData();
+                          await _savePlotsToDatabase();
+                          print('💾 UPDATE BUTTON: Complete');
+                        },
+                        child: Container(
+                          height: 36,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0C8CE9),
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 2,
+                                offset: const Offset(0, 0),
+                                spreadRadius: 0,
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            SvgPicture.asset(
-                              'assets/images/Update.svg',
-                              width: 14,
-                              height: 10,
-                              fit: BoxFit.contain,
-                              placeholderBuilder: (context) => const SizedBox(
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Update',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.normal,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              SvgPicture.asset(
+                                'assets/images/Update.svg',
                                 width: 14,
                                 height: 10,
+                                fit: BoxFit.contain,
+                                placeholderBuilder: (context) => const SizedBox(
+                                  width: 14,
+                                  height: 10,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-          // Content
-          Flexible(
-            child: GestureDetector(
-              onTap: () {
-                // Close payment dropdown when clicking outside
-                if (_isPaymentMethodDropdownOpen) {
-                  setState(() {
-                    _isPaymentMethodDropdownOpen = false;
-                  });
-                }
-              },
+            // Content
+            Flexible(
               child: SingleChildScrollView(
                 controller: _editDialogScrollController,
                 padding: const EdgeInsets.only(bottom: 16),
@@ -4763,10 +4530,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                   });
                                 },
                                 child: Container(
-                                  width: 145,
+                                  width: 194,
                                   height: 40,
                                   padding:
-                                      const EdgeInsets.symmetric(horizontal: 8),
+                                      const EdgeInsets.only(left: 4, right: 8),
                                   decoration: BoxDecoration(
                                     color: Colors.white.withOpacity(0.95),
                                     borderRadius: BorderRadius.circular(8),
@@ -4790,30 +4557,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                               as Map<String, dynamic>;
                                       final currentStatusData =
                                           currentPlot['status'];
-                                      final currentStatus = currentStatusData
-                                              is PlotStatus
-                                          ? currentStatusData as PlotStatus
-                                          : (currentStatusData is String
-                                              ? PlotStatus.values.firstWhere(
-                                                  (e) =>
-                                                      e.name ==
-                                                      currentStatusData
-                                                          .toString()
-                                                          .toLowerCase(),
-                                                  orElse: () =>
-                                                      PlotStatus.available,
-                                                )
-                                              : PlotStatus.available);
+                                      final currentStatus =
+                                          _parsePlotStatus(currentStatusData);
                                       final effectiveCurrentStatus =
                                           _editingStatus ?? currentStatus;
                                       final currentStatusColor =
-                                          _getStatusColor(
+                                          _getStatusDropdownDotColor(
                                               effectiveCurrentStatus);
                                       final currentStatusText =
-                                          _getStatusString(
+                                          _getStatusDropdownLabel(
                                               effectiveCurrentStatus);
                                       final currentStatusBackgroundColor =
-                                          _getStatusBackgroundColor(
+                                          _getStatusDropdownChipBackgroundColor(
                                               effectiveCurrentStatus);
 
                                       return Row(
@@ -4821,8 +4576,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                             MainAxisAlignment.spaceBetween,
                                         children: [
                                           Container(
-                                            padding: const EdgeInsets.symmetric(
-                                                horizontal: 8, vertical: 8),
+                                            width: 152,
+                                            height: 32,
+                                            padding: const EdgeInsets.all(8),
                                             decoration: BoxDecoration(
                                               color:
                                                   currentStatusBackgroundColor,
@@ -4839,7 +4595,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                               ],
                                             ),
                                             child: Row(
-                                              mainAxisSize: MainAxisSize.min,
                                               children: [
                                                 Container(
                                                   width: 16,
@@ -4884,14 +4639,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 const SizedBox(height: 8),
                               if (_isStatusDropdownOpen)
                                 Container(
-                                  width: 145,
-                                  padding: const EdgeInsets.all(8),
+                                  key: _statusDropdownMenuKey,
+                                  width: 194,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 8),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFF3F3F3),
+                                    color: const Color(0xFFF8F9FA),
                                     borderRadius: BorderRadius.circular(8),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.black.withOpacity(0.5),
+                                        color: Colors.black.withOpacity(0.25),
                                         blurRadius: 2,
                                         offset: const Offset(0, 0),
                                         spreadRadius: 0,
@@ -4908,52 +4665,36 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                       final currentStatusDataForDropdown =
                                           currentPlotForDropdown['status'];
                                       final currentStatusForDropdown =
-                                          currentStatusDataForDropdown
-                                                  is PlotStatus
-                                              ? currentStatusDataForDropdown
-                                                  as PlotStatus
-                                              : (currentStatusDataForDropdown
-                                                      is String
-                                                  ? PlotStatus.values
-                                                      .firstWhere(
-                                                      (e) =>
-                                                          e.name ==
-                                                          currentStatusDataForDropdown
-                                                              .toString()
-                                                              .toLowerCase(),
-                                                      orElse: () =>
-                                                          PlotStatus.available,
-                                                    )
-                                                  : PlotStatus.available);
+                                          _parsePlotStatus(
+                                              currentStatusDataForDropdown);
                                       final effectiveStatusForDropdown =
                                           _editingStatus ??
                                               currentStatusForDropdown;
 
                                       print(
                                           '📋 DROPDOWN OPTIONS: effectiveStatus=$effectiveStatusForDropdown');
-                                      final optionsList =
-                                          (effectiveStatusForDropdown ==
-                                                  PlotStatus.available
-                                              ? [PlotStatus.sold]
-                                              : effectiveStatusForDropdown ==
-                                                      PlotStatus.sold
-                                                  ? [PlotStatus.available]
-                                                  : []);
+                                      final optionsList = <PlotStatus>[
+                                        PlotStatus.reserved,
+                                        PlotStatus.available,
+                                        PlotStatus.sold,
+                                      ];
                                       print(
                                           '📋 DROPDOWN OPTIONS: Creating ${optionsList.length} options: $optionsList');
 
                                       return Column(
                                         mainAxisSize: MainAxisSize.min,
-                                        children:
-                                            optionsList.map((statusOption) {
+                                        children: List.generate(
+                                            optionsList.length, (index) {
+                                          final statusOption =
+                                              optionsList[index];
                                           print(
                                               '📋 DROPDOWN OPTIONS: Rendering option $statusOption');
                                           final optionColor =
-                                              _getStatusColor(statusOption);
+                                              _getStatusDropdownDotColor(
+                                                  statusOption);
                                           final optionText =
-                                              _getStatusString(statusOption);
-                                          final isSelected =
-                                              statusOption == status;
+                                              _getStatusDropdownLabel(
+                                                  statusOption);
 
                                           return Material(
                                             color: Colors.transparent,
@@ -5052,91 +4793,63 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                               child: Container(
                                                 width: double.infinity,
                                                 height: 40,
+                                                alignment: Alignment.centerLeft,
                                                 padding:
                                                     const EdgeInsets.symmetric(
-                                                        horizontal: 4),
-                                                margin: const EdgeInsets.only(
-                                                    bottom: 8),
-                                                decoration: BoxDecoration(
-                                                  color: Colors.white,
-                                                  borderRadius:
-                                                      BorderRadius.circular(8),
-                                                  boxShadow: [
-                                                    BoxShadow(
-                                                      color: Colors.black
-                                                          .withOpacity(0.25),
-                                                      blurRadius: 2,
-                                                      offset:
-                                                          const Offset(0, 0),
-                                                      spreadRadius: 0,
-                                                    ),
-                                                  ],
-                                                ),
-                                                child: Row(
-                                                  children: [
-                                                    Container(
-                                                      padding: const EdgeInsets
-                                                          .symmetric(
-                                                          horizontal: 8,
-                                                          vertical: 8),
-                                                      decoration: BoxDecoration(
-                                                        color:
-                                                            _getStatusBackgroundColor(
-                                                                statusOption),
-                                                        borderRadius:
-                                                            BorderRadius
-                                                                .circular(8),
-                                                        boxShadow: [
-                                                          BoxShadow(
-                                                            color: Colors.black
-                                                                .withOpacity(
-                                                                    0.25),
-                                                            blurRadius: 2,
-                                                            offset:
-                                                                const Offset(
-                                                                    0, 0),
-                                                            spreadRadius: 0,
-                                                          ),
-                                                        ],
+                                                        horizontal: 8),
+                                                child: Container(
+                                                  width: 152,
+                                                  height: 32,
+                                                  padding:
+                                                      const EdgeInsets.all(8),
+                                                  decoration: BoxDecoration(
+                                                    color:
+                                                        _getStatusDropdownChipBackgroundColor(
+                                                            statusOption),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            8),
+                                                    boxShadow: [
+                                                      BoxShadow(
+                                                        color: Colors.black
+                                                            .withOpacity(0.25),
+                                                        blurRadius: 2,
+                                                        offset:
+                                                            const Offset(0, 0),
+                                                        spreadRadius: 0,
                                                       ),
-                                                      child: Row(
-                                                        mainAxisSize:
-                                                            MainAxisSize.min,
-                                                        children: [
-                                                          Container(
-                                                            width: 16,
-                                                            height: 16,
-                                                            decoration:
-                                                                BoxDecoration(
-                                                              color:
-                                                                  optionColor,
-                                                              shape: BoxShape
-                                                                  .circle,
-                                                            ),
-                                                          ),
-                                                          const SizedBox(
-                                                              width: 8),
-                                                          Text(
-                                                            optionText,
-                                                            style: GoogleFonts
-                                                                .inter(
-                                                              fontSize: 14,
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .normal,
-                                                              color:
-                                                                  Colors.black,
-                                                            ),
-                                                          ),
-                                                        ],
+                                                    ],
+                                                  ),
+                                                  child: Row(
+                                                    children: [
+                                                      Container(
+                                                        width: 16,
+                                                        height: 16,
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: optionColor,
+                                                          shape:
+                                                              BoxShape.circle,
+                                                        ),
                                                       ),
-                                                    ),
-                                                  ],
+                                                      const SizedBox(width: 8),
+                                                      Text(
+                                                        optionText,
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
                                                 ),
                                               ),
                                             ),
                                           );
-                                        }).toList(),
+                                        }),
                                       );
                                     },
                                   ),
@@ -5146,18 +4859,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                         ],
                       ),
                     ),
-                    // Additional sale fields (always visible). For non-sold, show blurred/disabled preview.
+                    // Additional sale fields (always visible). For non-sold/non-pending, show blurred/disabled preview.
                     const SizedBox(height: 24),
                     IgnorePointer(
-                      ignoring: effectiveStatus != PlotStatus.sold,
+                      ignoring: !isSoldLikeStatus,
                       child: Opacity(
-                        opacity: effectiveStatus == PlotStatus.sold ? 1.0 : 0.2,
+                        opacity: isSoldLikeStatus ? 1.0 : 0.2,
                         child: ImageFiltered(
                           imageFilter: ImageFilter.blur(
-                            sigmaX:
-                                effectiveStatus == PlotStatus.sold ? 0 : 1.2,
-                            sigmaY:
-                                effectiveStatus == PlotStatus.sold ? 0 : 1.2,
+                            sigmaX: isSoldLikeStatus ? 0 : 1.2,
+                            sigmaY: isSoldLikeStatus ? 0 : 1.2,
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -5331,6 +5042,27 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 ),
                               ),
                               const SizedBox(height: 24),
+                              // Buyer Contact Number field
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Buyer Contact Number',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildBuyerContactNumberField(),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 24),
                               // Payment section
                               Padding(
                                 key: _paymentMethodFieldKey,
@@ -5405,25 +5137,56 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
                                         final remainingAmount =
                                             saleValue - totalAmount;
+                                        const epsilon = 0.01;
                                         final totalExceeds =
-                                            totalAmount > saleValue;
+                                            totalAmount > saleValue + epsilon;
+                                        final totalIsZero =
+                                            totalAmount.abs() <= epsilon;
                                         final remainingIsNegative =
-                                            remainingAmount < 0;
-
+                                            remainingAmount < -epsilon;
+                                        final remainingIsZero =
+                                            remainingAmount.abs() <= epsilon;
+                                        final hasPaymentMethod = payments.any(
+                                          (payment) {
+                                            final paymentMap =
+                                                payment as Map<String, dynamic>;
+                                            final method =
+                                                (paymentMap['paymentMethod'] ??
+                                                        '')
+                                                    .toString()
+                                                    .trim();
+                                            return method.isNotEmpty;
+                                          },
+                                        );
                                         final totalText = totalExceeds
                                             ? 'Total Amount: ₹ ${_formatAmount(totalAmount.toStringAsFixed(2))} [Exceeding Sale Value]'
                                             : 'Total Amount: ₹ ${_formatAmount(totalAmount.toStringAsFixed(2))}';
-                                        final remainingText = remainingIsNegative
-                                            ? 'Remaining Amount: - ₹ ${_formatAmount(remainingAmount.abs().toStringAsFixed(2))} [Exceeding Sale Value]'
-                                            : 'Remaining Amount: ₹ ${_formatAmount(remainingAmount.toStringAsFixed(2))}';
-
-                                        final totalColor = totalExceeds
-                                            ? Colors.red
-                                            : const Color(0xFF1A8F3E);
-                                        final remainingColor =
-                                            remainingIsNegative
+                                        final totalColor =
+                                            (totalExceeds || totalIsZero)
                                                 ? Colors.red
                                                 : const Color(0xFF1A8F3E);
+
+                                        late final String remainingText;
+                                        late final Color remainingColor;
+                                        if (remainingIsNegative) {
+                                          remainingText =
+                                              'Remaining Amount: - ₹ ${_formatAmount(remainingAmount.abs().toStringAsFixed(2))} [Exceeding Sale Value]';
+                                          remainingColor = Colors.red;
+                                        } else if (remainingIsZero) {
+                                          remainingText =
+                                              'Remaining Amount: ₹ ${_formatAmount(remainingAmount.toStringAsFixed(2))}';
+                                          remainingColor =
+                                              const Color(0xFF1A8F3E);
+                                        } else {
+                                          final remainingLabel =
+                                              hasPaymentMethod
+                                                  ? 'Pending Amount'
+                                                  : 'Remaining Amount';
+                                          remainingText =
+                                              '$remainingLabel: ₹ ${_formatAmount(remainingAmount.toStringAsFixed(2))}';
+                                          remainingColor =
+                                              const Color(0xFFFFA200);
+                                        }
 
                                         return Column(
                                           crossAxisAlignment:
@@ -5564,7 +5327,133 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 ),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _skeletonBlock({required double width, required double height}) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE3E7EB),
+        borderRadius: BorderRadius.circular(8),
+      ),
+    );
+  }
+
+  Widget _buildLayoutsLoadingSkeleton() {
+    return Column(
+      children: [
+        for (int i = 0; i < 2; i++) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            margin: const EdgeInsets.only(bottom: 24),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _skeletonBlock(width: 140, height: 20),
+                const SizedBox(height: 16),
+                // Table header
+                Row(
+                  children: [
+                    _skeletonBlock(width: 80, height: 14),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 100, height: 14),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 100, height: 14),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 80, height: 14),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 100, height: 14),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // Table rows
+                for (int j = 0; j < 3; j++) ...[
+                  Row(
+                    children: [
+                      _skeletonBlock(width: 80, height: 36),
+                      const SizedBox(width: 24),
+                      _skeletonBlock(width: 100, height: 36),
+                      const SizedBox(width: 24),
+                      _skeletonBlock(width: 100, height: 36),
+                      const SizedBox(width: 24),
+                      _skeletonBlock(width: 80, height: 36),
+                      const SizedBox(width: 24),
+                      _skeletonBlock(width: 100, height: 36),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ],
+            ),
           ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPlotStatusLoadingSkeleton() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F9FA),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Table header
+          Row(
+            children: [
+              Expanded(child: _skeletonBlock(width: 60, height: 14)),
+              Expanded(child: _skeletonBlock(width: 80, height: 14)),
+              Expanded(child: _skeletonBlock(width: 100, height: 14)),
+              Expanded(child: _skeletonBlock(width: 80, height: 14)),
+              Expanded(child: _skeletonBlock(width: 80, height: 14)),
+              Expanded(child: _skeletonBlock(width: 100, height: 14)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Table rows
+          for (int i = 0; i < 5; i++) ...[
+            Row(
+              children: [
+                Expanded(child: _skeletonBlock(width: 60, height: 36)),
+                Expanded(child: _skeletonBlock(width: 80, height: 36)),
+                Expanded(child: _skeletonBlock(width: 100, height: 36)),
+                Expanded(child: _skeletonBlock(width: 80, height: 36)),
+                Expanded(child: _skeletonBlock(width: 80, height: 36)),
+                Expanded(child: _skeletonBlock(width: 100, height: 36)),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
         ],
       ),
     );
@@ -5572,6 +5461,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   Widget _buildPlotStatusTable() {
     final filteredPlots = _filteredPlots;
+
+    if (_isLoading && filteredPlots.isEmpty) {
+      return _buildPlotStatusLoadingSkeleton();
+    }
 
     if (filteredPlots.isEmpty) {
       return Center(
@@ -5874,6 +5767,550 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     );
   }
 
+  Widget _buildTopOverallSalesAndSiteStatusCards() {
+    double totalAreaSold = 0.0;
+    double totalSaleValue = 0.0;
+    double totalPendingAmount = 0.0;
+    int totalPlots = 0;
+    int availablePlots = 0;
+    int soldPlots = 0;
+    int pendingPlots = 0;
+
+    for (final layout in _layouts) {
+      final plots = layout['plots'] as List<dynamic>? ?? const [];
+      for (final plotData in plots) {
+        if (plotData is! Map<String, dynamic>) continue;
+        final plot = plotData;
+        totalPlots++;
+
+        final status = _parsePlotStatus(plot['status']);
+        if (status == PlotStatus.available) {
+          availablePlots++;
+        } else if (status == PlotStatus.sold) {
+          soldPlots++;
+        } else if (status == PlotStatus.reserved) {
+          pendingPlots++;
+        }
+
+        if (_isSoldLikeStatus(status)) {
+          final area = double.tryParse(
+                  (plot['area'] as String? ?? '0.00').replaceAll(',', '')) ??
+              0.0;
+          final salePriceStr = (plot['salePrice'] as String? ?? '0.00')
+              .replaceAll(',', '')
+              .replaceAll('₹', '')
+              .replaceAll(' ', '')
+              .trim();
+          final salePrice = double.tryParse(salePriceStr) ?? 0.0;
+          final saleValue = salePrice * area;
+
+          totalAreaSold += area;
+          totalSaleValue += saleValue;
+
+          final payments = plot['payments'] as List<dynamic>? ?? const [];
+          double paidAmount = 0.0;
+          for (final payment in payments) {
+            final paymentMap = payment as Map<String, dynamic>;
+            final amountStr = (paymentMap['paymentAmount'] ?? '0').toString();
+            final cleaned = amountStr
+                .replaceAll(',', '')
+                .replaceAll('₹', '')
+                .replaceAll(' ', '')
+                .trim();
+            paidAmount += double.tryParse(cleaned) ?? 0.0;
+          }
+
+          final pendingAmount = saleValue - paidAmount;
+          if (pendingAmount > 0) {
+            totalPendingAmount += pendingAmount;
+          }
+        }
+      }
+    }
+
+    final double avgSalePriceSqft =
+        totalAreaSold > 0 ? (totalSaleValue / totalAreaSold) : 0.0;
+    final avgSalePriceDisplay =
+        AreaUnitUtils.rateFromSqftToDisplay(avgSalePriceSqft, _isSqm);
+
+    Widget buildStatusDot(Color dotColor) {
+      return Container(
+        width: 16,
+        height: 16,
+        decoration: BoxDecoration(
+          color: dotColor,
+          shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.15),
+              blurRadius: 1,
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: 1142,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 638,
+              height: 144,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Overall Sales',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF5C5C5C),
+                      height: 1.0,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 281,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              height: 36,
+                              child: Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      'Total Sale Value:',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                        height: 1.0,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Row(
+                                      children: [
+                                        Text(
+                                          '₹',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w400,
+                                            color: const Color(0xFF5C5C5C),
+                                            height: 1.0,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            _formatAmountNoTrailingZeros(
+                                                totalSaleValue.toString()),
+                                            style: GoogleFonts.inter(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w400,
+                                              color: Colors.black
+                                                  .withOpacity(0.75),
+                                              height: 1.0,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              height: 36,
+                              child: Row(
+                                children: [
+                                  Text(
+                                    'Total Area Sold:',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.black,
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Row(
+                                      children: [
+                                        Flexible(
+                                          child: Text(
+                                            _formatAmountNoTrailingZeros(
+                                              AreaUnitUtils
+                                                      .areaFromSqftToDisplay(
+                                                          totalAreaSold, _isSqm)
+                                                  .toString(),
+                                            ),
+                                            style: GoogleFonts.inter(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w400,
+                                              color: Colors.black,
+                                              height: 1.0,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          _areaUnitSuffix,
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w400,
+                                            color: const Color(0xFF5C5C5C),
+                                            height: 1.0,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 24),
+                      SizedBox(
+                        width: 301,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              height: 36,
+                              child: Row(
+                                children: [
+                                  Text(
+                                    'Avg Sale Price:',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.black,
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      '₹/$_areaUnitSuffix',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        color: const Color(0xFF5C5C5C),
+                                        height: 1.0,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _formatAmountNoTrailingZeros(
+                                          avgSalePriceDisplay.toString()),
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        color: Colors.black.withOpacity(0.75),
+                                        height: 1.0,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              height: 36,
+                              child: Row(
+                                children: [
+                                  Text(
+                                    'Pending Amount:',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.black,
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    '₹',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: const Color(0xFF5C5C5C),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _formatAmountNoTrailingZeros(
+                                          totalPendingAmount.toString()),
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        color: Colors.black.withOpacity(0.75),
+                                        height: 1.0,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 24),
+            Container(
+              width: 480,
+              height: 144,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Site Status',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF5C5C5C),
+                      height: 1.0,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: 448,
+                    height: 80,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 156,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 106,
+                                      child: Row(
+                                        children: [
+                                          buildStatusDot(
+                                              const Color(0xFF0C8CE9)),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'Total Plots:',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w500,
+                                                color: Colors.black,
+                                                height: 1.0,
+                                              ),
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    Container(
+                                      constraints:
+                                          const BoxConstraints(minHeight: 36),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 4),
+                                      alignment: Alignment.centerLeft,
+                                      child: Text(
+                                        _formatIntegerWithIndianNumbering(
+                                            totalPlots.toString()),
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: const Color(0xFF323232),
+                                          height: 1.0,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    buildStatusDot(const Color(0xFF53D10C)),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Available:',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                        height: 1.0,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _formatIntegerWithIndianNumbering(
+                                          availablePlots.toString()),
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        color: const Color(0xFF323232),
+                                        height: 1.0,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SizedBox(
+                          width: 212,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    buildStatusDot(const Color(0xFFFF0000)),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Sold:',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                        height: 1.0,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _formatIntegerWithIndianNumbering(
+                                            soldPlots.toString()),
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: const Color(0xFF323232),
+                                          height: 1.0,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    buildStatusDot(const Color(0xFFFEB12A)),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Pending:',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                        height: 1.0,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _formatIntegerWithIndianNumbering(
+                                            pendingPlots.toString()),
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: const Color(0xFF323232),
+                                          height: 1.0,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLayoutCard(int layoutIndex, Map<String, dynamic> layout) {
     final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
     final layoutName = layout['name'] as String? ?? 'Layout ${layoutIndex + 1}';
@@ -5890,27 +6327,54 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
     // Calculate totals and counts
     double totalAreaSold = 0.0;
-    double totalSalesPrice = 0.0; // Sum of sale price column (₹/sqft)
     double totalSaleValue = 0.0; // Sum of sale value column (₹)
+    double totalPendingAmount = 0.0;
     int availablePlots = 0;
     int soldPlots = 0;
+    int pendingPlots = 0;
 
     for (var plot in filteredPlots) {
       final status = _parsePlotStatus(plot['status']);
-      if (status == PlotStatus.sold) {
-        final area = double.tryParse(plot['area'] as String? ?? '0.00') ?? 0.0;
+      if (status == PlotStatus.available) {
+        availablePlots++;
+      } else if (status == PlotStatus.sold) {
+        soldPlots++;
+      } else if (status == PlotStatus.reserved) {
+        pendingPlots++;
+      }
+
+      if (_isSoldLikeStatus(status)) {
+        final area = double.tryParse(
+                (plot['area'] as String? ?? '0.00').replaceAll(',', '')) ??
+            0.0;
         final salePriceStr = (plot['salePrice'] as String? ?? '0.00')
             .replaceAll(',', '')
             .replaceAll('₹', '')
             .replaceAll(' ', '')
             .trim();
         final salePrice = double.tryParse(salePriceStr) ?? 0.0;
+        final saleValue = salePrice * area;
+
         totalAreaSold += area;
-        totalSalesPrice += salePrice; // Sum of sale price per sqft
-        totalSaleValue += salePrice * area; // Sum of sale value (price * area)
-        soldPlots++;
-      } else if (status == PlotStatus.available) {
-        availablePlots++;
+        totalSaleValue += saleValue;
+
+        final payments = plot['payments'] as List<dynamic>? ?? [];
+        double paidAmount = 0.0;
+        for (final payment in payments) {
+          final paymentMap = payment as Map<String, dynamic>;
+          final amountStr = (paymentMap['paymentAmount'] ?? '0').toString();
+          final cleaned = amountStr
+              .replaceAll(',', '')
+              .replaceAll('₹', '')
+              .replaceAll(' ', '')
+              .trim();
+          paidAmount += double.tryParse(cleaned) ?? 0.0;
+        }
+
+        final pendingAmount = saleValue - paidAmount;
+        if (pendingAmount > 0) {
+          totalPendingAmount += pendingAmount;
+        }
       }
     }
 
@@ -5987,181 +6451,190 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   textAlign: TextAlign.left,
                 ),
               ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      final isCollapsed =
+                          _collapsedLayouts.contains(layoutIndex);
+                      if (isCollapsed) {
+                        _collapsedLayouts.remove(layoutIndex);
+                      } else {
+                        _collapsedLayouts.add(layoutIndex);
+                      }
+                    });
+                  },
+                  child: SvgPicture.asset(
+                    _collapsedLayouts.contains(layoutIndex)
+                        ? 'assets/images/Indi_expand.svg'
+                        : 'assets/images/Indi_collapse.svg',
+                    width: 12,
+                    height: 12,
+                    fit: BoxFit.contain,
+                    placeholderBuilder: (context) => const SizedBox(
+                      width: 12,
+                      height: 12,
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 16),
-          // Summary bar
-          Row(
-            children: [
-              // Total plots
-              Row(
-                children: [
-                  Transform(
-                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
-                    child: Text(
-                      '${plots.length}',
+          // Summary line 1 (Figma node 2954:7050)
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Text(
+                  '${plots.length} plots',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF53D10C),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$availablePlots Available',
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.normal,
                         color: Colors.black,
                       ),
                     ),
-                  ),
-                  Text(
-                    ' plots',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(width: 16),
-              separatorDot,
-              const SizedBox(width: 16),
-              // Available
-              Row(
-                children: [
-                  Container(
-                    width: 16,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF4CAF50),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Row(
-                    children: [
-                      Transform(
-                        transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
-                        child: Text(
-                          '$availablePlots',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black,
-                          ),
-                        ),
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFF0000),
+                        shape: BoxShape.circle,
                       ),
-                      Text(
-                        ' Available',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.normal,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(width: 16),
-              separatorDot,
-              const SizedBox(width: 16),
-              // Sold
-              Row(
-                children: [
-                  Container(
-                    width: 16,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF44336),
-                      shape: BoxShape.circle,
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Row(
-                    children: [
-                      Transform(
-                        transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
-                        child: Text(
-                          '$soldPlots',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black,
-                          ),
-                        ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$soldPlots Sold',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
                       ),
-                      Text(
-                        ' Sold',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.normal,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(width: 16),
-              separatorDot,
-              const SizedBox(width: 16),
-              // Total Area Sold
-              Row(
-                children: [
-                  Text(
-                    'Total Area Sold: ',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black,
                     ),
-                  ),
-                  Transform(
-                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
-                    child: Text(
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFEB12A),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$pendingPlots Pending',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Summary line 2 (Figma node 2954:7700)
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'Total Area Sold:',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
                       _formatAmountNoTrailingZeros(
-                          AreaUnitUtils.areaFromSqftToDisplay(
-                                  totalAreaSold, _isSqm)
-                              .toString()),
+                        AreaUnitUtils.areaFromSqftToDisplay(
+                                totalAreaSold, _isSqm)
+                            .toString(),
+                      ),
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.normal,
                         color: Colors.black.withOpacity(0.75),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _areaUnitSuffix,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    const SizedBox(width: 8),
+                    Text(
+                      _areaUnitSuffix,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(width: 16),
-              separatorDot,
-              const SizedBox(width: 16),
-              // Total Sale Value
-              Row(
-                children: [
-                  Text(
-                    'Total Sale Value: ',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black,
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Text(
+                      'Total Sale Value:',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
                     ),
-                  ),
-                  Text(
-                    '₹',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    const SizedBox(width: 8),
+                    Text(
+                      '₹',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Transform(
-                    transform: Matrix4.skewX(-8 * 3.141592653589793 / 180),
-                    child: Text(
+                    const SizedBox(width: 8),
+                    Text(
                       _formatAmountNoTrailingZeros(totalSaleValue.toString()),
                       style: GoogleFonts.inter(
                         fontSize: 14,
@@ -6169,10 +6642,44 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                         color: Colors.black.withOpacity(0.75),
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Text(
+                      'Total Pending Amount:',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '₹',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _formatAmountNoTrailingZeros(
+                          totalPendingAmount.toString()),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black.withOpacity(0.75),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           // Table - only show if layout is not collapsed
@@ -6314,6 +6821,46 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               final isLast = index == filteredPlots.length - 1;
               final rowPlot = filteredPlots[index];
               final hasRowError = _rowHasRequiredSoldFieldError(rowPlot);
+              final rowStatus = _parsePlotStatus(rowPlot['status']);
+
+              // For pending rows, also show red when required sold-like fields
+              // are still missing (same intent as sold validation).
+              final pendingHasMissingRequired = rowStatus == PlotStatus.reserved
+                  ? () {
+                      final salePrice = (rowPlot['salePrice'] as String? ?? '')
+                          .replaceAll(',', '')
+                          .replaceAll('₹', '')
+                          .replaceAll(' ', '')
+                          .trim();
+                      final buyerName =
+                          (rowPlot['buyerName'] as String? ?? '').trim();
+                      final agent = (rowPlot['agent'] as String? ?? '').trim();
+                      final saleDate =
+                          (rowPlot['saleDate'] as String? ?? '').trim();
+                      final payments =
+                          rowPlot['payments'] as List<dynamic>? ?? [];
+                      final hasPaymentMethod = payments.any((p) {
+                        final m = p as Map<String, dynamic>;
+                        return (m['paymentMethod'] as String? ?? '')
+                            .trim()
+                            .isNotEmpty;
+                      });
+                      final salePriceMissing = salePrice.isEmpty ||
+                          salePrice == '0' ||
+                          salePrice == '0.00';
+                      return salePriceMissing ||
+                          buyerName.isEmpty ||
+                          agent.isEmpty ||
+                          saleDate.isEmpty ||
+                          !hasPaymentMethod;
+                    }()
+                  : false;
+
+              final editIconColor = (hasRowError || pendingHasMissingRequired)
+                  ? Colors.red
+                  : (rowStatus == PlotStatus.reserved
+                      ? const Color(0xFFFFB12A)
+                      : const Color(0xFF0C8CE9));
               return Container(
                 width: 60,
                 height: 48,
@@ -6340,16 +6887,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       final plot = _layouts[layoutIndex]['plots'][originalIndex]
                           as Map<String, dynamic>;
                       final statusData = plot['status'];
-                      _editingStatus = statusData is PlotStatus
-                          ? statusData
-                          : (statusData is String
-                              ? PlotStatus.values.firstWhere(
-                                  (e) =>
-                                      e.name ==
-                                      statusData.toString().toLowerCase(),
-                                  orElse: () => PlotStatus.available,
-                                )
-                              : PlotStatus.available);
+                      _editingStatus = _parsePlotStatus(statusData);
                     });
                   },
                   child: Center(
@@ -6358,7 +6896,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       width: 16,
                       height: 15,
                       colorFilter: ColorFilter.mode(
-                        hasRowError ? Colors.red : const Color(0xFF0C8CE9),
+                        editIconColor,
                         BlendMode.srcIn,
                       ),
                     ),
@@ -6533,7 +7071,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           plots: filteredPlots,
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               final salePriceRaw = (plot['salePrice'] as String? ?? '')
                   .replaceAll(',', '')
                   .replaceAll('₹', '')
@@ -6594,7 +7132,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           plots: filteredPlots,
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               // Calculate sale value = sale price * area
               final salePriceStr = plot['salePrice'] as String? ?? '0.00';
               final areaStr = plot['area'] as String? ?? '0.00';
@@ -6650,7 +7188,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           plots: filteredPlots,
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               final currentBuyer = (plot['buyerName'] as String? ?? '').trim();
               final buyerNameEmpty = currentBuyer.isEmpty;
               return Container(
@@ -6697,6 +7235,67 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             }
           },
         ),
+        // Buyer Contact Number column
+        _buildTableColumn(
+          header: 'Buyer Contact Number',
+          width: 280,
+          plots: filteredPlots,
+          builder: (plot, index) {
+            final status = _parsePlotStatus(plot['status']);
+            if (_isSoldLikeStatus(status)) {
+              final rawBuyerContact =
+                  (plot['buyerContactNumber'] as String? ?? '').trim();
+              final normalizedBuyerContact =
+                  rawBuyerContact.replaceFirst(RegExp(r'^\+91\s*'), '');
+              final buyerContactEmpty = normalizedBuyerContact.isEmpty;
+
+              return Container(
+                width: 260,
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  boxShadow: [
+                    BoxShadow(
+                      color: buyerContactEmpty
+                          ? Colors.red
+                          : Colors.black.withOpacity(0.15),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                      spreadRadius: 0,
+                    ),
+                  ],
+                ),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  buyerContactEmpty
+                      ? 'Enter buyer contact number'
+                      : '+91 $normalizedBuyerContact',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: buyerContactEmpty
+                        ? const Color(0xFFC1C1C1)
+                        : Colors.black,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              );
+            } else {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                textAlign: TextAlign.center,
+              );
+            }
+          },
+        ),
         // Payment * column
         _buildTableColumn(
           header: 'Payment * ',
@@ -6704,7 +7303,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           plots: filteredPlots,
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               // Extract payment methods from payments array
               final payments = plot['payments'] as List<dynamic>? ?? [];
               final paymentMethods = <String>[];
@@ -6772,7 +7371,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
             final currentAgent = plot['agent'] as String? ?? '';
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               final agentEmpty = currentAgent.trim().isEmpty;
               return Container(
                 width: 220,
@@ -6825,7 +7424,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           plots: filteredPlots,
           builder: (plot, index) {
             final status = _parsePlotStatus(plot['status']);
-            if (status == PlotStatus.sold) {
+            if (_isSoldLikeStatus(status)) {
               final currentSaleDate =
                   (plot['saleDate'] as String? ?? '').trim();
               final saleDateEmpty = currentSaleDate.isEmpty;

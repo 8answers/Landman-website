@@ -19,7 +19,10 @@ class SidebarNavigation extends StatefulWidget {
   final bool? hasSiteErrors;
   final bool? hasProjectManagerErrors;
   final bool? hasAgentErrors;
+  final bool? hasProjectManagerWarningsOnly;
+  final bool? hasAgentWarningsOnly;
   final bool? hasAboutErrors;
+  final bool? hasAccountErrors;
   final bool isLoading;
 
   const SidebarNavigation({
@@ -37,7 +40,10 @@ class SidebarNavigation extends StatefulWidget {
     this.hasSiteErrors,
     this.hasProjectManagerErrors,
     this.hasAgentErrors,
+    this.hasProjectManagerWarningsOnly,
+    this.hasAgentWarningsOnly,
     this.hasAboutErrors,
+    this.hasAccountErrors,
     this.isLoading = false,
   });
 
@@ -225,9 +231,20 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   onExit: (_) => setState(() => _isHomeHovered = false),
                   child: GestureDetector(
                     onTap: () => widget.onPageChanged(NavigationPage.home),
-                    child: SizedBox(
-                      height: 24,
+                    child: Container(
+                      width: double.infinity,
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: widget.currentPage == NavigationPage.home
+                            ? const Color(0xFFDDDEDE)
+                            : (_isHomeHovered
+                                ? const Color(0xFFF0F0F0)
+                                : Colors.transparent),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                       child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
                           // Back arrow icon
                           SizedBox(
@@ -282,7 +299,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                                   ? const Color(0xFF000000)
                                   : (_isHomeHovered
                                       ? const Color(0xCC000000)
-                                      : const Color(0xFF5C5C5C)),
+                                      : const Color(0xA3000000)),
                             ),
                           ),
                         ],
@@ -327,7 +344,16 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                     onTap: () => widget.onPageChanged(NavigationPage.dataEntry),
                     child: Container(
                       width: double.infinity,
-                      height: 24,
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: widget.currentPage == NavigationPage.dataEntry
+                            ? const Color(0xFFDDDEDE)
+                            : (_isDataEntryHovered
+                                ? const Color(0xFFF0F0F0)
+                                : Colors.transparent),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
@@ -367,16 +393,56 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                               letterSpacing: 0,
                             ),
                           ),
-                          if ((widget.hasAreaErrors == true ||
-                              widget.hasPartnerErrors == true ||
-                              widget.hasExpenseErrors == true ||
-                              widget.hasSiteErrors == true ||
-                              widget.hasProjectManagerErrors == true ||
-                              widget.hasAgentErrors == true ||
-                              widget.hasAboutErrors == true)) ...[
+                          if (() {
+                            final pmWarningOnly =
+                                widget.hasProjectManagerWarningsOnly == true;
+                            final agentWarningOnly =
+                                widget.hasAgentWarningsOnly == true;
+                            final pmHardError =
+                                widget.hasProjectManagerErrors == true &&
+                                    !pmWarningOnly;
+                            final agentHardError =
+                                widget.hasAgentErrors == true &&
+                                    !agentWarningOnly;
+
+                            final hasAnyError = widget.hasAreaErrors == true ||
+                                widget.hasPartnerErrors == true ||
+                                widget.hasExpenseErrors == true ||
+                                widget.hasSiteErrors == true ||
+                                pmHardError ||
+                                agentHardError ||
+                                widget.hasAboutErrors == true;
+
+                            final hasAnyWarningOnly =
+                                pmWarningOnly || agentWarningOnly;
+                            return hasAnyError || hasAnyWarningOnly;
+                          }()) ...[
                             const SizedBox(width: 8),
                             SvgPicture.asset(
-                              'assets/images/Error_msg.svg',
+                              (() {
+                                final pmWarningOnly =
+                                    widget.hasProjectManagerWarningsOnly ==
+                                        true;
+                                final agentWarningOnly =
+                                    widget.hasAgentWarningsOnly == true;
+                                final pmHardError =
+                                    widget.hasProjectManagerErrors == true &&
+                                        !pmWarningOnly;
+                                final agentHardError =
+                                    widget.hasAgentErrors == true &&
+                                        !agentWarningOnly;
+                                final hasAnyError =
+                                    widget.hasAreaErrors == true ||
+                                        widget.hasPartnerErrors == true ||
+                                        widget.hasExpenseErrors == true ||
+                                        widget.hasSiteErrors == true ||
+                                        pmHardError ||
+                                        agentHardError ||
+                                        widget.hasAboutErrors == true;
+                                return hasAnyError
+                                    ? 'assets/images/Error_msg.svg'
+                                    : 'assets/images/Warning.svg';
+                              })(),
                               width: 17,
                               height: 15,
                               fit: BoxFit.contain,
@@ -394,7 +460,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
                 NavLink(
                   inactiveIconPath: 'assets/images/Plot_status_inactive.svg',
                   hoverIconPath: 'assets/images/Plot_status_hover.svg',
@@ -404,7 +470,7 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   hasError: widget.hasPlotStatusErrors ?? false,
                   onTap: () => widget.onPageChanged(NavigationPage.plotStatus),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
                 NavLink(
                   inactiveIconPath: 'assets/images/Document_inactive.svg',
                   hoverIconPath: 'assets/images/Document_inactive.svg',
@@ -412,25 +478,6 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                   label: 'Documents',
                   isActive: widget.currentPage == NavigationPage.documents,
                   onTap: () => widget.onPageChanged(NavigationPage.documents),
-                ),
-                const SizedBox(height: 40),
-                // Task section
-                Text(
-                  'Task',
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    fontWeight: FontWeight.normal,
-                    color: const Color(0xFF5D5D5D),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                NavLink(
-                  inactiveIconPath: 'assets/images/To-do_inactive.svg',
-                  hoverIconPath: 'assets/images/To-do_hover.svg',
-                  activeIconPath: 'assets/images/To-do_active.svg',
-                  label: 'To-Do List',
-                  isActive: widget.currentPage == NavigationPage.toDoList,
-                  onTap: () => widget.onPageChanged(NavigationPage.toDoList),
                 ),
                 const SizedBox(height: 40),
                 Text(
@@ -517,6 +564,8 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                         activeIconPath: 'assets/images/Account_active.svg',
                         label: 'Account',
                         isActive: widget.currentPage == NavigationPage.account,
+                        hasError: widget.hasAccountErrors ?? false,
+                        errorIconPath: 'assets/images/Warning.svg',
                         onTap: () =>
                             widget.onPageChanged(NavigationPage.account),
                       ),
@@ -555,26 +604,6 @@ class _SidebarNavigationState extends State<SidebarNavigation> {
                             widget.currentPage == NavigationPage.allProjects,
                         onTap: () =>
                             widget.onPageChanged(NavigationPage.allProjects),
-                      ),
-                      const SizedBox(height: 40),
-                      // Task section
-                      Text(
-                        'Task',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.normal,
-                          color: Colors.black.withOpacity(0.4),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      NavLink(
-                        inactiveIconPath: 'assets/images/To-do_inactive.svg',
-                        hoverIconPath: 'assets/images/To-do_hover.svg',
-                        activeIconPath: 'assets/images/To-do_active.svg',
-                        label: 'To-Do List',
-                        isActive: widget.currentPage == NavigationPage.toDoList,
-                        onTap: () =>
-                            widget.onPageChanged(NavigationPage.toDoList),
                       ),
                       const SizedBox(height: 40),
                       // Support section

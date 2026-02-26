@@ -21,6 +21,7 @@ class RecentProjectsPage extends StatefulWidget {
 
 class _RecentProjectsPageState extends State<RecentProjectsPage> {
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _projectsScrollController = ScrollController();
   final SupabaseClient _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _projects = [];
   List<Map<String, dynamic>> _filteredProjects = [];
@@ -39,6 +40,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
   void dispose() {
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _projectsScrollController.dispose();
     super.dispose();
   }
 
@@ -112,6 +114,257 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
         SnackBar(content: Text('Failed to delete project: $e')),
       );
     }
+  }
+
+  Future<void> _showDeleteProjectDialog(String projectId) async {
+    final confirmController = TextEditingController();
+    final confirmFocusNode = FocusNode();
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withOpacity(0.5),
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final canDelete =
+                confirmController.text.trim().toLowerCase() == 'delete';
+
+            confirmFocusNode.addListener(() => setDialogState(() {}));
+
+            return Material(
+              color: Colors.transparent,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Container(
+                  margin: const EdgeInsets.only(top: 24),
+                  width: 538,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.25),
+                        blurRadius: 2,
+                        offset: const Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.warning,
+                                color: Colors.red,
+                                size: 24,
+                              ),
+                              const SizedBox(width: 16),
+                              Text(
+                                'Delete Project?',
+                                style: GoogleFonts.inter(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.black,
+                                ),
+                              ),
+                            ],
+                          ),
+                          GestureDetector(
+                            onTap: () => Navigator.of(dialogContext).pop(),
+                            child: Transform.rotate(
+                              angle: 0.785398,
+                              child: const Icon(
+                                Icons.add,
+                                size: 24,
+                                color: Color(0xFF0C8CE9),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      RichText(
+                        text: TextSpan(
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            fontWeight: FontWeight.normal,
+                            color: Colors.black.withOpacity(0.8),
+                          ),
+                          children: const [
+                            TextSpan(text: 'This will permanently delete the '),
+                            TextSpan(text: 'project and all associated data'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'This action cannot be undone.',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black.withOpacity(0.8),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      RichText(
+                        text: TextSpan(
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            color: const Color(0xFF323232),
+                          ),
+                          children: const [
+                            TextSpan(
+                              text: 'Type ',
+                              style: TextStyle(fontWeight: FontWeight.normal),
+                            ),
+                            TextSpan(
+                              text: 'delete ',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            TextSpan(
+                              text: 'to confirm.',
+                              style: TextStyle(fontWeight: FontWeight.normal),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        width: 150,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: confirmFocusNode.hasFocus
+                                  ? const Color(0xFF0C8CE9)
+                                  : const Color(0xFFFF0000),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                            ),
+                          ],
+                        ),
+                        child: TextField(
+                          controller: confirmController,
+                          focusNode: confirmFocusNode,
+                          textAlignVertical: TextAlignVertical.center,
+                          onChanged: (_) => setDialogState(() {}),
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.only(
+                                left: 8, right: 8, top: 8, bottom: 16),
+                          ),
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          GestureDetector(
+                            onTap: () => Navigator.of(dialogContext).pop(),
+                            child: Container(
+                              height: 44,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(8),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.25),
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 0),
+                                  ),
+                                ],
+                              ),
+                              child: Center(
+                                child: Text(
+                                  'Cancel',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: const Color(0xFF0C8CE9),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () async {
+                              if (canDelete) {
+                                Navigator.of(dialogContext).pop();
+                                await _deleteProject(projectId);
+                              }
+                            },
+                            child: Container(
+                              height: 44,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(8),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.25),
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 0),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                children: [
+                                  Text(
+                                    'Delete Project',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.normal,
+                                      color: canDelete
+                                          ? Colors.red
+                                          : Colors.red.withOpacity(0.5),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  SvgPicture.asset(
+                                    'assets/images/Delete_layout.svg',
+                                    width: 13,
+                                    height: 16,
+                                    colorFilter: ColorFilter.mode(
+                                      canDelete
+                                          ? Colors.red
+                                          : Colors.red.withOpacity(0.5),
+                                      BlendMode.srcIn,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    confirmFocusNode.dispose();
+    confirmController.dispose();
   }
 
   String _formatRelativeTime(DateTime dateTime) {
@@ -685,149 +938,215 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
         ),
         // Projects list
         Expanded(
-          child: ListView.separated(
-            itemCount: _filteredProjects.length,
-            separatorBuilder: (context, index) => const SizedBox(height: 24),
-            itemBuilder: (context, index) {
-              final project = _filteredProjects[index];
-              final projectName = project['project_name'] ?? '';
-              final updatedAt = project['updated_at'] != null
-                  ? DateTime.parse(project['updated_at'])
-                  : null;
-              final createdAt = project['created_at'] != null
-                  ? DateTime.parse(project['created_at'])
-                  : null;
-              final projectId = project['id']?.toString() ?? '';
-              final isHovered = _hoveredIndex == index;
+          child: ScrollConfiguration(
+            behavior:
+                ScrollConfiguration.of(context).copyWith(scrollbars: false),
+            child: ScrollbarTheme(
+              data: ScrollbarThemeData(
+                crossAxisMargin: 8,
+                thumbColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.hovered) ||
+                      states.contains(WidgetState.dragged)) {
+                    return const Color(0xFF5C5C5C);
+                  }
+                  return const Color(0x665C5C5C);
+                }),
+              ),
+              child: Scrollbar(
+                controller: _projectsScrollController,
+                thumbVisibility: true,
+                trackVisibility: false,
+                interactive: true,
+                thickness: 8,
+                radius: const Radius.circular(8),
+                child: ListView.separated(
+                  controller: _projectsScrollController,
+                  itemCount: _filteredProjects.length,
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(height: 24),
+                  itemBuilder: (context, index) {
+                    final project = _filteredProjects[index];
+                    final projectName = project['project_name'] ?? '';
+                    final updatedAt = project['updated_at'] != null
+                        ? DateTime.parse(project['updated_at'])
+                        : null;
+                    final createdAt = project['created_at'] != null
+                        ? DateTime.parse(project['created_at'])
+                        : null;
+                    final projectId = project['id']?.toString() ?? '';
+                    final isHovered = _hoveredIndex == index;
 
-              return MouseRegion(
-                onEnter: (_) {
-                  setState(() {
-                    _hoveredIndex = index;
-                  });
-                },
-                onExit: (_) {
-                  setState(() {
-                    _hoveredIndex = null;
-                  });
-                },
-                child: GestureDetector(
-                  onTap: () {
-                    if (widget.onProjectSelected != null) {
-                      widget.onProjectSelected!(projectId, projectName);
-                    }
-                  },
-                  child: Container(
-                    height: 56,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: isHovered
-                          ? const Color(0xFFF1F1F1)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: nameColumnWidth,
-                          child: Text(
-                            projectName,
-                            style: GoogleFonts.inter(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: const Color(0xFF5C5C5C),
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                    return MouseRegion(
+                      onEnter: (_) {
+                        setState(() {
+                          _hoveredIndex = index;
+                        });
+                      },
+                      onExit: (_) {
+                        setState(() {
+                          _hoveredIndex = null;
+                        });
+                      },
+                      child: GestureDetector(
+                        onTap: () {
+                          if (widget.onProjectSelected != null) {
+                            widget.onProjectSelected!(projectId, projectName);
+                          }
+                        },
+                        child: Container(
+                          height: 56,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: isHovered
+                                ? const Color(0xFFF1F1F1)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                        ),
-                        Expanded(
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              final rightSectionWidth =
-                                  (constraints.maxWidth + extraRightWidth)
-                                      .clamp(452.0, double.infinity)
-                                      .toDouble();
-                              return OverflowBox(
-                                alignment: Alignment.centerLeft,
-                                minWidth: rightSectionWidth,
-                                maxWidth: rightSectionWidth,
-                                child: SizedBox(
-                                  width: rightSectionWidth,
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      SizedBox(
-                                        width: 180,
-                                        child: Text(
-                                          updatedAt != null
-                                              ? _formatRelativeTime(updatedAt)
-                                              : 'N/A',
-                                          style: GoogleFonts.inter(
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.normal,
-                                            color: const Color(0xFF5C5C5C),
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ),
-                                      SizedBox(
-                                        width: 180,
-                                        child: Text(
-                                          createdAt != null
-                                              ? _formatDate(createdAt)
-                                              : 'N/A',
-                                          style: GoogleFonts.inter(
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.normal,
-                                            color: const Color(0xFF5C5C5C),
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ),
-                                      PopupMenuButton<String>(
-                                        tooltip: '',
-                                        color: Colors.transparent,
-                                        constraints:
-                                            const BoxConstraints.tightFor(
-                                                width: 165),
-                                        menuPadding: EdgeInsets.zero,
-                                        elevation: 0,
-                                        shadowColor: Colors.transparent,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
-                                        offset: const Offset(0, 40),
-                                        onSelected: (value) {
-                                          if (value == 'delete') {
-                                            _deleteProject(projectId);
-                                          }
-                                        },
-                                        itemBuilder: (context) => [
-                                          PopupMenuItem<String>(
-                                            value: 'delete',
-                                            height: 52,
-                                            padding: EdgeInsets.zero,
-                                            child: Container(
-                                              width: 165,
-                                              height: 52,
-                                              padding: const EdgeInsets.all(8),
-                                              decoration: BoxDecoration(
-                                                color: const Color(0xFFF8F9FA),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: nameColumnWidth,
+                                child: Text(
+                                  projectName,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    color: const Color(0xFF5C5C5C),
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              Expanded(
+                                child: LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final rightSectionWidth =
+                                        (constraints.maxWidth + extraRightWidth)
+                                            .clamp(452.0, double.infinity)
+                                            .toDouble();
+                                    return OverflowBox(
+                                      alignment: Alignment.centerLeft,
+                                      minWidth: rightSectionWidth,
+                                      maxWidth: rightSectionWidth,
+                                      child: SizedBox(
+                                        width: rightSectionWidth,
+                                        child: Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            SizedBox(
+                                              width: 180,
+                                              child: Text(
+                                                updatedAt != null
+                                                    ? _formatRelativeTime(
+                                                        updatedAt)
+                                                    : 'N/A',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color:
+                                                      const Color(0xFF5C5C5C),
+                                                ),
+                                                textAlign: TextAlign.center,
+                                              ),
+                                            ),
+                                            SizedBox(
+                                              width: 180,
+                                              child: Text(
+                                                createdAt != null
+                                                    ? _formatDate(createdAt)
+                                                    : 'N/A',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color:
+                                                      const Color(0xFF5C5C5C),
+                                                ),
+                                                textAlign: TextAlign.center,
+                                              ),
+                                            ),
+                                            PopupMenuButton<String>(
+                                              tooltip: '',
+                                              color: Colors.transparent,
+                                              constraints:
+                                                  const BoxConstraints.tightFor(
+                                                      width: 165),
+                                              menuPadding: EdgeInsets.zero,
+                                              elevation: 0,
+                                              shadowColor: Colors.transparent,
+                                              shape: RoundedRectangleBorder(
                                                 borderRadius:
                                                     BorderRadius.circular(8),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black
-                                                        .withOpacity(0.5),
-                                                    blurRadius: 1,
-                                                    offset: const Offset(0, 0),
-                                                  ),
-                                                ],
                                               ),
+                                              offset: const Offset(0, 40),
+                                              onSelected: (value) {
+                                                if (value == 'delete') {
+                                                  _showDeleteProjectDialog(
+                                                      projectId);
+                                                }
+                                              },
+                                              itemBuilder: (context) => [
+                                                PopupMenuItem<String>(
+                                                  value: 'delete',
+                                                  height: 52,
+                                                  padding: EdgeInsets.zero,
+                                                  child: Container(
+                                                    width: 165,
+                                                    height: 52,
+                                                    padding:
+                                                        const EdgeInsets.all(8),
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(
+                                                          0xFFF8F9FA),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              8),
+                                                      boxShadow: [
+                                                        BoxShadow(
+                                                          color: Colors.black
+                                                              .withOpacity(0.5),
+                                                          blurRadius: 1,
+                                                          offset: const Offset(
+                                                              0, 0),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    child: Container(
+                                                      alignment:
+                                                          Alignment.center,
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.white,
+                                                        borderRadius:
+                                                            BorderRadius
+                                                                .circular(8),
+                                                        boxShadow: [
+                                                          BoxShadow(
+                                                            color: Colors.black
+                                                                .withOpacity(
+                                                                    0.5),
+                                                            blurRadius: 1,
+                                                            offset:
+                                                                const Offset(
+                                                                    0, 0),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      child: Text(
+                                                        'Delete Project',
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.red,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
                                               child: Container(
-                                                alignment: Alignment.center,
+                                                width: 52,
+                                                height: 36,
                                                 decoration: BoxDecoration(
                                                   color: Colors.white,
                                                   borderRadius:
@@ -835,52 +1154,43 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                                                   boxShadow: [
                                                     BoxShadow(
                                                       color: Colors.black
-                                                          .withOpacity(0.5),
+                                                          .withOpacity(0.25),
                                                       blurRadius: 1,
                                                       offset:
                                                           const Offset(0, 0),
                                                     ),
                                                   ],
                                                 ),
-                                                child: Text(
-                                                  'Delete Project',
-                                                  style: GoogleFonts.inter(
-                                                    fontSize: 14,
-                                                    fontWeight:
-                                                        FontWeight.normal,
-                                                    color: Colors.red,
-                                                  ),
+                                                alignment:
+                                                    Alignment.centerRight,
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 16,
+                                                  vertical: 4,
+                                                ),
+                                                child: const Icon(
+                                                  Icons.more_horiz,
+                                                  size: 20,
+                                                  color: Color(0xFF5C5C5C),
                                                 ),
                                               ),
                                             ),
-                                          ),
-                                        ],
-                                        child: Container(
-                                          width: 52,
-                                          height: 36,
-                                          alignment: Alignment.centerRight,
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 16),
-                                          child: const Icon(
-                                            Icons.more_horiz,
-                                            size: 20,
-                                            color: Color(0xFF5C5C5C),
-                                          ),
+                                          ],
                                         ),
                                       ),
-                                    ],
-                                  ),
+                                    );
+                                  },
                                 ),
-                              );
-                            },
+                              ),
+                            ],
                           ),
                         ),
-                      ],
-                    ),
-                  ),
+                      ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ),
           ),
         ),
       ],

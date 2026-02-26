@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'pages/login_page.dart';
 import 'screens/account_settings_screen.dart';
 import 'widgets/app_scale_metrics.dart';
+import 'widgets/startup_website_view.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,25 +28,66 @@ void main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  bool _shouldOpenAuthFlow() {
+    final uri = Uri.base;
+    final params = uri.queryParameters;
+
+    // Explicit auth trigger from static sign-in page.
+    if (params['auth'] == 'google') {
+      return true;
+    }
+
+    // OAuth callback params after provider redirect.
+    return params.containsKey('code') ||
+        params.containsKey('error') ||
+        params.containsKey('access_token') ||
+        params.containsKey('refresh_token');
+  }
+
   @override
   Widget build(BuildContext context) {
+    final openAuthFlow = _shouldOpenAuthFlow();
+
     return MaterialApp(
       title: 'Landman Website',
       debugShowCheckedModeBanner: false,
-      builder: (context, child) {
-        if (child == null) return const SizedBox.shrink();
-        return AppScaleWrapper(
-          baseWidth: 1440,
-          baseHeight: 1024,
-          child: child,
-        );
-      },
       theme: ThemeData(
         primarySwatch: Colors.blue,
         fontFamily: 'Inter',
         useMaterial3: true,
+        scrollbarTheme: ScrollbarThemeData(
+          thumbVisibility: const WidgetStatePropertyAll(true),
+          trackVisibility: const WidgetStatePropertyAll(false),
+          interactive: true,
+          thickness: const WidgetStatePropertyAll(8),
+          radius: const Radius.circular(8),
+          crossAxisMargin: 8,
+          thumbColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.hovered) ||
+                states.contains(WidgetState.dragged)) {
+              return const Color(0xFF5C5C5C);
+            }
+            return const Color(0x665C5C5C);
+          }),
+        ),
       ),
-      home: const AuthWrapper(),
+      home: openAuthFlow
+          ? const AuthWrapper(triggerGoogleSignIn: true)
+          : const StartupGate(),
+    );
+  }
+}
+
+class StartupGate extends StatelessWidget {
+  const StartupGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Colors.white,
+      body: SizedBox.expand(
+        child: StartupWebsiteView(),
+      ),
     );
   }
 }
@@ -76,14 +118,19 @@ class AppScaleWrapper extends StatelessWidget {
 
         final widthRatio = availableWidth / baseWidth;
         final heightRatio = availableHeight / baseHeight;
-        // Keep 1287..1440 width filled edge-to-edge by prioritizing width scale,
-        // but only when it still fits within the available height.
+        final designAspectRatio = baseWidth / baseHeight;
+        final viewportAspectRatio = availableWidth / availableHeight;
+        // Keep 1300..1440 edge-to-edge only on aspect ratios close to design.
+        // On short-height screens (wide aspect), fall back to contain to avoid bottom clipping.
         final widthPriorityCandidate =
-            availableWidth >= 1287 && availableWidth <= baseWidth;
+            availableWidth >= 1300 && availableWidth <= baseWidth;
+        final isShortHeightViewport =
+            viewportAspectRatio > (designAspectRatio * 1.12);
         final widthPriorityFitsHeight =
             (baseHeight * widthRatio) <= availableHeight;
-        final useWidthPriorityScale =
-            widthPriorityCandidate && widthPriorityFitsHeight;
+        final useWidthPriorityScale = widthPriorityCandidate &&
+            !isShortHeightViewport &&
+            widthPriorityFitsHeight;
         final rawScale = useWidthPriorityScale
             ? widthRatio
             : math.min(widthRatio, heightRatio);
@@ -127,7 +174,12 @@ class AppScaleWrapper extends StatelessWidget {
 }
 
 class AuthWrapper extends StatefulWidget {
-  const AuthWrapper({super.key});
+  const AuthWrapper({
+    super.key,
+    this.triggerGoogleSignIn = false,
+  });
+
+  final bool triggerGoogleSignIn;
 
   @override
   State<AuthWrapper> createState() => _AuthWrapperState();
@@ -136,12 +188,15 @@ class AuthWrapper extends StatefulWidget {
 class _AuthWrapperState extends State<AuthWrapper> {
   bool _isInitialized = false;
   bool _isLoggedIn = false;
+  bool _isGoogleSignInInProgress = false;
+  bool _hasAttemptedAutoGoogleSignIn = false;
 
   @override
   void initState() {
     super.initState();
     _checkAuthState();
     _listenToAuthStateChanges();
+    _maybeAutoSignInWithGoogle();
   }
 
   void _checkAuthState() {
@@ -153,6 +208,66 @@ class _AuthWrapperState extends State<AuthWrapper> {
     });
   }
 
+  bool _hasOAuthCallbackData() {
+    final params = Uri.base.queryParameters;
+    return params.containsKey('code') ||
+        params.containsKey('access_token') ||
+        params.containsKey('refresh_token');
+  }
+
+  Future<void> _maybeAutoSignInWithGoogle() async {
+    if (!widget.triggerGoogleSignIn) return;
+    if (_hasAttemptedAutoGoogleSignIn) return;
+    _hasAttemptedAutoGoogleSignIn = true;
+
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session != null) return;
+
+    final params = Uri.base.queryParameters;
+
+    // If we are already on callback URL, let Supabase process callback.
+    if (params.containsKey('code') ||
+        params.containsKey('error') ||
+        params.containsKey('access_token') ||
+        params.containsKey('refresh_token')) {
+      return;
+    }
+
+    _isGoogleSignInInProgress = true;
+    try {
+      final baseUri = Uri.base;
+      final redirectUri = Uri(
+        scheme: baseUri.scheme,
+        host: baseUri.host,
+        port: baseUri.hasPort ? baseUri.port : null,
+        path: '/',
+        queryParameters: const {'auth': 'google'},
+      );
+
+      await Supabase.instance.client.auth.signInWithOAuth(
+        OAuthProvider.google,
+        redirectTo: redirectUri.toString(),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _isGoogleSignInInProgress = false;
+        });
+      } else {
+        _isGoogleSignInInProgress = false;
+      }
+      print('Auto Google sign-in error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Google sign-in failed: $error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   void _listenToAuthStateChanges() {
     // Listen for auth state changes
     Supabase.instance.client.auth.onAuthStateChange.listen((data) {
@@ -161,8 +276,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
       setState(() {
         if (event == AuthChangeEvent.signedIn && session != null) {
+          _isGoogleSignInInProgress = false;
           _isLoggedIn = true;
         } else if (event == AuthChangeEvent.signedOut) {
+          _isGoogleSignInInProgress = false;
           _isLoggedIn = false;
         }
       });
@@ -178,13 +295,19 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_isInitialized) {
+    if (!_isInitialized ||
+        _isGoogleSignInInProgress ||
+        (_hasOAuthCallbackData() && !_isLoggedIn)) {
       // Show loading screen while checking auth state
-      return Scaffold(
-        backgroundColor: Colors.white,
-        body: Center(
-          child: CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0C8CE9)),
+      return const AppScaleWrapper(
+        baseWidth: 1440,
+        baseHeight: 1024,
+        child: Scaffold(
+          backgroundColor: Colors.white,
+          body: Center(
+            child: CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0C8CE9)),
+            ),
           ),
         ),
       );
@@ -192,10 +315,18 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
     if (_isLoggedIn) {
       // User is logged in, show main app
-      return AccountSettingsScreen();
+      return const AppScaleWrapper(
+        baseWidth: 1440,
+        baseHeight: 1024,
+        child: AccountSettingsScreen(),
+      );
     } else {
       // User is not logged in, show login page
-      return const LoginPage();
+      return const AppScaleWrapper(
+        baseWidth: 1440,
+        baseHeight: 1024,
+        child: LoginPage(),
+      );
     }
   }
 }

@@ -10,7 +10,7 @@ const List<String> _areaUnitOptions = [
 const double _areaUnitDropdownWidth = 180;
 const double _areaUnitMenuWidth = 180;
 const double _areaUnitTriggerHeight = 28;
-const double _areaUnitMenuItemHeight = 32;
+const double _areaUnitMenuItemHeight = 24;
 
 class AreaUnitSelector extends StatefulWidget {
   final String selectedUnit;
@@ -33,6 +33,17 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
   OverlayEntry? _dropdownEntry;
   OverlayEntry? _backdropEntry;
 
+  String _canonicalUnitLabel(String unit) {
+    final normalized = unit.trim().toLowerCase();
+    if (normalized.startsWith('square meter')) {
+      return 'Square Meter (sqm)';
+    }
+    if (normalized.startsWith('square feet')) {
+      return 'Square Feet (sqft)';
+    }
+    return unit;
+  }
+
   void _closeDropdown() {
     _dropdownEntry?.remove();
     _backdropEntry?.remove();
@@ -42,16 +53,29 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
 
   void _showDropdown(BuildContext context) {
     _closeDropdown();
+    final selectedUnit = _canonicalUnitLabel(widget.selectedUnit);
     final RenderBox? renderBox =
         _triggerKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
 
     final overlay = Overlay.of(context);
     final overlayBox = overlay.context.findRenderObject() as RenderBox;
-    final offset = renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
-    final left = offset.dx;
-    final top = offset.dy + renderBox.size.height + 8;
+    final topLeft = renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
+    final topRight = renderBox.localToGlobal(
+      Offset(renderBox.size.width, 0),
+      ancestor: overlayBox,
+    );
+    final bottomLeft = renderBox.localToGlobal(
+      Offset(0, renderBox.size.height),
+      ancestor: overlayBox,
+    );
+    final menuWidth = (topRight.dx - topLeft.dx).abs();
+    final left = topRight.dx - menuWidth;
+    final top = bottomLeft.dy + 8;
     const double menuPadding = 4;
+    final menuHeight = (menuPadding * 2) +
+        (_areaUnitOptions.length * _areaUnitMenuItemHeight) +
+        ((_areaUnitOptions.length - 1) * 8);
 
     _backdropEntry = OverlayEntry(
       builder: (context) => Positioned.fill(
@@ -69,8 +93,8 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
         child: Material(
           color: Colors.transparent,
           child: Container(
-            width: _areaUnitMenuWidth,
-            height: 80,
+            width: menuWidth,
+            height: menuHeight,
             decoration: BoxDecoration(
               color: const Color(0xFFF8F9FA),
               borderRadius: BorderRadius.circular(8),
@@ -91,12 +115,12 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
                 children: _areaUnitOptions.asMap().entries.expand((entry) {
                   final isFirst = entry.key == 0;
                   final option = entry.value;
-                  final isSelected = option == widget.selectedUnit;
+                  final isSelected = option == selectedUnit;
                   return [
                     if (!isFirst) const SizedBox(height: 8),
                     GestureDetector(
                       onTap: () async {
-                        if (option != widget.selectedUnit) {
+                        if (option != selectedUnit) {
                           widget.onUnitChanged(option);
                           await AreaUnitService.setAreaUnit(
                               widget.projectId, option);
@@ -105,10 +129,10 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
                       },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 150),
-                        width: 148,
+                        width: double.infinity,
                         height: _areaUnitMenuItemHeight,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 8),
+                            horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
                           color: isSelected
                               ? const Color(0xFFECF6FD)
@@ -125,12 +149,16 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
                         ),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: Text(
-                            option,
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.normal,
-                              color: Colors.black,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              option,
+                              style: GoogleFonts.inter(
+                                fontSize: 11,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black,
+                              ),
                             ),
                           ),
                         ),
@@ -157,6 +185,7 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
 
   @override
   Widget build(BuildContext context) {
+    final selectedUnit = _canonicalUnitLabel(widget.selectedUnit);
     return Container(
       height: 40,
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -209,14 +238,18 @@ class _AreaUnitSelectorState extends State<AreaUnitSelector> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Expanded(
-                    child: Text(
-                      widget.selectedUnit,
-                      style: GoogleFonts.inter(
-                        fontSize: 14,
-                        fontWeight: FontWeight.normal,
-                        color: Colors.black,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        selectedUnit,
+                        style: GoogleFonts.inter(
+                          fontSize: 12,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black,
+                        ),
+                        maxLines: 1,
                       ),
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   SvgPicture.asset(

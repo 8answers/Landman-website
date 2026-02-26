@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/sidebar_navigation.dart';
 import '../widgets/account_settings_content.dart';
 import '../widgets/create_project_dialog.dart';
@@ -13,12 +17,12 @@ import '../pages/trash_page.dart';
 import '../pages/help_page.dart';
 import '../pages/project_details_page.dart';
 import '../pages/dashboard_page.dart';
-import '../pages/data_entry_page.dart';
 import '../pages/plot_status_page.dart';
 import '../pages/documents_page.dart';
 import '../pages/report_page.dart';
 import '../pages/settings_page.dart';
-import '../pages/login_page.dart';
+import '../widgets/startup_website_view.dart';
+import '../services/project_storage_service.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({super.key});
@@ -43,11 +47,293 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   bool _hasProjectManagerErrors = false;
   bool _hasAgentErrors = false;
   bool _hasAboutErrors = false;
+  bool _hasProjectManagerWarningOnly = false;
+  bool _hasAgentWarningOnly = false;
+  bool _hasAccountErrors = false;
+  bool _isRestoringNavState = true;
+  bool _isDashboardPageLoading = false;
+  bool _isPlotStatusPageLoading = false;
+  int _errorBadgeRefreshGeneration = 0;
+
+  void _setStateSafely(VoidCallback fn) {
+    if (!mounted) return;
+    final phase = WidgetsBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      setState(fn);
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(fn);
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreNavState();
+  }
+
+  Future<void> _restoreNavState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pageName = prefs.getString('nav_current_page');
+    final prevPageName = prefs.getString('nav_previous_page');
+    final projectId = prefs.getString('nav_project_id');
+    final projectName = prefs.getString('nav_project_name');
+
+    if (pageName != null) {
+      final page = NavigationPage.values.firstWhere(
+        (e) => e.name == pageName,
+        orElse: () => NavigationPage.recentProjects,
+      );
+      final prevPage = prevPageName != null
+          ? NavigationPage.values.firstWhere(
+              (e) => e.name == prevPageName,
+              orElse: () => NavigationPage.recentProjects,
+            )
+          : null;
+
+      // Don't restore logout
+      if (page != NavigationPage.logout) {
+        setState(() {
+          _currentPage = page;
+          _previousPage = prevPage;
+          _projectId = projectId;
+          _projectName = projectName;
+          _isRestoringNavState = false;
+        });
+        _refreshErrorBadgesFromStoredData();
+        return;
+      }
+    }
+    setState(() {
+      _isRestoringNavState = false;
+    });
+  }
+
+  Future<void> _persistNavState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('nav_current_page', _currentPage.name);
+    if (_previousPage != null) {
+      await prefs.setString('nav_previous_page', _previousPage!.name);
+    } else {
+      await prefs.remove('nav_previous_page');
+    }
+    if (_projectId != null) {
+      await prefs.setString('nav_project_id', _projectId!);
+    } else {
+      await prefs.remove('nav_project_id');
+    }
+    if (_projectName != null) {
+      await prefs.setString('nav_project_name', _projectName!);
+    } else {
+      await prefs.remove('nav_project_name');
+    }
+  }
+
+  Future<void> _clearPersistedNavState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('nav_current_page');
+    await prefs.remove('nav_previous_page');
+    await prefs.remove('nav_project_id');
+    await prefs.remove('nav_project_name');
+  }
+
+  bool _isMissingNumeric(dynamic value) {
+    if (value == null) return true;
+    if (value is num) return value <= 0;
+    final parsed = double.tryParse(
+      value.toString().replaceAll(',', '').replaceAll('₹', '').trim(),
+    );
+    return parsed == null || parsed <= 0;
+  }
+
+  Future<void> _refreshErrorBadgesFromStoredData() async {
+    final projectId = _projectId;
+    if (projectId == null || projectId.trim().isEmpty) return;
+    final generation = ++_errorBadgeRefreshGeneration;
+
+    try {
+      final data = await ProjectStorageService.fetchProjectDataById(projectId);
+      if (!mounted || generation != _errorBadgeRefreshGeneration) return;
+      if (data == null) return;
+
+      final totalAreaValue =
+          double.tryParse((data['totalArea'] ?? '0').toString()) ?? 0;
+      final sellingAreaValue =
+          double.tryParse((data['sellingArea'] ?? '0').toString()) ?? 0;
+
+      final nonSellableAreas =
+          (data['nonSellableAreas'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final partners =
+          (data['partners'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final expenses =
+          (data['expenses'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final layouts =
+          (data['layouts'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final plots = (data['plots'] as List?)?.cast<Map<String, dynamic>>() ??
+          const <Map<String, dynamic>>[];
+      final plotPartners =
+          (data['plot_partners'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final projectManagers =
+          (data['project_managers'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
+      final agents = (data['agents'] as List?)?.cast<Map<String, dynamic>>() ??
+          const <Map<String, dynamic>>[];
+
+      final partnersByPlotId = <String, List<String>>{};
+      for (final row in plotPartners) {
+        final plotId = (row['plot_id'] ?? '').toString();
+        final partnerName = (row['partner_name'] ?? '').toString().trim();
+        if (plotId.isEmpty || partnerName.isEmpty) continue;
+        partnersByPlotId.putIfAbsent(plotId, () => <String>[]);
+        partnersByPlotId[plotId]!.add(partnerName);
+      }
+
+      final hasAreaErrors = totalAreaValue <= 0 ||
+          sellingAreaValue <= 0 ||
+          sellingAreaValue > totalAreaValue ||
+          nonSellableAreas.any((a) =>
+              (a['name'] ?? '').toString().trim().isEmpty ||
+              _isMissingNumeric(a['area']));
+
+      final hasPartnerErrors = partners.any((p) =>
+          (p['name'] ?? '').toString().trim().isEmpty ||
+          _isMissingNumeric(p['amount']));
+
+      final hasExpenseErrors = expenses.any((e) =>
+          (e['item'] ?? '').toString().trim().isEmpty ||
+          (e['category'] ?? '').toString().trim().isEmpty ||
+          _isMissingNumeric(e['amount']));
+
+      final plotsByLayout = <String, List<Map<String, dynamic>>>{};
+      for (final plot in plots) {
+        final layoutId = (plot['layout_id'] ?? '').toString();
+        if (layoutId.isEmpty) continue;
+        plotsByLayout.putIfAbsent(layoutId, () => <Map<String, dynamic>>[]);
+        plotsByLayout[layoutId]!.add(plot);
+      }
+
+      var hasSiteErrors = false;
+      var hasPlotStatusErrors = false;
+      for (final layout in layouts) {
+        final layoutId = (layout['id'] ?? '').toString();
+        final layoutPlots = plotsByLayout[layoutId] ?? const [];
+        for (final plot in layoutPlots) {
+          final plotId = (plot['id'] ?? '').toString();
+          final plotNumber = (plot['plot_number'] ?? '').toString().trim();
+          final areaMissing = _isMissingNumeric(plot['area']);
+          final purchaseRateMissing = _isMissingNumeric(plot['purchase_rate']);
+          final selectedPartners = partnersByPlotId[plotId] ?? const <String>[];
+          if (plotNumber.isEmpty ||
+              areaMissing ||
+              purchaseRateMissing ||
+              selectedPartners.isEmpty) {
+            hasSiteErrors = true;
+          }
+
+          final status = (plot['status'] ?? '').toString().trim().toLowerCase();
+          if (status == 'sold' || status == 'reserved' || status == 'pending') {
+            final salePriceMissing = _isMissingNumeric(plot['sale_price']);
+            final buyerMissing =
+                (plot['buyer_name'] ?? '').toString().trim().isEmpty;
+            final agentMissing =
+                (plot['agent_name'] ?? '').toString().trim().isEmpty;
+            final dateMissing =
+                (plot['sale_date'] ?? '').toString().trim().isEmpty;
+            final payments = plot['payments'] as List<dynamic>? ?? const [];
+            final hasPaymentMethod = payments.any((payment) {
+              if (payment is Map<String, dynamic>) {
+                final method = (payment['paymentMethod'] ??
+                        payment['payment_method'] ??
+                        '')
+                    .toString()
+                    .trim();
+                return method.isNotEmpty;
+              }
+              if (payment is Map) {
+                final method = (payment['paymentMethod'] ??
+                        payment['payment_method'] ??
+                        '')
+                    .toString()
+                    .trim();
+                return method.isNotEmpty;
+              }
+              return false;
+            });
+            if (salePriceMissing ||
+                buyerMissing ||
+                agentMissing ||
+                dateMissing ||
+                !hasPaymentMethod) {
+              hasPlotStatusErrors = true;
+            }
+          }
+        }
+      }
+
+      final hasProjectManagerErrors = projectManagers.any((pm) {
+        final name = (pm['name'] ?? '').toString().trim();
+        final compensation = (pm['compensation_type'] ?? '').toString().trim();
+        final earningType = (pm['earning_type'] ?? '').toString().trim();
+        if (name.isEmpty) return true;
+        if (compensation.isEmpty || compensation == 'None') return true;
+        if (compensation == 'Percentage Bonus' && earningType.isEmpty) {
+          return true;
+        }
+        return false;
+      });
+
+      final hasAgentErrors = agents.any((agent) {
+        final name = (agent['name'] ?? '').toString().trim();
+        final compensation =
+            (agent['compensation_type'] ?? '').toString().trim();
+        final earningType = (agent['earning_type'] ?? '').toString().trim();
+        if (name.isEmpty) return true;
+        if (compensation.isEmpty || compensation == 'None') return true;
+        if (compensation == 'Percentage Bonus' && earningType.isEmpty) {
+          return true;
+        }
+        return false;
+      });
+
+      final hasAboutErrors =
+          (data['projectName'] ?? '').toString().trim().isEmpty;
+
+      _setStateSafely(() {
+        _hasAreaErrors = hasAreaErrors;
+        _hasPartnerErrors = hasPartnerErrors;
+        _hasExpenseErrors = hasExpenseErrors;
+        _hasSiteErrors = hasSiteErrors;
+        _hasProjectManagerErrors = hasProjectManagerErrors;
+        _hasAgentErrors = hasAgentErrors;
+        _hasAboutErrors = hasAboutErrors;
+        _hasDataEntryErrors = hasAreaErrors ||
+            hasPartnerErrors ||
+            hasExpenseErrors ||
+            hasSiteErrors ||
+            hasProjectManagerErrors ||
+            hasAgentErrors ||
+            hasAboutErrors;
+        _hasPlotStatusErrors = hasPlotStatusErrors;
+      });
+    } catch (e) {
+      print('Error refreshing sidebar error badges: $e');
+    }
+  }
 
   Widget _getPageContentForPage(NavigationPage page) {
     switch (page) {
       case NavigationPage.account:
-        return const AccountSettingsContent();
+        return AccountSettingsContent(
+          onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+        );
       case NavigationPage.notifications:
         return const NotificationsPage();
       case NavigationPage.toDoList:
@@ -64,22 +350,41 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _persistNavState();
+            _refreshErrorBadgesFromStoredData();
           },
         );
       case NavigationPage.allProjects:
         return AllProjectsPage(
           onCreateProject: () => _showCreateProjectDialog(),
+          onProjectSelected: (projectId, projectName) {
+            setState(() {
+              _projectName = projectName;
+              _projectId = projectId;
+              _previousPage = _currentPage;
+              _currentPage = NavigationPage.dataEntry;
+            });
+            _persistNavState();
+            _refreshErrorBadgesFromStoredData();
+          },
         );
       case NavigationPage.trash:
         return const TrashPage();
       case NavigationPage.help:
         return const HelpPage();
       case NavigationPage.logout:
-        return const AccountSettingsContent();
+        return AccountSettingsContent(
+          onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+        );
       case NavigationPage.projectDetails:
         return ProjectDetailsPage(
           initialProjectName: _projectName,
           projectId: _projectId,
+          onProjectNameChanged: (name) {
+            setState(() {
+              _projectName = name;
+            });
+          },
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
           onAreaErrorsChanged: _handleAreaErrorsChanged,
@@ -88,18 +393,32 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           onSiteErrorsChanged: _handleSiteErrorsChanged,
           onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
           onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onProjectManagerWarningOnlyChanged:
+              _handleProjectManagerWarningOnlyChanged,
+          onAgentWarningOnlyChanged: _handleAgentWarningOnlyChanged,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onAboutErrorsChanged: _handleAboutErrorsChanged,
         );
       case NavigationPage.home:
         return _previousPage != null
             ? _getPageContentForPage(_previousPage!)
-            : const AccountSettingsContent();
+            : AccountSettingsContent(
+                onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+              );
       case NavigationPage.dashboard:
-        return DashboardPage(projectId: _projectId);
+        return DashboardPage(
+          projectId: _projectId,
+          onLoadingStateChanged: _handleDashboardLoadingStateChanged,
+        );
       case NavigationPage.dataEntry:
         return ProjectDetailsPage(
           initialProjectName: _projectName,
           projectId: _projectId,
+          onProjectNameChanged: (name) {
+            setState(() {
+              _projectName = name;
+            });
+          },
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
           onAreaErrorsChanged: _handleAreaErrorsChanged,
@@ -108,12 +427,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           onSiteErrorsChanged: _handleSiteErrorsChanged,
           onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
           onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onProjectManagerWarningOnlyChanged:
+              _handleProjectManagerWarningOnlyChanged,
+          onAgentWarningOnlyChanged: _handleAgentWarningOnlyChanged,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onAboutErrorsChanged: _handleAboutErrorsChanged,
         ); // Data Entry shows Project Details page
       case NavigationPage.plotStatus:
         return PlotStatusPage(
           projectId: _projectId,
           onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
+          onLoadingStateChanged: _handlePlotStatusLoadingStateChanged,
         );
       case NavigationPage.documents:
         return DocumentsPage(projectId: _projectId);
@@ -128,7 +452,9 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   Widget _getPageContent() {
     switch (_currentPage) {
       case NavigationPage.account:
-        return const AccountSettingsContent();
+        return AccountSettingsContent(
+          onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+        );
       case NavigationPage.notifications:
         return const NotificationsPage();
       case NavigationPage.toDoList:
@@ -145,11 +471,23 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _persistNavState();
+            _refreshErrorBadgesFromStoredData();
           },
         );
       case NavigationPage.allProjects:
         return AllProjectsPage(
           onCreateProject: () => _showCreateProjectDialog(),
+          onProjectSelected: (projectId, projectName) {
+            setState(() {
+              _projectName = projectName;
+              _projectId = projectId;
+              _previousPage = _currentPage;
+              _currentPage = NavigationPage.dataEntry;
+            });
+            _persistNavState();
+            _refreshErrorBadgesFromStoredData();
+          },
         );
       case NavigationPage.trash:
         return const TrashPage();
@@ -157,10 +495,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         return const HelpPage();
       case NavigationPage.logout:
         // For logout, you might want to show a dialog or navigate to login
-        return const AccountSettingsContent();
+        return AccountSettingsContent(
+          onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+        );
       case NavigationPage.projectDetails:
         return ProjectDetailsPage(
           initialProjectName: _projectName,
+          onProjectNameChanged: (name) {
+            setState(() {
+              _projectName = name;
+            });
+          },
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
           onAreaErrorsChanged: _handleAreaErrorsChanged,
@@ -169,19 +514,33 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           onSiteErrorsChanged: _handleSiteErrorsChanged,
           onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
           onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onProjectManagerWarningOnlyChanged:
+              _handleProjectManagerWarningOnlyChanged,
+          onAgentWarningOnlyChanged: _handleAgentWarningOnlyChanged,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onAboutErrorsChanged: _handleAboutErrorsChanged,
         );
       case NavigationPage.home:
         // This should not be reached as Home navigates back
         return _previousPage != null
             ? _getPageContentForPage(_previousPage!)
-            : const AccountSettingsContent();
+            : AccountSettingsContent(
+                onReportIdentityErrorsChanged: _handleAccountErrorsChanged,
+              );
       case NavigationPage.dashboard:
-        return DashboardPage(projectId: _projectId);
+        return DashboardPage(
+          projectId: _projectId,
+          onLoadingStateChanged: _handleDashboardLoadingStateChanged,
+        );
       case NavigationPage.dataEntry:
         return ProjectDetailsPage(
           initialProjectName: _projectName,
           projectId: _projectId,
+          onProjectNameChanged: (name) {
+            setState(() {
+              _projectName = name;
+            });
+          },
           onSaveStatusChanged: _handleSaveStatusChanged,
           onErrorStateChanged: _handleErrorStateChanged,
           onAreaErrorsChanged: _handleAreaErrorsChanged,
@@ -190,12 +549,17 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           onSiteErrorsChanged: _handleSiteErrorsChanged,
           onProjectManagerErrorsChanged: _handleProjectManagerErrorsChanged,
           onAgentErrorsChanged: _handleAgentErrorsChanged,
+          onProjectManagerWarningOnlyChanged:
+              _handleProjectManagerWarningOnlyChanged,
+          onAgentWarningOnlyChanged: _handleAgentWarningOnlyChanged,
+          onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onAboutErrorsChanged: _handleAboutErrorsChanged,
         ); // Data Entry shows Project Details page
       case NavigationPage.plotStatus:
         return PlotStatusPage(
           projectId: _projectId,
           onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
+          onLoadingStateChanged: _handlePlotStatusLoadingStateChanged,
         );
       case NavigationPage.documents:
         return DocumentsPage(projectId: _projectId);
@@ -214,6 +578,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       _currentPage = NavigationPage.allProjects;
       _previousPage = null;
     });
+    _persistNavState();
   }
 
   void _showCreateProjectDialog() async {
@@ -234,67 +599,101 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         _previousPage = _currentPage;
         _currentPage = NavigationPage.dataEntry;
       });
+      _persistNavState();
+      _refreshErrorBadgesFromStoredData();
     }
   }
 
   void _handleErrorStateChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasDataEntryErrors = hasErrors;
     });
   }
 
   void _handleAreaErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasAreaErrors = hasErrors;
     });
   }
 
   void _handlePartnerErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasPartnerErrors = hasErrors;
     });
   }
 
   void _handleExpenseErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasExpenseErrors = hasErrors;
     });
   }
 
   void _handleSiteErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasSiteErrors = hasErrors;
     });
   }
 
   void _handleProjectManagerErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasProjectManagerErrors = hasErrors;
     });
   }
 
+  void _handleProjectManagerWarningOnlyChanged(bool hasWarningOnly) {
+    _setStateSafely(() {
+      _hasProjectManagerWarningOnly = hasWarningOnly;
+    });
+  }
+
   void _handleAgentErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasAgentErrors = hasErrors;
     });
   }
 
+  void _handleAgentWarningOnlyChanged(bool hasWarningOnly) {
+    _setStateSafely(() {
+      _hasAgentWarningOnly = hasWarningOnly;
+    });
+  }
+
   void _handleAboutErrorsChanged(bool hasErrors) {
-    setState(() {
+    _setStateSafely(() {
       _hasAboutErrors = hasErrors;
+    });
+  }
+
+  void _handleAccountErrorsChanged(bool hasErrors) {
+    _setStateSafely(() {
+      _hasAccountErrors = hasErrors;
     });
   }
 
   void _handlePlotStatusErrorsChanged(bool hasErrors) {
     print(
         '🔴 AccountSettingsScreen._handlePlotStatusErrorsChanged: hasErrors=$hasErrors');
-    setState(() {
+    _setStateSafely(() {
       _hasPlotStatusErrors = hasErrors;
     });
   }
 
+  void _handleDashboardLoadingStateChanged(bool isLoading) {
+    if (_isDashboardPageLoading == isLoading) return;
+    _setStateSafely(() {
+      _isDashboardPageLoading = isLoading;
+    });
+  }
+
+  void _handlePlotStatusLoadingStateChanged(bool isLoading) {
+    if (_isPlotStatusPageLoading == isLoading) return;
+    _setStateSafely(() {
+      _isPlotStatusPageLoading = isLoading;
+    });
+  }
+
   void _handleSaveStatusChanged(ProjectSaveStatusType status) {
-    setState(() {
+    _setStateSafely(() {
       _saveStatus = status;
       if (status == ProjectSaveStatusType.saved) {
         // Update saved time when status changes to saved
@@ -306,27 +705,54 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   }
 
   void _handleLogout() async {
-    // Sign out from Supabase
-    try {
-      await Supabase.instance.client.auth.signOut();
-    } catch (e) {
-      print('Error signing out: $e');
-    }
-
-    // Clear any session data and navigate to login page
+    // Clear persisted navigation state
+    await _clearPersistedNavState();
+    // Navigate immediately to avoid UI getting stuck on signOut().
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (context) => const LoginPage()),
+        MaterialPageRoute(
+          builder: (context) => const Scaffold(
+            backgroundColor: Colors.white,
+            body: SizedBox.expand(
+              child: StartupWebsiteView(),
+            ),
+          ),
+        ),
         (route) => false,
       );
     }
+
+    // Best-effort background signout (do not block navigation).
+    unawaited(
+      Supabase.instance.client.auth
+          .signOut()
+          .timeout(const Duration(seconds: 6))
+          .catchError((e) {
+        print('Error signing out: $e');
+      }),
+    );
   }
 
-  void _handlePageChange(NavigationPage page) {
+  Future<void> _handlePageChange(NavigationPage page) async {
     // Handle logout separately
     if (page == NavigationPage.logout) {
       _handleLogout();
       return;
+    }
+
+    final isOnDataEntryContext = _currentPage == NavigationPage.dataEntry ||
+        _currentPage == NavigationPage.projectDetails;
+    final isLeavingDataEntryContext = isOnDataEntryContext &&
+        page != NavigationPage.dataEntry &&
+        page != NavigationPage.projectDetails;
+
+    if (isLeavingDataEntryContext) {
+      // Commit any focused text edit so ProjectDetails autosave can run.
+      FocusManager.instance.primaryFocus?.unfocus();
+      // Brief delay so the autosave debounce can fire; the dashboard will
+      // show skeleton loading until the Supabase save finishes.
+      await Future.delayed(const Duration(milliseconds: 350));
+      if (!mounted) return;
     }
 
     if (page == NavigationPage.home) {
@@ -334,6 +760,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         _currentPage = NavigationPage.recentProjects;
         _previousPage = null;
       });
+      _persistNavState();
+      _refreshErrorBadgesFromStoredData();
     } else {
       // Track previous page when navigating to project details context pages
       if (page == NavigationPage.projectDetails ||
@@ -360,11 +788,25 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           _currentPage = page;
         });
       }
+      _persistNavState();
+      _refreshErrorBadgesFromStoredData();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Show loading while restoring navigation state from SharedPreferences
+    if (_isRestoringNavState) {
+      return const Scaffold(
+        backgroundColor: Colors.white,
+        body: Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0C8CE9)),
+          ),
+        ),
+      );
+    }
+
     final isProjectContextPage =
         _currentPage == NavigationPage.projectDetails ||
             _currentPage == NavigationPage.dashboard ||
@@ -375,6 +817,14 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             _currentPage == NavigationPage.report;
     final isSidebarLoading =
         isProjectContextPage && (_projectId == null || _projectName == null);
+    final isContentSkeletonLoading =
+        (_currentPage == NavigationPage.dashboard && _isDashboardPageLoading) ||
+            (_currentPage == NavigationPage.plotStatus &&
+                _isPlotStatusPageLoading);
+    final effectiveSaveStatus =
+        isContentSkeletonLoading ? ProjectSaveStatusType.loading : _saveStatus;
+    final effectiveSavedTimeAgo =
+        isContentSkeletonLoading ? null : _savedTimeAgo;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -386,8 +836,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             return MobileLayout(
               currentPage: _currentPage,
               projectName: _projectName,
-              saveStatus: _saveStatus,
-              savedTimeAgo: _savedTimeAgo,
+              saveStatus: effectiveSaveStatus,
+              savedTimeAgo: effectiveSavedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
               hasPlotStatusErrors: _hasPlotStatusErrors,
               hasAreaErrors: _hasAreaErrors,
@@ -396,7 +846,10 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               hasSiteErrors: _hasSiteErrors,
               hasProjectManagerErrors: _hasProjectManagerErrors,
               hasAgentErrors: _hasAgentErrors,
+              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+              hasAgentWarningOnly: _hasAgentWarningOnly,
               hasAboutErrors: _hasAboutErrors,
+              hasAccountErrors: _hasAccountErrors,
               isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
@@ -406,8 +859,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             return TabletLayout(
               currentPage: _currentPage,
               projectName: _projectName,
-              saveStatus: _saveStatus,
-              savedTimeAgo: _savedTimeAgo,
+              saveStatus: effectiveSaveStatus,
+              savedTimeAgo: effectiveSavedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
               hasPlotStatusErrors: _hasPlotStatusErrors,
               hasAreaErrors: _hasAreaErrors,
@@ -416,7 +869,10 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               hasSiteErrors: _hasSiteErrors,
               hasProjectManagerErrors: _hasProjectManagerErrors,
               hasAgentErrors: _hasAgentErrors,
+              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+              hasAgentWarningOnly: _hasAgentWarningOnly,
               hasAboutErrors: _hasAboutErrors,
+              hasAccountErrors: _hasAccountErrors,
               isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
@@ -426,8 +882,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             return DesktopLayout(
               currentPage: _currentPage,
               projectName: _projectName,
-              saveStatus: _saveStatus,
-              savedTimeAgo: _savedTimeAgo,
+              saveStatus: effectiveSaveStatus,
+              savedTimeAgo: effectiveSavedTimeAgo,
               hasDataEntryErrors: _hasDataEntryErrors,
               hasPlotStatusErrors: _hasPlotStatusErrors,
               hasAreaErrors: _hasAreaErrors,
@@ -436,7 +892,10 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               hasSiteErrors: _hasSiteErrors,
               hasProjectManagerErrors: _hasProjectManagerErrors,
               hasAgentErrors: _hasAgentErrors,
+              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+              hasAgentWarningOnly: _hasAgentWarningOnly,
               hasAboutErrors: _hasAboutErrors,
+              hasAccountErrors: _hasAccountErrors,
               isSidebarLoading: isSidebarLoading,
               onPageChanged: _handlePageChange,
               pageContent: _getPageContent(),
@@ -463,7 +922,10 @@ class DesktopLayout extends StatelessWidget {
   final bool? hasSiteErrors;
   final bool? hasProjectManagerErrors;
   final bool? hasAgentErrors;
+  final bool? hasProjectManagerWarningOnly;
+  final bool? hasAgentWarningOnly;
   final bool? hasAboutErrors;
+  final bool? hasAccountErrors;
   final bool isSidebarLoading;
 
   const DesktopLayout({
@@ -482,7 +944,10 @@ class DesktopLayout extends StatelessWidget {
     this.hasSiteErrors,
     this.hasProjectManagerErrors,
     this.hasAgentErrors,
+    this.hasProjectManagerWarningOnly,
+    this.hasAgentWarningOnly,
     this.hasAboutErrors,
+    this.hasAccountErrors,
     this.isSidebarLoading = false,
   });
 
@@ -504,7 +969,10 @@ class DesktopLayout extends StatelessWidget {
           hasSiteErrors: hasSiteErrors,
           hasProjectManagerErrors: hasProjectManagerErrors,
           hasAgentErrors: hasAgentErrors,
+          hasProjectManagerWarningsOnly: hasProjectManagerWarningOnly,
+          hasAgentWarningsOnly: hasAgentWarningOnly,
           hasAboutErrors: hasAboutErrors,
+          hasAccountErrors: hasAccountErrors,
           isLoading: isSidebarLoading,
         ),
         Expanded(
@@ -530,7 +998,10 @@ class TabletLayout extends StatelessWidget {
   final bool? hasSiteErrors;
   final bool? hasProjectManagerErrors;
   final bool? hasAgentErrors;
+  final bool? hasProjectManagerWarningOnly;
+  final bool? hasAgentWarningOnly;
   final bool? hasAboutErrors;
+  final bool? hasAccountErrors;
   final bool isSidebarLoading;
 
   const TabletLayout({
@@ -549,7 +1020,10 @@ class TabletLayout extends StatelessWidget {
     this.hasSiteErrors,
     this.hasProjectManagerErrors,
     this.hasAgentErrors,
+    this.hasProjectManagerWarningOnly,
+    this.hasAgentWarningOnly,
     this.hasAboutErrors,
+    this.hasAccountErrors,
     this.isSidebarLoading = false,
   });
 
@@ -571,7 +1045,10 @@ class TabletLayout extends StatelessWidget {
           hasSiteErrors: hasSiteErrors,
           hasProjectManagerErrors: hasProjectManagerErrors,
           hasAgentErrors: hasAgentErrors,
+          hasProjectManagerWarningsOnly: hasProjectManagerWarningOnly,
+          hasAgentWarningsOnly: hasAgentWarningOnly,
           hasAboutErrors: hasAboutErrors,
+          hasAccountErrors: hasAccountErrors,
           isLoading: isSidebarLoading,
         ),
         Expanded(
@@ -605,7 +1082,10 @@ class MobileLayout extends StatefulWidget {
   final bool? hasSiteErrors;
   final bool? hasProjectManagerErrors;
   final bool? hasAgentErrors;
+  final bool? hasProjectManagerWarningOnly;
+  final bool? hasAgentWarningOnly;
   final bool? hasAboutErrors;
+  final bool? hasAccountErrors;
   final bool isSidebarLoading;
 
   const MobileLayout({
@@ -624,7 +1104,10 @@ class MobileLayout extends StatefulWidget {
     this.hasSiteErrors,
     this.hasProjectManagerErrors,
     this.hasAgentErrors,
+    this.hasProjectManagerWarningOnly,
+    this.hasAgentWarningOnly,
     this.hasAboutErrors,
+    this.hasAccountErrors,
     this.isSidebarLoading = false,
   });
 
@@ -697,7 +1180,11 @@ class _MobileLayoutState extends State<MobileLayout> {
                       hasSiteErrors: widget.hasSiteErrors,
                       hasProjectManagerErrors: widget.hasProjectManagerErrors,
                       hasAgentErrors: widget.hasAgentErrors,
+                      hasProjectManagerWarningsOnly:
+                          widget.hasProjectManagerWarningOnly,
+                      hasAgentWarningsOnly: widget.hasAgentWarningOnly,
                       hasAboutErrors: widget.hasAboutErrors,
+                      hasAccountErrors: widget.hasAccountErrors,
                       isLoading: widget.isSidebarLoading,
                     ),
                   ),

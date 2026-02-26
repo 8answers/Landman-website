@@ -29,6 +29,7 @@ class _UploadProgress {
   final String id;
   final String fileName;
   final String extension;
+  final String? parentId;
   double progress;
   bool isCanceled;
   bool isCompleted;
@@ -38,6 +39,7 @@ class _UploadProgress {
     required this.id,
     required this.fileName,
     required this.extension,
+    this.parentId,
     this.progress = 0.0,
     this.isCanceled = false,
     this.isCompleted = false,
@@ -374,6 +376,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                 id: uploadId,
                 fileName: fileName,
                 extension: extension,
+                parentId: _currentFolderId,
                 file: file,
               );
             });
@@ -911,7 +914,26 @@ class _DocumentsPageState extends State<DocumentsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final documents = _filteredDocuments;
+    final uploadingDocuments = _activeUploads.values
+        .where((u) =>
+            !u.isCanceled &&
+            !u.isCompleted &&
+            u.parentId == _currentFolderId &&
+            (_searchQuery.isEmpty ||
+                u.fileName.toLowerCase().contains(_searchQuery.toLowerCase())))
+        .map((u) => <String, dynamic>{
+              'id': 'upload-${u.id}',
+              'name': u.fileName,
+              'type': 'file',
+              'extension': u.extension,
+              'uploadedLabel': 'Uploading...',
+              'updatedLabel': '',
+              'url': '',
+              'isUploading': true,
+            })
+        .toList();
+
+    final documents = [..._filteredDocuments, ...uploadingDocuments];
     final folderPath = _getFolderPath(_currentFolderId);
     final screenWidth = MediaQuery.of(context).size.width;
     final scaleMetrics = AppScaleMetrics.of(context);
@@ -1410,6 +1432,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                           index++)
                                         () {
                                           final doc = documents[index];
+                                          final isUploadingDoc =
+                                              doc['isUploading'] == true;
                                           final docId =
                                               (doc['id'] ?? '').toString();
                                           final isSelected =
@@ -1435,6 +1459,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                             behavior:
                                                 HitTestBehavior.deferToChild,
                                             onTap: () {
+                                              if (isUploadingDoc) return;
                                               if (_isSelectMode) {
                                                 setState(() {
                                                   if (isSelected) {
@@ -1495,7 +1520,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                               child: Stack(
                                                 children: [
                                                   IgnorePointer(
-                                                    ignoring: _isSelectMode,
+                                                    ignoring: _isSelectMode ||
+                                                        isUploadingDoc,
                                                     child: (doc['type'] ??
                                                                     'folder')
                                                                 .toString() ==
@@ -1688,6 +1714,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                         : FileCard(
                                                             key: ValueKey(
                                                                 'file-$docId'),
+                                                            isUploading:
+                                                                isUploadingDoc,
                                                             isSelected:
                                                                 isSelected,
                                                             isSelectMode:
@@ -2122,6 +2150,16 @@ class _DocumentCardState extends State<DocumentCard> {
     );
   }
 
+  double _popupShiftX(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return 0;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final cardCenterX =
+        box.localToGlobal(Offset.zero).dx + (box.size.width / 2);
+    final opensLeft = cardCenterX > (screenWidth * 0.40);
+    return opensLeft ? 31.0 : 0.0;
+  }
+
   @override
   Widget build(BuildContext context) {
     final metaLabel = widget.updatedLabel.isNotEmpty
@@ -2298,6 +2336,7 @@ class _DocumentCardState extends State<DocumentCard> {
                           child: PopupMenuButton<_DocumentCardAction>(
                             tooltip: '',
                             padding: EdgeInsets.zero,
+                            position: PopupMenuPosition.under,
                             child: Container(
                               width: 32,
                               height: 32,
@@ -2307,7 +2346,7 @@ class _DocumentCardState extends State<DocumentCard> {
                                 child: _threeDotsIcon(),
                               ),
                             ),
-                            offset: const Offset(-157, 40),
+                            offset: Offset(_popupShiftX(context), 0),
                             color: Colors.transparent,
                             elevation: 0,
                             shadowColor: Colors.transparent,
@@ -2522,6 +2561,7 @@ class FileCard extends StatefulWidget {
   final String iconPath;
   final String uploadedLabel;
   final String updatedLabel;
+  final bool isUploading;
   final bool isSelected;
   final bool isSelectMode;
   final ValueChanged<String> onRename;
@@ -2536,6 +2576,7 @@ class FileCard extends StatefulWidget {
     required this.iconPath,
     required this.uploadedLabel,
     required this.updatedLabel,
+    this.isUploading = false,
     this.isSelected = false,
     this.isSelectMode = false,
     required this.onRename,
@@ -2604,6 +2645,7 @@ class _FileCardState extends State<FileCard> {
   }
 
   void _handleTap() {
+    if (widget.isUploading) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_lastTapTimestampMs != null && (now - _lastTapTimestampMs!) < 500) {
       setState(() => _isDoubleClicked = true);
@@ -2632,6 +2674,16 @@ class _FileCardState extends State<FileCard> {
     );
   }
 
+  double _popupShiftX(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return 0;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final cardCenterX =
+        box.localToGlobal(Offset.zero).dx + (box.size.width / 2);
+    final opensLeft = cardCenterX > (screenWidth * 0.40);
+    return opensLeft ? 31.0 : 0.0;
+  }
+
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
@@ -2640,340 +2692,345 @@ class _FileCardState extends State<FileCard> {
       child: GestureDetector(
         behavior: HitTestBehavior.deferToChild,
         onTap: _handleTap,
-        child: Container(
-          width: 170,
-          height: 180,
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: widget.isSelected
-                ? const Color(0x1AFF0000)
-                : _isDoubleClicked
-                    ? const Color(0xFFD6D6D6) // double-click gray
-                    : _isHovered
-                        ? Colors.grey[100] // bright gray
-                        : Colors.white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
-            // boxShadow removed for lighter appearance
-          ),
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Center(
-                    child: SizedBox(
-                      width: 64,
-                      height: 52,
-                      child: Center(
-                        child: SvgPicture.asset(
-                          widget.iconPath,
-                          width: 44,
-                          height: 52,
-                          fit: BoxFit.contain,
+        child: Opacity(
+          opacity: widget.isUploading ? 0.5 : 1.0,
+          child: Container(
+            width: 170,
+            height: 180,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: widget.isSelected
+                  ? const Color(0x1AFF0000)
+                  : _isDoubleClicked
+                      ? const Color(0xFFD6D6D6) // double-click gray
+                      : _isHovered
+                          ? Colors.grey[100] // bright gray
+                          : Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
+              // boxShadow removed for lighter appearance
+            ),
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Center(
+                      child: SizedBox(
+                        width: 64,
+                        height: 52,
+                        child: Center(
+                          child: SvgPicture.asset(
+                            widget.iconPath,
+                            width: 44,
+                            height: 52,
+                            fit: BoxFit.contain,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.center,
-                    child: SizedBox(
-                      width: double.infinity,
-                      height: 40,
-                      child: Container(
-                        alignment: Alignment.center,
-                        decoration: _isRenaming
-                            ? const BoxDecoration(color: Color(0x290C8CE9))
-                            : null,
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: _isRenaming
-                            ? Theme(
-                                data: Theme.of(context).copyWith(
-                                  textSelectionTheme:
-                                      const TextSelectionThemeData(
-                                    selectionColor: Color(0x4D0C8CE9),
-                                    selectionHandleColor: Color(0xFF0C8CE9),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.center,
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 40,
+                        child: Container(
+                          alignment: Alignment.center,
+                          decoration: _isRenaming
+                              ? const BoxDecoration(color: Color(0x290C8CE9))
+                              : null,
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: _isRenaming
+                              ? Theme(
+                                  data: Theme.of(context).copyWith(
+                                    textSelectionTheme:
+                                        const TextSelectionThemeData(
+                                      selectionColor: Color(0x4D0C8CE9),
+                                      selectionHandleColor: Color(0xFF0C8CE9),
+                                    ),
                                   ),
-                                ),
-                                child: TextField(
-                                  controller: _nameController,
-                                  focusNode: _nameFocusNode,
-                                  textAlign: TextAlign.center,
-                                  textAlignVertical: TextAlignVertical.center,
-                                  minLines: 1,
-                                  maxLines: 2,
-                                  keyboardType: TextInputType.text,
-                                  textInputAction: TextInputAction.done,
-                                  cursorColor: Colors.black,
-                                  inputFormatters: [
-                                    FilteringTextInputFormatter.deny(
-                                        RegExp(r'\n'))
-                                  ],
-                                  selectionHeightStyle: BoxHeightStyle.tight,
-                                  selectionWidthStyle: BoxWidthStyle.tight,
+                                  child: TextField(
+                                    controller: _nameController,
+                                    focusNode: _nameFocusNode,
+                                    textAlign: TextAlign.center,
+                                    textAlignVertical: TextAlignVertical.center,
+                                    minLines: 1,
+                                    maxLines: 2,
+                                    keyboardType: TextInputType.text,
+                                    textInputAction: TextInputAction.done,
+                                    cursorColor: Colors.black,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.deny(
+                                          RegExp(r'\n'))
+                                    ],
+                                    selectionHeightStyle: BoxHeightStyle.tight,
+                                    selectionWidthStyle: BoxWidthStyle.tight,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black,
+                                      height: 1.0,
+                                    ),
+                                    decoration: const InputDecoration(
+                                      border: InputBorder.none,
+                                      enabledBorder: InputBorder.none,
+                                      focusedBorder: InputBorder.none,
+                                      disabledBorder: InputBorder.none,
+                                      isDense: true,
+                                      isCollapsed: true,
+                                      contentPadding: EdgeInsets.zero,
+                                    ),
+                                    onSubmitted: (_) => _commitRename(),
+                                    onEditingComplete: _commitRename,
+                                  ),
+                                )
+                              : Text(
+                                  widget.name,
                                   style: GoogleFonts.inter(
                                     fontSize: 14,
                                     fontWeight: FontWeight.normal,
                                     color: Colors.black,
                                     height: 1.0,
                                   ),
-                                  decoration: const InputDecoration(
-                                    border: InputBorder.none,
-                                    enabledBorder: InputBorder.none,
-                                    focusedBorder: InputBorder.none,
-                                    disabledBorder: InputBorder.none,
-                                    isDense: true,
-                                    isCollapsed: true,
-                                    contentPadding: EdgeInsets.zero,
-                                  ),
-                                  onSubmitted: (_) => _commitRename(),
-                                  onEditingComplete: _commitRename,
+                                  maxLines: 2,
+                                  softWrap: true,
+                                  overflow: TextOverflow.clip,
+                                  textAlign: TextAlign.center,
                                 ),
-                              )
-                            : Text(
-                                widget.name,
-                                style: GoogleFonts.inter(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.normal,
-                                  color: Colors.black,
-                                  height: 1.0,
-                                ),
-                                maxLines: 2,
-                                softWrap: true,
-                                overflow: TextOverflow.clip,
-                                textAlign: TextAlign.center,
-                              ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    height: 20,
-                    child: Center(
-                      child: Text(
-                        widget.updatedLabel.isNotEmpty
-                            ? widget.updatedLabel
-                            : widget.uploadedLabel,
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          fontWeight: FontWeight.normal,
-                          color: const Color(0xFF5C5C5C),
-                          height: 1.67,
                         ),
-                        textAlign: TextAlign.center,
                       ),
                     ),
-                  ),
-                ],
-              ),
-              Positioned(
-                top: 0,
-                right: -14,
-                child: Material(
-                  color: Colors.transparent,
-                  child: widget.isSelectMode
-                      ? Container(
-                          width: 32,
-                          height: 32,
-                          alignment: Alignment.center,
-                          child: _threeDotsIcon(),
-                        )
-                      : PopupMenuButton<String>(
-                          tooltip: '',
-                          padding: EdgeInsets.zero,
-                          child: Container(
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 20,
+                      child: Center(
+                        child: Text(
+                          widget.updatedLabel.isNotEmpty
+                              ? widget.updatedLabel
+                              : widget.uploadedLabel,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.normal,
+                            color: const Color(0xFF5C5C5C),
+                            height: 1.67,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                Positioned(
+                  top: 0,
+                  right: -14,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: widget.isSelectMode || widget.isUploading
+                        ? Container(
                             width: 32,
                             height: 32,
                             alignment: Alignment.center,
-                            child: MouseRegion(
-                              cursor: SystemMouseCursors.click,
-                              child: _threeDotsIcon(),
-                            ),
-                          ),
-                          offset: const Offset(-50, 40),
-                          color: Colors.transparent,
-                          elevation: 0,
-                          shadowColor: Colors.transparent,
-                          onSelected: (action) {
-                            switch (action) {
-                              case 'rename':
-                                _beginRename();
-                                break;
-                              case 'download':
-                                widget.onDownload();
-                                break;
-                              case 'delete':
-                                widget.onDelete();
-                                break;
-                            }
-                          },
-                          itemBuilder: (context) => <PopupMenuEntry<String>>[
-                            PopupMenuItem(
-                              enabled: false,
-                              padding: EdgeInsets.zero,
-                              child: Container(
-                                width: 197,
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFF8F9FA),
-                                  borderRadius: BorderRadius.circular(8),
-                                  boxShadow: const [
-                                    BoxShadow(
-                                      color: Color(0x80000000),
-                                      blurRadius: 2,
-                                      offset: Offset(0, 0),
-                                    ),
-                                  ],
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    InkWell(
-                                      borderRadius: BorderRadius.circular(8),
-                                      onTap: () {
-                                        Navigator.of(context).pop();
-                                        _beginRename();
-                                      },
-                                      child: Container(
-                                        height: 36,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: const [
-                                            BoxShadow(
-                                              color: Color(0x40000000),
-                                              blurRadius: 2,
-                                              offset: Offset(0, 0),
-                                            ),
-                                          ],
-                                        ),
-                                        child: Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              'Rename',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.normal,
-                                                color: Colors.black,
-                                              ),
-                                            ),
-                                            SvgPicture.asset(
-                                              'assets/images/rename.svg',
-                                              width: 20,
-                                              height: 20,
-                                              fit: BoxFit.contain,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    InkWell(
-                                      borderRadius: BorderRadius.circular(8),
-                                      onTap: () {
-                                        Navigator.of(context).pop();
-                                        widget.onDownload();
-                                      },
-                                      child: Container(
-                                        height: 36,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: const [
-                                            BoxShadow(
-                                              color: Color(0x40000000),
-                                              blurRadius: 2,
-                                              offset: Offset(0, 0),
-                                            ),
-                                          ],
-                                        ),
-                                        child: Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              'Download',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.normal,
-                                                color: Colors.black,
-                                              ),
-                                            ),
-                                            SvgPicture.asset(
-                                              'assets/images/Download_all.svg',
-                                              width: 16,
-                                              height: 16,
-                                              fit: BoxFit.contain,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    InkWell(
-                                      borderRadius: BorderRadius.circular(8),
-                                      onTap: () {
-                                        Navigator.of(context).pop();
-                                        widget.onDelete();
-                                      },
-                                      child: Container(
-                                        height: 36,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: const [
-                                            BoxShadow(
-                                              color: Color(0x40000000),
-                                              blurRadius: 2,
-                                              offset: Offset(0, 0),
-                                            ),
-                                          ],
-                                        ),
-                                        child: Row(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              'Delete File',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.normal,
-                                                color: Colors.red,
-                                              ),
-                                            ),
-                                            SvgPicture.asset(
-                                              'assets/images/delete_folder.svg',
-                                              width: 13,
-                                              height: 16,
-                                              fit: BoxFit.contain,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                            child: _threeDotsIcon(),
+                          )
+                        : PopupMenuButton<String>(
+                            tooltip: '',
+                            padding: EdgeInsets.zero,
+                            position: PopupMenuPosition.under,
+                            child: Container(
+                              width: 32,
+                              height: 32,
+                              alignment: Alignment.center,
+                              child: MouseRegion(
+                                cursor: SystemMouseCursors.click,
+                                child: _threeDotsIcon(),
                               ),
                             ),
-                          ],
-                        ),
+                            offset: Offset(_popupShiftX(context), 0),
+                            color: Colors.transparent,
+                            elevation: 0,
+                            shadowColor: Colors.transparent,
+                            onSelected: (action) {
+                              switch (action) {
+                                case 'rename':
+                                  _beginRename();
+                                  break;
+                                case 'download':
+                                  widget.onDownload();
+                                  break;
+                                case 'delete':
+                                  widget.onDelete();
+                                  break;
+                              }
+                            },
+                            itemBuilder: (context) => <PopupMenuEntry<String>>[
+                              PopupMenuItem(
+                                enabled: false,
+                                padding: EdgeInsets.zero,
+                                child: Container(
+                                  width: 197,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF8F9FA),
+                                    borderRadius: BorderRadius.circular(8),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Color(0x80000000),
+                                        blurRadius: 2,
+                                        offset: Offset(0, 0),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      InkWell(
+                                        borderRadius: BorderRadius.circular(8),
+                                        onTap: () {
+                                          Navigator.of(context).pop();
+                                          _beginRename();
+                                        },
+                                        child: Container(
+                                          height: 36,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: const [
+                                              BoxShadow(
+                                                color: Color(0x40000000),
+                                                blurRadius: 2,
+                                                offset: Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                'Rename',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color: Colors.black,
+                                                ),
+                                              ),
+                                              SvgPicture.asset(
+                                                'assets/images/rename.svg',
+                                                width: 20,
+                                                height: 20,
+                                                fit: BoxFit.contain,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 10),
+                                      InkWell(
+                                        borderRadius: BorderRadius.circular(8),
+                                        onTap: () {
+                                          Navigator.of(context).pop();
+                                          widget.onDownload();
+                                        },
+                                        child: Container(
+                                          height: 36,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: const [
+                                              BoxShadow(
+                                                color: Color(0x40000000),
+                                                blurRadius: 2,
+                                                offset: Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                'Download',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color: Colors.black,
+                                                ),
+                                              ),
+                                              SvgPicture.asset(
+                                                'assets/images/Download_all.svg',
+                                                width: 16,
+                                                height: 16,
+                                                fit: BoxFit.contain,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 10),
+                                      InkWell(
+                                        borderRadius: BorderRadius.circular(8),
+                                        onTap: () {
+                                          Navigator.of(context).pop();
+                                          widget.onDelete();
+                                        },
+                                        child: Container(
+                                          height: 36,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: const [
+                                              BoxShadow(
+                                                color: Color(0x40000000),
+                                                blurRadius: 2,
+                                                offset: Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                'Delete File',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color: Colors.red,
+                                                ),
+                                              ),
+                                              SvgPicture.asset(
+                                                'assets/images/delete_folder.svg',
+                                                width: 13,
+                                                height: 16,
+                                                fit: BoxFit.contain,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -3994,98 +4051,105 @@ class _UploadItemState extends State<_UploadItem>
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 491,
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x40000000),
-            blurRadius: 2,
-            offset: Offset(0, 0),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              _getFileIcon(widget.upload.extension),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            widget.upload.fileName,
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.normal,
-                              color: Colors.black,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        GestureDetector(
-                          onTap: widget.onCancel,
-                          child: Text(
-                            'Cancel',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.normal,
-                              color: Colors.red,
+    final isDesktop = MediaQuery.of(context).size.width >= 1024;
+    final isInProgress =
+        widget.upload.progress < 100 && !widget.upload.isCanceled;
+
+    return Opacity(
+      opacity: (isDesktop && isInProgress) ? 0.5 : 1.0,
+      child: Container(
+        width: 491,
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x40000000),
+              blurRadius: 2,
+              offset: Offset(0, 0),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _getFileIcon(widget.upload.extension),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.upload.fileName,
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black,
+                              ),
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(25.436),
-                            child: LinearProgressIndicator(
-                              value: widget.upload.progress / 100,
-                              minHeight: 6,
-                              backgroundColor: const Color(0xFFE0E0E0),
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                widget.upload.isCanceled
-                                    ? Colors.grey
-                                    : const Color(0xFF0C8CE9),
+                          GestureDetector(
+                            onTap: widget.onCancel,
+                            child: Text(
+                              'Cancel',
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.red,
                               ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        SizedBox(
-                          width: 26,
-                          child: Text(
-                            '${widget.upload.progress.toInt()}%',
-                            style: GoogleFonts.inter(
-                              fontSize: 10,
-                              fontWeight: FontWeight.normal,
-                              color: Colors.black,
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(25.436),
+                              child: LinearProgressIndicator(
+                                value: widget.upload.progress / 100,
+                                minHeight: 6,
+                                backgroundColor: const Color(0xFFE0E0E0),
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  widget.upload.isCanceled
+                                      ? Colors.grey
+                                      : const Color(0xFF0C8CE9),
+                                ),
+                              ),
                             ),
-                            textAlign: TextAlign.right,
                           ),
-                        ),
-                      ],
-                    ),
-                  ],
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 26,
+                            child: Text(
+                              '${widget.upload.progress.toInt()}%',
+                              style: GoogleFonts.inter(
+                                fontSize: 10,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black,
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

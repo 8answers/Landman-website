@@ -3,11 +3,12 @@ import 'package:google_fonts/google_fonts.dart';
 
 enum ProjectSaveStatusType {
   saved,
+  loading,
   saving,
   connectionLost,
 }
 
-class ProjectSaveStatus extends StatelessWidget {
+class ProjectSaveStatus extends StatefulWidget {
   final ProjectSaveStatusType status;
   final String? savedTimeAgo; // e.g., "2 minutes ago"
 
@@ -18,10 +19,35 @@ class ProjectSaveStatus extends StatelessWidget {
   });
 
   @override
+  State<ProjectSaveStatus> createState() => _ProjectSaveStatusState();
+}
+
+class _ProjectSaveStatusState extends State<ProjectSaveStatus>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _rotationController;
+
+  @override
+  void initState() {
+    super.initState();
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _rotationController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    switch (status) {
+    switch (widget.status) {
       case ProjectSaveStatusType.saved:
         return _buildSavedStatus();
+      case ProjectSaveStatusType.loading:
+        return _buildLoadingStatus();
       case ProjectSaveStatusType.saving:
         return _buildSavingStatus();
       case ProjectSaveStatusType.connectionLost:
@@ -33,19 +59,46 @@ class ProjectSaveStatus extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        RichText(
-          text: TextSpan(
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.normal,
-              color: const Color(0xFF06AB00),
-              height: 1.0,
-            ),
+        Text(
+          'Project Saved ✓',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF06AB00),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          widget.savedTimeAgo ?? '2 minutes ago',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF5C5C5C),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLoadingStatus() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const TextSpan(text: 'Project Saved ✓'),
-              const TextSpan(text: '\n'),
-              TextSpan(
-                text: savedTimeAgo ?? '2 minutes ago',
+              Text(
+                'Loading',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: const Color(0xFF0C8CE9),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Fetching latest data',
                 style: GoogleFonts.inter(
                   fontSize: 14,
                   fontWeight: FontWeight.normal,
@@ -53,6 +106,15 @@ class ProjectSaveStatus extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        RotationTransition(
+          turns: _rotationController,
+          child: const Icon(
+            Icons.refresh,
+            size: 16,
+            color: Color(0xFF0C8CE9),
           ),
         ),
       ],
@@ -63,26 +125,21 @@ class ProjectSaveStatus extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        RichText(
-          text: TextSpan(
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.normal,
-              color: const Color(0xFF0C8CE9),
-              height: 1.0,
-            ),
-            children: [
-              const TextSpan(text: 'Saving...'),
-              const TextSpan(text: '\n'),
-              TextSpan(
-                text: 'Please keep this page open',
-                style: GoogleFonts.inter(
-                  fontSize: 14,
-                  fontWeight: FontWeight.normal,
-                  color: const Color(0xFF5C5C5C),
-                ),
-              ),
-            ],
+        Text(
+          'Saving...',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF0C8CE9),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Please keep this page open',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF5C5C5C),
           ),
         ),
       ],
@@ -105,6 +162,7 @@ class ProjectSaveStatus extends StatelessWidget {
                   color: Colors.red,
                 ),
               ),
+              const SizedBox(height: 8),
               Text(
                 'Couldn\'t save',
                 style: GoogleFonts.inter(
@@ -131,4 +189,3 @@ class ProjectSaveStatus extends StatelessWidget {
     );
   }
 }
-

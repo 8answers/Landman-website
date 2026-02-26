@@ -20,44 +20,51 @@ class LayoutStorageService {
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      
+
       // Extract actual values from controllers and build the data structure
       final layoutsData = <Map<String, dynamic>>[];
-      
+
       for (int layoutIndex = 0; layoutIndex < layouts.length; layoutIndex++) {
         final layout = layouts[layoutIndex];
         final layoutNameController = layoutNameControllers[layoutIndex];
-        final layoutName = layoutNameController?.text ?? layout['name'] ?? 'Layout ${layoutIndex + 1}';
-        
+        final layoutName = layoutNameController?.text ??
+            layout['name'] ??
+            'Layout ${layoutIndex + 1}';
+
         final plots = layout['plots'] as List<dynamic>? ?? [];
         final plotsData = <Map<String, dynamic>>[];
-        
+
         for (int plotIndex = 0; plotIndex < plots.length; plotIndex++) {
           final key = '${layoutIndex}_$plotIndex';
           final plotNumberController = plotNumberControllers[key];
           final plotAreaController = plotAreaControllers[key];
           final plotPurchaseRateController = plotPurchaseRateControllers[key];
-          
+          final plot = plots[plotIndex] is Map<String, dynamic>
+              ? plots[plotIndex] as Map<String, dynamic>
+              : <String, dynamic>{};
+
           plotsData.add({
+            'id': plot['id'],
             'plotNumber': plotNumberController?.text ?? '',
             'area': plotAreaController?.text ?? '0.00',
             'purchaseRate': plotPurchaseRateController?.text ?? '0.00',
-            'totalPlotCost': '0.00', // Will be calculated when saving to database
-            'status': 'available', // Default status
-            'salePrice': '0.00',
-            'buyerName': '',
-            'agent': '',
-            'saleDate': '',
+            'totalPlotCost': plot['totalPlotCost'] ?? '0.00',
+            'status': plot['status'] ?? 'available',
+            'salePrice': plot['salePrice'],
+            'buyerName': plot['buyerName'],
+            'agent': plot['agent'],
+            'saleDate': plot['saleDate'],
+            'payments': plot['payments'] ?? [],
             'partners': plotPartners?[key] ?? [],
           });
         }
-        
+
         layoutsData.add({
           'name': layoutName,
           'plots': plotsData,
         });
       }
-      
+
       // Convert to JSON string and save
       final jsonString = jsonEncode(layoutsData);
       await prefs.setString(_layoutsKey, jsonString);
@@ -71,11 +78,11 @@ class LayoutStorageService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(_layoutsKey);
-      
+
       if (jsonString == null || jsonString.isEmpty) {
         return [];
       }
-      
+
       final decoded = jsonDecode(jsonString) as List<dynamic>;
       return decoded.map((item) => item as Map<String, dynamic>).toList();
     } catch (e) {
@@ -113,8 +120,10 @@ class LayoutStorageService {
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('${_projectAddressKeyPrefix}$projectKey', projectAddress);
-      await prefs.setString('${_projectMapsLinkKeyPrefix}$projectKey', googleMapsLink);
+      await prefs.setString(
+          '${_projectAddressKeyPrefix}$projectKey', projectAddress);
+      await prefs.setString(
+          '${_projectMapsLinkKeyPrefix}$projectKey', googleMapsLink);
     } catch (e) {
       print('Error saving project about details: $e');
     }
@@ -126,8 +135,10 @@ class LayoutStorageService {
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final address = prefs.getString('${_projectAddressKeyPrefix}$projectKey') ?? '';
-      final mapsLink = prefs.getString('${_projectMapsLinkKeyPrefix}$projectKey') ?? '';
+      final address =
+          prefs.getString('${_projectAddressKeyPrefix}$projectKey') ?? '';
+      final mapsLink =
+          prefs.getString('${_projectMapsLinkKeyPrefix}$projectKey') ?? '';
       return {
         'address': address,
         'mapsLink': mapsLink,
@@ -142,7 +153,8 @@ class LayoutStorageService {
   }
 
   /// Save layout data directly (from plot status page with status info)
-  static Future<void> saveLayoutsDataDirect(List<Map<String, dynamic>> layouts) async {
+  static Future<void> saveLayoutsDataDirect(
+      List<Map<String, dynamic>> layouts) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = jsonEncode(layouts);
@@ -176,7 +188,7 @@ class LayoutStorageService {
                 'name': agent['name']?.toString().trim() ?? '',
               })
           .toList();
-      
+
       final jsonString = jsonEncode(agentsToSave);
       await prefs.setString(_agentsKey, jsonString);
     } catch (e) {
@@ -189,11 +201,11 @@ class LayoutStorageService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(_agentsKey);
-      
+
       if (jsonString == null || jsonString.isEmpty) {
         return [];
       }
-      
+
       final decoded = jsonDecode(jsonString) as List<dynamic>;
       return decoded.map((item) => item as Map<String, dynamic>).toList();
     } catch (e) {
