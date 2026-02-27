@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 enum ProjectSaveStatusType {
   saved,
+  notSaved,
   loading,
   saving,
   connectionLost,
@@ -46,6 +47,8 @@ class _ProjectSaveStatusState extends State<ProjectSaveStatus>
     switch (widget.status) {
       case ProjectSaveStatusType.saved:
         return _buildSavedStatus();
+      case ProjectSaveStatusType.notSaved:
+        return _buildNotSavedStatus();
       case ProjectSaveStatusType.loading:
         return _buildLoadingStatus();
       case ProjectSaveStatusType.saving:
@@ -70,6 +73,31 @@ class _ProjectSaveStatusState extends State<ProjectSaveStatus>
         const SizedBox(height: 8),
         Text(
           widget.savedTimeAgo ?? '2 minutes ago',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF5C5C5C),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNotSavedStatus() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Not saved',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFFD97706),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Recent edits pending save',
           style: GoogleFonts.inter(
             fontSize: 14,
             fontWeight: FontWeight.normal,
