@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/area_unit_service.dart';
 
 class CreateProjectDialog extends StatefulWidget {
   const CreateProjectDialog({super.key});
@@ -15,6 +16,11 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
   final FocusNode _focusNode = FocusNode();
   final SupabaseClient _supabase = Supabase.instance.client;
   bool _isCreating = false;
+  static const List<String> _areaUnitOptions = [
+    'Square Feet (sqft)',
+    'Square Meter (sqm)',
+  ];
+  String _selectedAreaUnit = AreaUnitService.defaultUnit;
 
   @override
   void initState() {
@@ -118,7 +124,8 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                         color: const Color(0xFF5D5D5D),
                       ),
                       border: InputBorder.none,
-                      contentPadding: const EdgeInsets.only(top: 12, bottom: 16),
+                      contentPadding:
+                          const EdgeInsets.only(top: 12, bottom: 16),
                     ),
                     style: GoogleFonts.inter(
                       fontSize: 16,
@@ -126,10 +133,87 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                       color: Colors.black,
                     ),
                     onSubmitted: (_) {
-                      if (_projectNameController.text.trim().isNotEmpty && !_isCreating) {
+                      if (_projectNameController.text.trim().isNotEmpty &&
+                          !_isCreating) {
                         _createProject();
                       }
                     },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            // Base area unit field
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'Base Area Unit ',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    Text(
+                      '*',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.red,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  height: 44,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA).withOpacity(0.95),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.15),
+                        blurRadius: 2,
+                        offset: const Offset(0, 0),
+                        spreadRadius: 0,
+                      ),
+                    ],
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _selectedAreaUnit,
+                      isExpanded: true,
+                      icon: const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: Color(0xFF5D5D5D),
+                      ),
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                      dropdownColor: Colors.white,
+                      items: _areaUnitOptions
+                          .map(
+                            (unit) => DropdownMenuItem<String>(
+                              value: unit,
+                              child: Text(unit),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: _isCreating
+                          ? null
+                          : (value) {
+                              if (value == null) return;
+                              setState(() {
+                                _selectedAreaUnit = value;
+                              });
+                            },
+                    ),
                   ),
                 ),
               ],
@@ -146,7 +230,8 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                   },
                   child: Container(
                     height: 36,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(8),
@@ -175,13 +260,15 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                 // Create Project button
                 GestureDetector(
                   onTap: () {
-                    if (_projectNameController.text.trim().isNotEmpty && !_isCreating) {
+                    if (_projectNameController.text.trim().isNotEmpty &&
+                        !_isCreating) {
                       _createProject();
                     }
                   },
                   child: Container(
                     height: 36,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                     decoration: BoxDecoration(
                       color: _isCreating
                           ? const Color(0xFF0C8CE9).withOpacity(0.6)
@@ -205,7 +292,8 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                             height: 16,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
                             ),
                           )
                         else ...[
@@ -278,10 +366,16 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
           .select()
           .single();
 
+      final createdProjectId = (response['id'] ?? '').toString();
+      if (createdProjectId.isNotEmpty) {
+        await AreaUnitService.setAreaUnit(createdProjectId, _selectedAreaUnit);
+      }
+
       if (mounted) {
         Navigator.of(context).pop({
           'projectId': response['id'],
           'projectName': projectName,
+          'baseAreaUnit': _selectedAreaUnit,
         });
       }
     } catch (e) {

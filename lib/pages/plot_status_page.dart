@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -12,6 +14,7 @@ import '../services/area_unit_service.dart';
 import '../utils/area_unit_utils.dart';
 import '../widgets/area_unit_selector.dart';
 import '../widgets/app_scale_metrics.dart';
+import '../widgets/project_save_status.dart';
 
 // TextInputFormatter for Indian numbering system (commas every 2 digits)
 class IndianNumberFormatter extends TextInputFormatter {
@@ -148,6 +151,7 @@ class PlotStatusPage extends StatefulWidget {
   final String? projectId;
   final Function(bool)? onPlotStatusErrorsChanged;
   final ValueChanged<bool>? onLoadingStateChanged;
+  final Function(ProjectSaveStatusType)? onSaveStatusChanged;
 
   const PlotStatusPage({
     super.key,
@@ -156,6 +160,7 @@ class PlotStatusPage extends StatefulWidget {
     this.projectId,
     this.onPlotStatusErrorsChanged,
     this.onLoadingStateChanged,
+    this.onSaveStatusChanged,
   });
 
   @override
@@ -176,6 +181,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   // Loading state
   bool _isLoading = true;
+  bool _hasUnsavedChanges = false;
+  bool _isAutoRetryInProgress = false;
+  StreamSubscription<html.Event>? _onlineSubscription;
 
   // Plot data structure
   List<Map<String, dynamic>> _allPlots = [];
@@ -252,17 +260,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     return _supportsBuyerContactNumberColumn!;
   }
 
-  // Helper function to format decimal values
-  String _formatDecimal(dynamic value) {
-    if (value == null) return '0.00';
+  String _formatWithFixedDecimals(dynamic value, int decimals) {
+    if (value == null) return '0.${'0' * decimals}';
     if (value is String) {
       final parsed = double.tryParse(value);
-      return parsed != null ? parsed.toStringAsFixed(2) : '0.00';
+      return parsed != null
+          ? parsed.toStringAsFixed(decimals)
+          : '0.${'0' * decimals}';
     }
     if (value is num) {
-      return value.toStringAsFixed(2);
+      return value.toStringAsFixed(decimals);
     }
-    return '0.00';
+    return '0.${'0' * decimals}';
   }
 
   // Helper function to format date from database (YYYY-MM-DD) to UI format (DD/MM/YYYY)
@@ -464,6 +473,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     super.initState();
     _notifyLoadingState(true);
     _loadPlotDataAndNotify();
+    _onlineSubscription = html.window.onOnline.listen((_) {
+      _retrySaveOnReconnect();
+    });
   }
 
   Future<void> _loadPlotDataAndNotify() async {
@@ -480,6 +492,28 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     print(
         '🔴 PlotStatusPage._notifyErrorState: hasErrors=$hasErrors, callback=${widget.onPlotStatusErrorsChanged != null}');
     widget.onPlotStatusErrorsChanged?.call(hasErrors);
+  }
+
+  void _setSaveStatus(ProjectSaveStatusType status) {
+    widget.onSaveStatusChanged?.call(status);
+  }
+
+  void _markUnsaved() {
+    if (_hasUnsavedChanges) return;
+    _hasUnsavedChanges = true;
+    _setSaveStatus(ProjectSaveStatusType.notSaved);
+  }
+
+  Future<void> _retrySaveOnReconnect() async {
+    if (_isAutoRetryInProgress) return;
+    if (!_hasUnsavedChanges) return;
+
+    _isAutoRetryInProgress = true;
+    try {
+      await _saveLayoutsData();
+    } finally {
+      _isAutoRetryInProgress = false;
+    }
   }
 
   @override
@@ -528,6 +562,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       controller.dispose();
     }
     _layoutTableScrollControllers.clear();
+    _onlineSubscription?.cancel();
     super.dispose();
   }
 
@@ -601,14 +636,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
               plotsData.add({
                 'plotNumber': (plot['plot_number'] ?? '').toString(),
-                'area': _formatDecimal(plot['area'] ?? 0.0),
-                'purchaseRate':
-                    _formatDecimal(plot['all_in_cost_per_sqft'] ?? 0.0),
-                'totalPlotCost': _formatDecimal(plot['total_plot_cost'] ?? 0.0),
+                'area': _formatWithFixedDecimals(plot['area'] ?? 0.0, 3),
+                'purchaseRate': _formatWithFixedDecimals(
+                    plot['all_in_cost_per_sqft'] ?? 0.0, 2),
+                'totalPlotCost':
+                    _formatWithFixedDecimals(plot['total_plot_cost'] ?? 0.0, 2),
                 'status': plotStatus,
                 'salePrice':
                     plot['sale_price'] != null && plot['sale_price'] != 0
-                        ? _formatDecimal(plot['sale_price'])
+                        ? _formatWithFixedDecimals(plot['sale_price'], 2)
                         : '',
                 'buyerName': (plot['buyer_name'] ?? '').toString(),
                 'buyerContactNumber': (plot['buyer_contact_number'] ??
@@ -1019,6 +1055,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     // Persist local draft first and mark it as the newest edit.
     await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
     await _markLocalEditTimestamp();
+    _markUnsaved();
 
     // Save to Supabase if projectId is available, otherwise save to local storage
     print(
@@ -1036,19 +1073,25 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     if (widget.projectId != null && widget.projectId!.isNotEmpty) {
       try {
+        _setSaveStatus(ProjectSaveStatusType.saving);
         await ProjectStorageService.saveProjectData(
           projectId: widget.projectId!,
           projectName: '', // Not updating project name
           layouts: layoutsToSave,
         );
         await _markRemoteSaveTimestamp();
+        _hasUnsavedChanges = false;
+        _setSaveStatus(ProjectSaveStatusType.saved);
       } catch (e) {
         print('Error saving plot status to Supabase: $e');
         // Local draft is already saved and will be retried on the next save.
+        _setSaveStatus(ProjectSaveStatusType.connectionLost);
       }
     } else {
       // Save to local storage if no projectId
       await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
+      _hasUnsavedChanges = false;
+      _setSaveStatus(ProjectSaveStatusType.saved);
     }
     print('🔷 _saveLayoutsData COMPLETE: Save finished successfully');
     _notifyErrorState();
@@ -1168,6 +1211,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     if (widget.projectId == null) return;
 
     try {
+      _markUnsaved();
+      _setSaveStatus(ProjectSaveStatusType.saving);
       final canSaveBuyerContactNumber = await _canSaveBuyerContactNumber();
       for (var layout in _layouts) {
         final layoutId = layout['layoutId'] as String?;
@@ -1217,8 +1262,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
           await _supabase.from('plots').update(updateData).eq('id', plotId);
         }
       }
+      _hasUnsavedChanges = false;
+      await _markRemoteSaveTimestamp();
+      _setSaveStatus(ProjectSaveStatusType.saved);
       print('Successfully saved plots to database');
     } catch (e) {
+      _setSaveStatus(ProjectSaveStatusType.connectionLost);
       print('Error saving plots to database: $e');
     }
   }
@@ -1497,6 +1546,36 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       decimalPart = decimalPart.length > 2
           ? decimalPart.substring(0, 2)
           : decimalPart.padRight(2, '0');
+    }
+
+    final formattedInteger = _formatIntegerWithIndianNumbering(integerPart);
+    return '$formattedInteger.$decimalPart';
+  }
+
+  String _formatAreaValue(String value) {
+    if (value.trim().isEmpty) {
+      return '0.000';
+    }
+
+    String cleaned = value
+        .trim()
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '');
+
+    String integerPart;
+    String decimalPart;
+
+    if (!cleaned.contains('.')) {
+      integerPart = cleaned.isEmpty ? '0' : cleaned;
+      decimalPart = '000';
+    } else {
+      final parts = cleaned.split('.');
+      integerPart = parts[0].isEmpty ? '0' : parts[0];
+      decimalPart = parts.length > 1 ? parts[1] : '000';
+      decimalPart = decimalPart.length > 3
+          ? decimalPart.substring(0, 3)
+          : decimalPart.padRight(3, '0');
     }
 
     final formattedInteger = _formatIntegerWithIndianNumbering(integerPart);
@@ -5583,7 +5662,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 return _buildCell(
                   width: 180,
                   content: Text(
-                    _formatAmount(area),
+                    _formatAreaValue(area),
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.normal,
@@ -6988,7 +7067,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             final areaDisplay =
                 AreaUnitUtils.areaFromSqftToDisplay(areaSqft, _isSqm);
             return Text(
-              '$_areaUnitSuffix ${_formatAmount(areaDisplay.toString())}',
+              '$_areaUnitSuffix ${_formatAreaValue(areaDisplay.toString())}',
               style: GoogleFonts.inter(
                 fontSize: 14,
                 fontWeight: FontWeight.normal,

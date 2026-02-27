@@ -8,7 +8,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import 'startup_website_view.dart';
+import '../pages/login_page.dart';
 import 'app_scale_metrics.dart';
 
 enum _AccountSettingsTab { loginDetails, reportIdentitySettings }
@@ -488,34 +488,23 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
   }
 
   Future<void> _handleLogout() async {
-    if (mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(
-          builder: (context) => const Scaffold(
-            backgroundColor: Colors.white,
-            body: SizedBox.expand(
-              child: StartupWebsiteView(),
-            ),
+    try {
+      await Supabase.instance.client.auth.signOut();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unable to logout: $error'),
+            backgroundColor: Colors.red,
           ),
-        ),
-        (route) => false,
-      );
+        );
+      }
     }
 
-    unawaited(
-      Supabase.instance.client.auth
-          .signOut()
-          .timeout(const Duration(seconds: 6))
-          .catchError((error) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Unable to logout: $error'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      }),
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const LoginPage()),
+      (route) => false,
     );
   }
 

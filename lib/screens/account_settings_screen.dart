@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -21,7 +19,7 @@ import '../pages/plot_status_page.dart';
 import '../pages/documents_page.dart';
 import '../pages/report_page.dart';
 import '../pages/settings_page.dart';
-import '../widgets/startup_website_view.dart';
+import '../pages/login_page.dart';
 import '../services/project_storage_service.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
@@ -436,6 +434,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       case NavigationPage.plotStatus:
         return PlotStatusPage(
           projectId: _projectId,
+          onSaveStatusChanged: _handleSaveStatusChanged,
           onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onLoadingStateChanged: _handlePlotStatusLoadingStateChanged,
         );
@@ -558,6 +557,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       case NavigationPage.plotStatus:
         return PlotStatusPage(
           projectId: _projectId,
+          onSaveStatusChanged: _handleSaveStatusChanged,
           onPlotStatusErrorsChanged: _handlePlotStatusErrorsChanged,
           onLoadingStateChanged: _handlePlotStatusLoadingStateChanged,
         );
@@ -707,30 +707,20 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   void _handleLogout() async {
     // Clear persisted navigation state
     await _clearPersistedNavState();
-    // Navigate immediately to avoid UI getting stuck on signOut().
+    // Sign out from Supabase
+    try {
+      await Supabase.instance.client.auth.signOut();
+    } catch (e) {
+      print('Error signing out: $e');
+    }
+
+    // Clear any session data and navigate to login page
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(
-          builder: (context) => const Scaffold(
-            backgroundColor: Colors.white,
-            body: SizedBox.expand(
-              child: StartupWebsiteView(),
-            ),
-          ),
-        ),
+        MaterialPageRoute(builder: (context) => const LoginPage()),
         (route) => false,
       );
     }
-
-    // Best-effort background signout (do not block navigation).
-    unawaited(
-      Supabase.instance.client.auth
-          .signOut()
-          .timeout(const Duration(seconds: 6))
-          .catchError((e) {
-        print('Error signing out: $e');
-      }),
-    );
   }
 
   Future<void> _handlePageChange(NavigationPage page) async {

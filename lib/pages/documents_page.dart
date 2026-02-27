@@ -33,6 +33,7 @@ class _UploadProgress {
   double progress;
   bool isCanceled;
   bool isCompleted;
+  bool isFailed;
   html.File? file;
 
   _UploadProgress({
@@ -43,6 +44,7 @@ class _UploadProgress {
     this.progress = 0.0,
     this.isCanceled = false,
     this.isCompleted = false,
+    this.isFailed = false,
     this.file,
   });
 }
@@ -387,7 +389,11 @@ class _DocumentsPageState extends State<DocumentsPage> {
             final uploadId = entry.key;
             final uploadProgress = entry.value;
 
-            if (uploadProgress.isCanceled) continue;
+            if (uploadProgress.isCanceled ||
+                uploadProgress.isCompleted ||
+                uploadProgress.isFailed) {
+              continue;
+            }
 
             try {
               final file = uploadProgress.file!;
@@ -501,7 +507,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
               debugPrint('Error uploading file ${uploadProgress.fileName}: $e');
               if (mounted) {
                 setState(() {
-                  _activeUploads.remove(uploadId);
+                  uploadProgress.isFailed = true;
                 });
               }
             }
@@ -918,6 +924,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
         .where((u) =>
             !u.isCanceled &&
             !u.isCompleted &&
+            !u.isFailed &&
             u.parentId == _currentFolderId &&
             (_searchQuery.isEmpty ||
                 u.fileName.toLowerCase().contains(_searchQuery.toLowerCase())))
@@ -3979,7 +3986,9 @@ class _UploadItemState extends State<_UploadItem>
       duration: const Duration(seconds: 2),
       vsync: this,
     );
-    if (widget.upload.progress < 100 && !widget.upload.isCanceled) {
+    if (widget.upload.progress < 100 &&
+        !widget.upload.isCanceled &&
+        !widget.upload.isFailed) {
       _rotationController.repeat();
     }
   }
@@ -3987,7 +3996,9 @@ class _UploadItemState extends State<_UploadItem>
   @override
   void didUpdateWidget(_UploadItem oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.upload.progress >= 100 || widget.upload.isCanceled) {
+    if (widget.upload.progress >= 100 ||
+        widget.upload.isCanceled ||
+        widget.upload.isFailed) {
       _rotationController.stop();
     } else if (oldWidget.upload.progress >= 100 &&
         widget.upload.progress < 100) {
@@ -4003,7 +4014,9 @@ class _UploadItemState extends State<_UploadItem>
 
   Widget _getFileIcon(String extension) {
     // For loading state, show a rotating icon
-    if (widget.upload.progress < 100 && !widget.upload.isCanceled) {
+    if (widget.upload.progress < 100 &&
+        !widget.upload.isCanceled &&
+        !widget.upload.isFailed) {
       return SizedBox(
         width: 24,
         height: 24,
@@ -4051,12 +4064,8 @@ class _UploadItemState extends State<_UploadItem>
 
   @override
   Widget build(BuildContext context) {
-    final isDesktop = MediaQuery.of(context).size.width >= 1024;
-    final isInProgress =
-        widget.upload.progress < 100 && !widget.upload.isCanceled;
-
     return Opacity(
-      opacity: (isDesktop && isInProgress) ? 0.5 : 1.0,
+      opacity: 1.0,
       child: Container(
         width: 491,
         margin: const EdgeInsets.only(bottom: 10),
@@ -4100,11 +4109,13 @@ class _UploadItemState extends State<_UploadItem>
                           GestureDetector(
                             onTap: widget.onCancel,
                             child: Text(
-                              'Cancel',
+                              widget.upload.isFailed ? 'Dismiss' : 'Cancel',
                               style: GoogleFonts.inter(
                                 fontSize: 14,
                                 fontWeight: FontWeight.normal,
-                                color: Colors.red,
+                                color: widget.upload.isFailed
+                                    ? const Color(0xFF5C5C5C)
+                                    : Colors.red,
                               ),
                             ),
                           ),
@@ -4117,26 +4128,34 @@ class _UploadItemState extends State<_UploadItem>
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(25.436),
                               child: LinearProgressIndicator(
-                                value: widget.upload.progress / 100,
+                                value: widget.upload.isFailed
+                                    ? 1.0
+                                    : widget.upload.progress / 100,
                                 minHeight: 6,
                                 backgroundColor: const Color(0xFFE0E0E0),
                                 valueColor: AlwaysStoppedAnimation<Color>(
-                                  widget.upload.isCanceled
-                                      ? Colors.grey
-                                      : const Color(0xFF0C8CE9),
+                                  widget.upload.isFailed
+                                      ? Colors.red
+                                      : (widget.upload.isCanceled
+                                          ? Colors.grey
+                                          : const Color(0xFF0C8CE9)),
                                 ),
                               ),
                             ),
                           ),
                           const SizedBox(width: 8),
                           SizedBox(
-                            width: 26,
+                            width: widget.upload.isFailed ? 44 : 26,
                             child: Text(
-                              '${widget.upload.progress.toInt()}%',
+                              widget.upload.isFailed
+                                  ? 'Failed'
+                                  : '${widget.upload.progress.toInt()}%',
                               style: GoogleFonts.inter(
                                 fontSize: 10,
                                 fontWeight: FontWeight.normal,
-                                color: Colors.black,
+                                color: widget.upload.isFailed
+                                    ? Colors.red
+                                    : Colors.black,
                               ),
                               textAlign: TextAlign.right,
                             ),

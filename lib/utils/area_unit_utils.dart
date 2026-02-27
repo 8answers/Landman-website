@@ -1,10 +1,10 @@
 /// Area unit conversion utilities.
 /// Storage is always in sqft. Display/input conversion when user selects sqm.
-/// 1 sqft = 0.092903 sqm
-/// 1 sqm = 10.7639 sqft
+/// 1 sqft = 0.09290304 sqm
+/// 1 sqm = 10.763910416709722 sqft
 class AreaUnitUtils {
-  static const double sqftToSqm = 0.092903;
-  static const double sqmToSqft = 10.7639;
+  static const double sqftToSqm = 0.09290304;
+  static const double sqmToSqft = 1.0 / sqftToSqm;
 
   /// Convert area from stored sqft to display value based on selected unit.
   static double areaFromSqftToDisplay(double sqft, bool isSqm) {
@@ -34,9 +34,11 @@ class AreaUnitUtils {
   static String unitSuffix(bool isSqm) => isSqm ? 'sqm' : 'sqft';
 
   /// Get per-area fee label for display (e.g. 'Per Sqft Fee' or 'Per Sqm Fee').
-  static String perAreaFeeLabel(bool isSqm) => isSqm ? 'Per Sqm Fee' : 'Per Sqft Fee';
+  static String perAreaFeeLabel(bool isSqm) =>
+      isSqm ? 'Per Sqm Fee' : 'Per Sqft Fee';
 
   /// Check if unit string represents sqm.
   static bool isSqm(String unit) =>
-      unit.toLowerCase().contains('meter') || unit.toLowerCase().contains('sqm');
+      unit.toLowerCase().contains('meter') ||
+      unit.toLowerCase().contains('sqm');
 }
