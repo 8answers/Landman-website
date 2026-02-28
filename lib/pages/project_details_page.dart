@@ -3451,25 +3451,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       bool managerExistsForDraft(Map<String, dynamic> draft) {
         final draftId = (draft['id'] ?? '').toString().trim();
         final draftName = (draft['name'] ?? '').toString().trim().toLowerCase();
-
-        final normalizedRows = <Map<String, dynamic>>[_expenses[0]];
-        for (int i = 1; i < _expenses.length; i++) {
-          final row = _expenses[i];
-          final item = (row['item'] ?? '').toString().trim();
-          final category = (row['category'] ?? '').toString().trim();
-          final amountNum = double.tryParse(
-                  (row['amount'] ?? '0.00').toString().replaceAll(',', '')) ??
-              0.0;
-          final hasMeaningfulData =
-              item.isNotEmpty || category.isNotEmpty || amountNum > 0.0;
-          final isDuplicatePrimaryDefaultRow =
-              item == 'Total Plot Purchasing Cost' &&
-                  category == 'Land Purchase Cost';
-          if (hasMeaningfulData && !isDuplicatePrimaryDefaultRow) {
-            normalizedRows.add(row);
-          }
-        }
-        _expenses = normalizedRows;
         for (int i = 0; i < _projectManagers.length; i++) {
           final rowId = (_projectManagers[i]['id'] ?? '').toString().trim();
           final rowName = (_projectManagerNameControllers[i]?.text ??

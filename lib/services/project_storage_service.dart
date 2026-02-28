@@ -363,35 +363,64 @@ class ProjectStorageService {
       print(
           'ProjectStorageService.saveProjectData: Update result: $updateResult');
 
-      // Save non-sellable areas - only if explicitly provided
-      if (nonSellableAreas != null) {
-        await _saveNonSellableAreas(projectId, nonSellableAreas);
-      }
+      final sectionErrors = <String>[];
 
-      // Save partners - only if explicitly provided (prevents deletion when saving from other pages)
-      // If partners is null, we don't touch existing partners in the database
-      if (partners != null) {
-        await _savePartners(projectId, partners);
-      }
-
-      // Save expenses - only if explicitly provided
+      // Save expenses first so dashboard totals stay fresh even when
+      // unrelated sections (e.g., partners/layouts) fail validation.
       if (expenses != null) {
-        await _saveExpenses(projectId, expenses);
+        try {
+          await _saveExpenses(projectId, expenses);
+        } catch (e) {
+          sectionErrors.add('expenses: $e');
+        }
       }
 
-      // Save layouts and plots
+      // Save non-sellable areas - only if explicitly provided.
+      if (nonSellableAreas != null) {
+        try {
+          await _saveNonSellableAreas(projectId, nonSellableAreas);
+        } catch (e) {
+          sectionErrors.add('non_sellable_areas: $e');
+        }
+      }
+
+      // Save partners - only if explicitly provided (prevents deletion when
+      // saving from other pages). If partners is null, do not modify them.
+      if (partners != null) {
+        try {
+          await _savePartners(projectId, partners);
+        } catch (e) {
+          sectionErrors.add('partners: $e');
+        }
+      }
+
       if (layouts != null) {
-        await _saveLayoutsAndPlots(projectId, layouts);
+        try {
+          await _saveLayoutsAndPlots(projectId, layouts);
+        } catch (e) {
+          sectionErrors.add('layouts: $e');
+        }
       }
 
-      // Save project managers
       if (projectManagers != null) {
-        await _saveProjectManagers(projectId, projectManagers);
+        try {
+          await _saveProjectManagers(projectId, projectManagers);
+        } catch (e) {
+          sectionErrors.add('project_managers: $e');
+        }
       }
 
-      // Save agents
       if (agents != null) {
-        await _saveAgents(projectId, agents);
+        try {
+          await _saveAgents(projectId, agents);
+        } catch (e) {
+          sectionErrors.add('agents: $e');
+        }
+      }
+
+      if (sectionErrors.isNotEmpty) {
+        throw Exception(
+            'Partial save failure for project $projectId -> ${sectionErrors.join(' | ')}');
       }
     } catch (e) {
       print('Error saving project data: $e');
