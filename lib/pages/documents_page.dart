@@ -3500,7 +3500,7 @@ class _StorageIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: 304,
-      height: 72,
+      height: 84,
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: const Color(0xFFF8F9FA),
@@ -3513,58 +3513,57 @@ class _StorageIndicator extends StatelessWidget {
           ),
         ],
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Storage:',
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.black,
-                  ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Storage:',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
                 ),
-                RichText(
-                  text: TextSpan(
-                    children: [
-                      if (percentage < 100)
-                        TextSpan(
-                          text: ' ',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.normal,
-                            color: const Color(0xFF5C5C5C),
-                          ),
-                        ),
+              ),
+              RichText(
+                text: TextSpan(
+                  children: [
+                    if (percentage < 100)
                       TextSpan(
-                        text: percentage.toStringAsFixed(0),
+                        text: ' ',
                         style: GoogleFonts.inter(
                           fontSize: 14,
-                          fontWeight: FontWeight.w400,
-                          color: _getPercentageColor(),
+                          fontWeight: FontWeight.normal,
+                          color: const Color(0xFF5C5C5C),
                         ),
                       ),
-                      TextSpan(
-                        text: '%',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: _getPercentageColor(),
-                        ),
+                    TextSpan(
+                      text: percentage.toStringAsFixed(0),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        color: _getPercentageColor(),
                       ),
-                    ],
-                  ),
+                    ),
+                    TextSpan(
+                      text: '%',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: _getPercentageColor(),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+              ),
+            ],
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
                 Container(
                   width: 287,
                   height: 8,
@@ -3635,10 +3634,9 @@ class _StorageIndicator extends StatelessWidget {
                       ),
                   ],
                 ),
-              ],
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
     );
   }
