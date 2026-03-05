@@ -21,6 +21,7 @@ import '../pages/report_page.dart';
 import '../pages/settings_page.dart';
 import '../pages/login_page.dart';
 import '../services/project_storage_service.dart';
+import '../utils/web_navigation_context.dart' as web_nav;
 
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({super.key});
@@ -115,6 +116,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
 
   Future<void> _restoreNavState() async {
     final prefs = await SharedPreferences.getInstance();
+    final isReload = await web_nav.isReloadNavigation();
     final forceRecentOnNextOpen =
         prefs.getBool('nav_force_recent_on_next_open') ?? false;
     final pageName = prefs.getString('nav_current_page');
@@ -122,8 +124,13 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     final projectId = prefs.getString('nav_project_id');
     final projectName = prefs.getString('nav_project_name');
 
-    if (forceRecentOnNextOpen) {
+    final shouldForceRecent = forceRecentOnNextOpen || !isReload;
+
+    if (shouldForceRecent) {
       await prefs.remove('nav_force_recent_on_next_open');
+      await prefs.setString(
+          'nav_current_page', NavigationPage.recentProjects.name);
+      await prefs.remove('nav_previous_page');
       setState(() {
         _currentPage = NavigationPage.recentProjects;
         _previousPage = null;

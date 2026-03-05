@@ -1218,11 +1218,22 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
             .replaceAll(',', '')
             .replaceAll(' ', '')) ??
         0;
+    return totalArea -
+        _totalNonSellableArea -
+        _totalAmenityArea -
+        _approvedSellingArea;
+  }
+
+  bool get _isApprovedSellingAreaExceedingTotalArea {
+    final totalArea = double.tryParse(_totalAreaController.text
+            .replaceAll(',', '')
+            .replaceAll(' ', '')) ??
+        0;
     final sellingArea = double.tryParse(_sellingAreaController.text
             .replaceAll(',', '')
             .replaceAll(' ', '')) ??
         0;
-    return totalArea - sellingArea - _totalNonSellableArea;
+    return sellingArea > totalArea && totalArea > 0;
   }
 
   double get _estimatedDevelopmentCost {
@@ -1724,7 +1735,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   }
 
   bool get _hasNonSellableSectionValidationErrors {
-    bool hasNonSellableRedShadows = false;
+    bool hasNameWithoutValue = false;
 
     for (int i = 0; i < _nonSellableAreas.length; i++) {
       final areaRaw = (_nonSellableAreaControllers[i]?.text ??
@@ -1739,49 +1750,20 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
               '')
           .trim();
 
-      if (areaValue == 0 || nameValue.isEmpty) {
-        hasNonSellableRedShadows = true;
+      if (nameValue.isNotEmpty && areaValue == 0) {
+        hasNameWithoutValue = true;
         break;
       }
     }
 
-    final totalArea = double.tryParse(_totalAreaController.text
-            .replaceAll(',', '')
-            .replaceAll(' ', '')) ??
-        0;
-    final sellingArea = double.tryParse(_sellingAreaController.text
-            .replaceAll(',', '')
-            .replaceAll(' ', '')) ??
-        0;
-    final sellingExceedsTotal = sellingArea > totalArea && totalArea > 0;
-
-    bool remainingAreaIsRed;
-    if (sellingExceedsTotal) {
-      remainingAreaIsRed = true;
-    } else if (_remainingArea == 0) {
-      remainingAreaIsRed = false;
-    } else if (_nonSellableAreas.isEmpty) {
-      remainingAreaIsRed = false;
-    } else if (_nonSellableAreas.length == 1) {
-      final singleAreaRaw = (_nonSellableAreaControllers[0]?.text ??
-              _nonSellableAreas[0]['area'] ??
-              '')
-          .replaceAll(',', '')
-          .replaceAll(' ', '')
-          .trim();
-      remainingAreaIsRed = !(singleAreaRaw.isEmpty ||
-          singleAreaRaw == '0' ||
-          singleAreaRaw == '0.0' ||
-          singleAreaRaw == '0.00');
-    } else {
-      remainingAreaIsRed = true;
-    }
-
-    return hasNonSellableRedShadows || remainingAreaIsRed;
+    final remainingAreaIsNegative = _remainingArea < 0;
+    return hasNameWithoutValue || remainingAreaIsNegative;
   }
 
   bool get _hasAmenitySectionValidationErrors {
-    if (_amenityAreas.isEmpty || !_hasAmenityAreaSectionData) return false;
+    if (_amenityAreas.isEmpty) return false;
+
+    bool hasNameWithoutValue = false;
     for (int i = 0; i < _amenityAreas.length; i++) {
       if (_isAmenityPlaceholderRow(i)) {
         continue;
@@ -1795,12 +1777,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       final nameValue =
           (_amenityNameControllers[i]?.text ?? _amenityAreas[i]['name'] ?? '')
               .trim();
-      final hasRedShadowInAreaSection = areaValue == 0 || nameValue.isEmpty;
-      if (hasRedShadowInAreaSection) {
-        return true;
+      if (nameValue.isNotEmpty && areaValue == 0) {
+        hasNameWithoutValue = true;
+        break;
       }
     }
-    return false;
+
+    final remainingAreaIsNegative = _remainingArea < 0;
+    return hasNameWithoutValue || remainingAreaIsNegative;
   }
 
   bool get _hasAmenityDataEntryValidationErrors {
@@ -2180,6 +2164,11 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_handleMainScroll);
+    final isNewProject = widget.projectId == null || widget.projectId!.isEmpty;
+    if (isNewProject) {
+      _isAmenityAreaExpanded = true;
+      _isNonSellableAreaExpanded = true;
+    }
     _aboutFocusRefreshListener = () {
       final isProjectNameFocused = _projectNameFocusNode.hasFocus;
       if (_projectNameWasFocused && !isProjectNameFocused) {
@@ -2383,6 +2372,10 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
         false;
     _hasLoadedDataOnce =
         persistedFlag || _projectsLoadedThisSession.contains(widget.projectId);
+    if (!_hasLoadedDataOnce) {
+      _isAmenityAreaExpanded = true;
+      _isNonSellableAreaExpanded = true;
+    }
     print(
         '_loadProjectData: Loaded _hasLoadedDataOnce=$_hasLoadedDataOnce, hideDefaultNonSellable=$hideDefaultNonSellable from local storage');
 
@@ -10755,512 +10748,502 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                         ),
                                                         const SizedBox(
                                                             height: 16),
-                                                        _buildAmenityAreaSectionCard(),
+                                                        GestureDetector(
+                                                          behavior:
+                                                              HitTestBehavior
+                                                                  .translucent,
+                                                          onTap: () {
+                                                            if (_isApprovedSellingAreaExceedingTotalArea ||
+                                                                _isAmenityAreaExpanded) {
+                                                              return;
+                                                            }
+                                                            setState(() {
+                                                              _isAmenityAreaExpanded =
+                                                                  true;
+                                                            });
+                                                          },
+                                                          child: Opacity(
+                                                            opacity:
+                                                                _isApprovedSellingAreaExceedingTotalArea
+                                                                    ? 0.5
+                                                                    : 1.0,
+                                                            child:
+                                                                IgnorePointer(
+                                                              ignoring:
+                                                                  _isApprovedSellingAreaExceedingTotalArea,
+                                                              child:
+                                                                  _buildAmenityAreaSectionCard(),
+                                                            ),
+                                                          ),
+                                                        ),
                                                         const SizedBox(
                                                             height: 16),
                                                         // Non-Sellable Area(s) section
-                                                        Opacity(
-                                                          opacity: ((double.tryParse(_sellingAreaController.text.replaceAll(',', '').replaceAll(
-                                                                              ' ',
-                                                                              '')) ??
-                                                                          0) >
-                                                                      (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(
-                                                                              ' ',
-                                                                              '')) ??
-                                                                          0) &&
-                                                                  (double.tryParse(_totalAreaController.text
-                                                                              .replaceAll(',', '')
-                                                                              .replaceAll(' ', '')) ??
-                                                                          0) >
-                                                                      0)
-                                                              ? 0.5
-                                                              : 1.0,
-                                                          child: IgnorePointer(
-                                                            ignoring: ((double.tryParse(_sellingAreaController.text.replaceAll(',', '').replaceAll(
-                                                                            ' ',
-                                                                            '')) ??
-                                                                        0) >
-                                                                    (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(
-                                                                            ' ',
-                                                                            '')) ??
-                                                                        0) &&
-                                                                (double.tryParse(_totalAreaController
-                                                                            .text
-                                                                            .replaceAll(',', '')
-                                                                            .replaceAll(' ', '')) ??
-                                                                        0) >
-                                                                    0),
-                                                            child: Container(
-                                                              width: double
-                                                                  .infinity,
-                                                              padding:
-                                                                  const EdgeInsets
-                                                                      .all(16),
-                                                              decoration:
-                                                                  BoxDecoration(
-                                                                color: const Color(
-                                                                    0xFFF8F9FA),
-                                                                borderRadius:
-                                                                    BorderRadius
-                                                                        .circular(
-                                                                            8),
-                                                                boxShadow: [
-                                                                  BoxShadow(
-                                                                    color: (!_isNonSellableAreaExpanded &&
-                                                                            _hasNonSellableSectionValidationErrors)
-                                                                        ? Colors
-                                                                            .red
-                                                                            .withOpacity(
-                                                                                0.6)
-                                                                        : Colors
-                                                                            .black
-                                                                            .withOpacity(0.25),
-                                                                    blurRadius:
-                                                                        2,
-                                                                    offset:
-                                                                        const Offset(
-                                                                            0,
-                                                                            0),
-                                                                    spreadRadius:
-                                                                        0,
-                                                                  ),
-                                                                ],
-                                                              ),
-                                                              child: Column(
-                                                                crossAxisAlignment:
-                                                                    CrossAxisAlignment
-                                                                        .start,
-                                                                children: [
-                                                                  Row(
-                                                                    mainAxisAlignment:
-                                                                        MainAxisAlignment
-                                                                            .spaceBetween,
-                                                                    children: [
-                                                                      Text(
-                                                                        'Non-Sellable Area(s)',
-                                                                        style: GoogleFonts
-                                                                            .inter(
-                                                                          fontSize:
-                                                                              14,
-                                                                          fontWeight:
-                                                                              FontWeight.w500,
-                                                                          color:
-                                                                              Colors.black,
+                                                        GestureDetector(
+                                                          behavior:
+                                                              HitTestBehavior
+                                                                  .translucent,
+                                                          onTap: () {
+                                                            if (_isApprovedSellingAreaExceedingTotalArea ||
+                                                                _isNonSellableAreaExpanded) {
+                                                              return;
+                                                            }
+                                                            setState(() {
+                                                              _isNonSellableAreaExpanded =
+                                                                  true;
+                                                            });
+                                                          },
+                                                          child: Opacity(
+                                                            opacity:
+                                                                _isApprovedSellingAreaExceedingTotalArea
+                                                                    ? 0.5
+                                                                    : 1.0,
+                                                            child:
+                                                                IgnorePointer(
+                                                              ignoring:
+                                                                  _isApprovedSellingAreaExceedingTotalArea,
+                                                              child: Container(
+                                                                width: double
+                                                                    .infinity,
+                                                                padding:
+                                                                    const EdgeInsets
+                                                                        .all(
+                                                                        16),
+                                                                decoration:
+                                                                    BoxDecoration(
+                                                                  color: const Color(
+                                                                      0xFFF8F9FA),
+                                                                  borderRadius:
+                                                                      BorderRadius
+                                                                          .circular(
+                                                                              8),
+                                                                  boxShadow: [
+                                                                    BoxShadow(
+                                                                      color: _hasNonSellableSectionValidationErrors
+                                                                          ? Colors.red.withOpacity(
+                                                                              0.6)
+                                                                          : Colors
+                                                                              .black
+                                                                              .withOpacity(0.25),
+                                                                      blurRadius:
+                                                                          2,
+                                                                      offset:
+                                                                          const Offset(
+                                                                              0,
+                                                                              0),
+                                                                      spreadRadius:
+                                                                          0,
+                                                                    ),
+                                                                  ],
+                                                                ),
+                                                                child: Column(
+                                                                  crossAxisAlignment:
+                                                                      CrossAxisAlignment
+                                                                          .start,
+                                                                  children: [
+                                                                    Row(
+                                                                      mainAxisAlignment:
+                                                                          MainAxisAlignment
+                                                                              .spaceBetween,
+                                                                      children: [
+                                                                        Text(
+                                                                          'Non-Sellable Area(s)',
+                                                                          style:
+                                                                              GoogleFonts.inter(
+                                                                            fontSize:
+                                                                                14,
+                                                                            fontWeight:
+                                                                                FontWeight.w500,
+                                                                            color:
+                                                                                Colors.black,
+                                                                          ),
                                                                         ),
+                                                                        _buildAreaSectionToggleIcon(
+                                                                          isExpanded:
+                                                                              _isNonSellableAreaExpanded,
+                                                                          onTap:
+                                                                              () {
+                                                                            setState(() {
+                                                                              _isNonSellableAreaExpanded = !_isNonSellableAreaExpanded;
+                                                                            });
+                                                                          },
+                                                                        ),
+                                                                      ],
+                                                                    ),
+                                                                    const SizedBox(
+                                                                        height:
+                                                                            8),
+                                                                    RichText(
+                                                                      text:
+                                                                          TextSpan(
+                                                                        children: [
+                                                                          TextSpan(
+                                                                            text:
+                                                                                'Total Non-Sellable Area: ',
+                                                                            style:
+                                                                                GoogleFonts.inter(
+                                                                              fontSize: 14,
+                                                                              fontWeight: FontWeight.w500,
+                                                                              color: const Color(0xFF5C5C5C),
+                                                                            ),
+                                                                          ),
+                                                                          TextSpan(
+                                                                            text:
+                                                                                '${_formatAreaDisplay(_totalNonSellableArea)} $_areaUnitSuffix',
+                                                                            style:
+                                                                                GoogleFonts.inter(
+                                                                              fontSize: 14,
+                                                                              fontWeight: FontWeight.w400,
+                                                                              color: const Color(0xFF5C5C5C),
+                                                                            ),
+                                                                          ),
+                                                                        ],
                                                                       ),
-                                                                      _buildAreaSectionToggleIcon(
-                                                                        isExpanded:
-                                                                            _isNonSellableAreaExpanded,
+                                                                    ),
+                                                                    if (_isNonSellableAreaExpanded) ...[
+                                                                      // Non-sellable area entries
+                                                                      ..._nonSellableAreas
+                                                                          .asMap()
+                                                                          .entries
+                                                                          .map(
+                                                                              (entry) {
+                                                                        final index =
+                                                                            entry.key;
+                                                                        return Padding(
+                                                                          padding: EdgeInsets.only(
+                                                                              top: 8,
+                                                                              bottom: index == _nonSellableAreas.length - 1 ? 0 : 0),
+                                                                          child:
+                                                                              Row(
+                                                                            children: [
+                                                                              // Area field
+                                                                              _buildFocusAwareInputContainer(
+                                                                                focusNode: _nonSellableAreaFocusNodes.putIfAbsent(
+                                                                                  index,
+                                                                                  () => FocusNode(),
+                                                                                ),
+                                                                                width: 184,
+                                                                                height: 40,
+                                                                                backgroundColor: Colors.white,
+                                                                                defaultShadowColor: (() {
+                                                                                  final raw = (_nonSellableAreas[index]['area'] ?? '').toString().replaceAll(',', '').replaceAll(' ', '').trim();
+                                                                                  return (raw.isEmpty || raw == '0' || raw == '0.0' || raw == '0.00') ? Colors.red : Colors.black.withOpacity(0.15);
+                                                                                })(),
+                                                                                onFocusLost: () {
+                                                                                  final controller = _nonSellableAreaControllers[index];
+                                                                                  if (controller == null) return;
+                                                                                  final cleaned = controller.text.replaceAll(',', '').replaceAll(' ', '');
+                                                                                  final formatted = _formatAmount(cleaned, decimalPlaces: 3);
+                                                                                  controller.value = TextEditingValue(
+                                                                                    text: formatted,
+                                                                                    selection: TextSelection.collapsed(offset: formatted.length),
+                                                                                  );
+                                                                                  setState(() {
+                                                                                    _nonSellableAreas[index]['area'] = formatted.replaceAll(',', '');
+                                                                                  });
+                                                                                  _onDataChanged();
+                                                                                },
+                                                                                child: Center(
+                                                                                  child: Row(
+                                                                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                                                                    children: [
+                                                                                      Expanded(
+                                                                                        child: Builder(
+                                                                                          builder: (context) {
+                                                                                            if (_nonSellableAreaControllers[index] == null) {
+                                                                                              _nonSellableAreaControllers[index] = TextEditingController();
+                                                                                            }
+                                                                                            return DecimalInputField(
+                                                                                              hintText: '0',
+                                                                                              controller: _nonSellableAreaControllers[index]!,
+                                                                                              focusNode: _nonSellableAreaFocusNodes[index],
+                                                                                              decimalPlaces: 3,
+                                                                                              inputFormatters: [
+                                                                                                IndianNumberFormatter(maxIntegerDigits: 9)
+                                                                                              ],
+                                                                                              onTap: () {
+                                                                                                final cleaned = _nonSellableAreaControllers[index]!.text.replaceAll(',', '').replaceAll(' ', '').trim();
+                                                                                                if (cleaned == '0' || cleaned == '0.00') {
+                                                                                                  _nonSellableAreaControllers[index]!.text = '';
+                                                                                                  _nonSellableAreaControllers[index]!.selection = TextSelection.collapsed(offset: 0);
+                                                                                                  setState(() {});
+                                                                                                }
+                                                                                              },
+                                                                                              onChanged: (value) {
+                                                                                                final rawValue = value.replaceAll(',', '').replaceAll(' ', '');
+                                                                                                setState(() {
+                                                                                                  _nonSellableAreas[index]['area'] = rawValue.isEmpty ? '0.00' : rawValue;
+                                                                                                });
+                                                                                                _onDataChanged();
+                                                                                              },
+                                                                                              onEditingComplete: () {
+                                                                                                final cleaned = _nonSellableAreaControllers[index]!.text.replaceAll(',', '').replaceAll(' ', '');
+                                                                                                final formatted = _formatAmount(cleaned, decimalPlaces: 3);
+                                                                                                _nonSellableAreaFocusNodes[index]?.unfocus();
+                                                                                                _nonSellableAreaControllers[index]!.value = TextEditingValue(
+                                                                                                  text: formatted,
+                                                                                                  selection: TextSelection.collapsed(offset: formatted.length),
+                                                                                                );
+                                                                                                setState(() {
+                                                                                                  _nonSellableAreas[index]['area'] = formatted.replaceAll(',', '');
+                                                                                                });
+                                                                                                _onDataChanged();
+                                                                                              },
+                                                                                              textInputAction: TextInputAction.done,
+                                                                                              contentPadding: const EdgeInsets.only(left: 0, right: 8, top: 8, bottom: 8),
+                                                                                            );
+                                                                                          },
+                                                                                        ),
+                                                                                      ),
+                                                                                      Padding(
+                                                                                        padding: const EdgeInsets.only(left: 8),
+                                                                                        child: Text(
+                                                                                          _areaUnitSuffix,
+                                                                                          style: GoogleFonts.inter(
+                                                                                            fontSize: 14,
+                                                                                            fontWeight: FontWeight.normal,
+                                                                                            color: const Color(0xFF5C5C5C),
+                                                                                          ),
+                                                                                        ),
+                                                                                      ),
+                                                                                    ],
+                                                                                  ),
+                                                                                ),
+                                                                              ),
+                                                                              const SizedBox(width: 8),
+                                                                              // Name field
+                                                                              _buildFocusAwareInputContainer(
+                                                                                focusNode: _nonSellableNameFocusNodes.putIfAbsent(
+                                                                                  index,
+                                                                                  () => FocusNode(),
+                                                                                ),
+                                                                                width: 250,
+                                                                                height: 40,
+                                                                                backgroundColor: Colors.white,
+                                                                                defaultShadowColor: (_nonSellableAreas[index]['name']?.isEmpty ?? true) ? Colors.red : Colors.black.withOpacity(0.15),
+                                                                                onFocusLost: _onDataChanged,
+                                                                                child: Align(
+                                                                                  alignment: Alignment.centerLeft,
+                                                                                  child: TextField(
+                                                                                    textAlignVertical: TextAlignVertical.top,
+                                                                                    focusNode: _nonSellableNameFocusNodes[index],
+                                                                                    controller: _nonSellableNameControllers[index],
+                                                                                    textInputAction: TextInputAction.done,
+                                                                                    onChanged: (value) {
+                                                                                      setState(() {
+                                                                                        _nonSellableAreas[index]['name'] = value;
+                                                                                      });
+                                                                                      _onDataChanged();
+                                                                                    },
+                                                                                    onEditingComplete: () {
+                                                                                      _nonSellableNameFocusNodes[index]?.unfocus();
+                                                                                      _onDataChanged();
+                                                                                    },
+                                                                                    decoration: InputDecoration(
+                                                                                      hintText: 'Roads & Utilities',
+                                                                                      hintStyle: GoogleFonts.inter(
+                                                                                        fontSize: 14,
+                                                                                        fontWeight: FontWeight.w500,
+                                                                                        color: const Color.fromARGB(191, 173, 173, 173),
+                                                                                      ),
+                                                                                      border: InputBorder.none,
+                                                                                      contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                                                                                      isDense: true,
+                                                                                      alignLabelWithHint: false,
+                                                                                    ),
+                                                                                    style: GoogleFonts.inter(
+                                                                                      fontSize: 14,
+                                                                                      fontWeight: FontWeight.w500,
+                                                                                      color: Colors.black,
+                                                                                    ),
+                                                                                    maxLines: 1,
+                                                                                    inputFormatters: [
+                                                                                      FilteringTextInputFormatter.singleLineFormatter,
+                                                                                    ],
+                                                                                  ),
+                                                                                ),
+                                                                              ),
+                                                                              const SizedBox(width: 8),
+                                                                              GestureDetector(
+                                                                                onTap: () {
+                                                                                  setState(() {
+                                                                                    _nonSellableNameControllers[index]?.dispose();
+                                                                                    _nonSellableAreaControllers[index]?.dispose();
+                                                                                    _nonSellableNameFocusNodes[index]?.dispose();
+                                                                                    _nonSellableAreaFocusNodes[index]?.dispose();
+
+                                                                                    _nonSellableAreas.removeAt(index);
+
+                                                                                    final oldNameControllers = Map<int, TextEditingController>.from(_nonSellableNameControllers);
+                                                                                    final oldAreaControllers = Map<int, TextEditingController>.from(_nonSellableAreaControllers);
+                                                                                    final oldNameFocusNodes = Map<int, FocusNode>.from(_nonSellableNameFocusNodes);
+                                                                                    final oldAreaFocusNodes = Map<int, FocusNode>.from(_nonSellableAreaFocusNodes);
+
+                                                                                    _nonSellableNameControllers.clear();
+                                                                                    _nonSellableAreaControllers.clear();
+                                                                                    _nonSellableNameFocusNodes.clear();
+                                                                                    _nonSellableAreaFocusNodes.clear();
+
+                                                                                    for (int i = 0; i < _nonSellableAreas.length; i++) {
+                                                                                      final sourceIndex = i < index ? i : i + 1;
+                                                                                      _nonSellableNameControllers[i] = oldNameControllers[sourceIndex]!;
+                                                                                      _nonSellableAreaControllers[i] = oldAreaControllers[sourceIndex]!;
+                                                                                      _nonSellableNameFocusNodes[i] = oldNameFocusNodes[sourceIndex]!;
+                                                                                      _nonSellableAreaFocusNodes[i] = oldAreaFocusNodes[sourceIndex]!;
+                                                                                    }
+                                                                                  });
+
+                                                                                  if (_nonSellableAreas.isEmpty) {
+                                                                                    _setHideDefaultNonSellableTemplate(true);
+                                                                                  }
+                                                                                  _onDataChanged();
+                                                                                },
+                                                                                child: Container(
+                                                                                  height: 36,
+                                                                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                                                                  decoration: BoxDecoration(
+                                                                                    color: Colors.white,
+                                                                                    borderRadius: BorderRadius.circular(8),
+                                                                                    boxShadow: [
+                                                                                      BoxShadow(
+                                                                                        color: Colors.black.withOpacity(0.25),
+                                                                                        blurRadius: 2,
+                                                                                        offset: const Offset(0, 0),
+                                                                                        spreadRadius: 0,
+                                                                                      ),
+                                                                                    ],
+                                                                                  ),
+                                                                                  child: Center(
+                                                                                    child: Text(
+                                                                                      'Remove',
+                                                                                      style: GoogleFonts.inter(
+                                                                                        fontSize: 14,
+                                                                                        fontWeight: FontWeight.normal,
+                                                                                        color: Colors.red,
+                                                                                      ),
+                                                                                    ),
+                                                                                  ),
+                                                                                ),
+                                                                              ),
+                                                                            ],
+                                                                          ),
+                                                                        );
+                                                                      }),
+                                                                      const SizedBox(
+                                                                          height:
+                                                                              8),
+                                                                      // Total Remaining Area
+                                                                      Row(
+                                                                        children: [
+                                                                          Text(
+                                                                            'Remaining Area: ',
+                                                                            style:
+                                                                                GoogleFonts.inter(
+                                                                              fontSize: 14,
+                                                                              fontWeight: FontWeight.w500,
+                                                                              color: _remainingArea != 0 ? Colors.red : const Color(0xFF06AB00),
+                                                                            ),
+                                                                          ),
+                                                                          Text(
+                                                                            _remainingArea < 0
+                                                                                ? '${_formatAreaDisplay(_remainingArea)} $_areaUnitSuffix [Exceeding Total Area ($_areaUnitSuffix)]'
+                                                                                : '${_formatAreaDisplay(_remainingArea)} $_areaUnitSuffix',
+                                                                            style:
+                                                                                GoogleFonts.inter(
+                                                                              fontSize: 14,
+                                                                              fontWeight: FontWeight.normal,
+                                                                              color: _remainingArea != 0 ? Colors.red : const Color(0xFF06AB00),
+                                                                            ),
+                                                                          ),
+                                                                        ],
+                                                                      ),
+                                                                      const SizedBox(
+                                                                          height:
+                                                                              8),
+                                                                      // Add Non-Sellable Area button
+                                                                      GestureDetector(
                                                                         onTap:
                                                                             () {
                                                                           setState(
                                                                               () {
-                                                                            _isNonSellableAreaExpanded =
-                                                                                !_isNonSellableAreaExpanded;
+                                                                            final newIndex =
+                                                                                _nonSellableAreas.length;
+                                                                            _nonSellableAreas.add({
+                                                                              'name': '',
+                                                                              'area': '0',
+                                                                            });
+                                                                            _nonSellableNameControllers[newIndex] =
+                                                                                TextEditingController();
+                                                                            _nonSellableAreaControllers[newIndex] =
+                                                                                TextEditingController();
+                                                                            _nonSellableNameFocusNodes[newIndex] =
+                                                                                FocusNode();
+                                                                            _nonSellableAreaFocusNodes[newIndex] =
+                                                                                FocusNode();
                                                                           });
+                                                                          _onDataChanged();
                                                                         },
-                                                                      ),
-                                                                    ],
-                                                                  ),
-                                                                  const SizedBox(
-                                                                      height:
-                                                                          8),
-                                                                  RichText(
-                                                                    text:
-                                                                        TextSpan(
-                                                                      children: [
-                                                                        TextSpan(
-                                                                          text:
-                                                                              'Total Non-Sellable Area: ',
-                                                                          style:
-                                                                              GoogleFonts.inter(
-                                                                            fontSize:
-                                                                                14,
-                                                                            fontWeight:
-                                                                                FontWeight.w500,
-                                                                            color:
-                                                                                const Color(0xFF5C5C5C),
-                                                                          ),
-                                                                        ),
-                                                                        TextSpan(
-                                                                          text:
-                                                                              '${_formatAreaDisplay(_totalNonSellableArea)} $_areaUnitSuffix',
-                                                                          style:
-                                                                              GoogleFonts.inter(
-                                                                            fontSize:
-                                                                                14,
-                                                                            fontWeight:
-                                                                                FontWeight.w400,
-                                                                            color:
-                                                                                const Color(0xFF5C5C5C),
-                                                                          ),
-                                                                        ),
-                                                                      ],
-                                                                    ),
-                                                                  ),
-                                                                  if (_isNonSellableAreaExpanded) ...[
-                                                                    // Non-sellable area entries
-                                                                    ..._nonSellableAreas
-                                                                        .asMap()
-                                                                        .entries
-                                                                        .map(
-                                                                            (entry) {
-                                                                      final index =
-                                                                          entry
-                                                                              .key;
-                                                                      return Padding(
-                                                                        padding: EdgeInsets.only(
-                                                                            top:
-                                                                                8,
-                                                                            bottom: index == _nonSellableAreas.length - 1
-                                                                                ? 0
-                                                                                : 0),
                                                                         child:
-                                                                            Row(
-                                                                          children: [
-                                                                            // Area field
-                                                                            _buildFocusAwareInputContainer(
-                                                                              focusNode: _nonSellableAreaFocusNodes.putIfAbsent(
-                                                                                index,
-                                                                                () => FocusNode(),
+                                                                            Container(
+                                                                          height:
+                                                                              36,
+                                                                          padding: const EdgeInsets
+                                                                              .symmetric(
+                                                                              horizontal: 8),
+                                                                          decoration:
+                                                                              BoxDecoration(
+                                                                            color:
+                                                                                const Color(0xFF0C8CE9),
+                                                                            borderRadius:
+                                                                                BorderRadius.circular(8),
+                                                                            boxShadow: [
+                                                                              BoxShadow(
+                                                                                color: Colors.black.withOpacity(0.25),
+                                                                                blurRadius: 2,
+                                                                                offset: const Offset(0, 0),
+                                                                                spreadRadius: 0,
                                                                               ),
-                                                                              width: 184,
-                                                                              height: 40,
-                                                                              backgroundColor: Colors.white,
-                                                                              defaultShadowColor: (() {
-                                                                                final raw = (_nonSellableAreas[index]['area'] ?? '').toString().replaceAll(',', '').replaceAll(' ', '').trim();
-                                                                                return (raw.isEmpty || raw == '0' || raw == '0.0' || raw == '0.00') ? Colors.red : Colors.black.withOpacity(0.15);
-                                                                              })(),
-                                                                              onFocusLost: () {
-                                                                                final controller = _nonSellableAreaControllers[index];
-                                                                                if (controller == null) return;
-                                                                                final cleaned = controller.text.replaceAll(',', '').replaceAll(' ', '');
-                                                                                final formatted = _formatAmount(cleaned, decimalPlaces: 3);
-                                                                                controller.value = TextEditingValue(
-                                                                                  text: formatted,
-                                                                                  selection: TextSelection.collapsed(offset: formatted.length),
-                                                                                );
-                                                                                setState(() {
-                                                                                  _nonSellableAreas[index]['area'] = formatted.replaceAll(',', '');
-                                                                                });
-                                                                                _onDataChanged();
-                                                                              },
-                                                                              child: Center(
-                                                                                child: Row(
-                                                                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                                                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                                                                  children: [
-                                                                                    Expanded(
-                                                                                      child: Builder(
-                                                                                        builder: (context) {
-                                                                                          if (_nonSellableAreaControllers[index] == null) {
-                                                                                            _nonSellableAreaControllers[index] = TextEditingController();
-                                                                                          }
-                                                                                          return DecimalInputField(
-                                                                                            hintText: '0',
-                                                                                            controller: _nonSellableAreaControllers[index]!,
-                                                                                            focusNode: _nonSellableAreaFocusNodes[index],
-                                                                                            decimalPlaces: 3,
-                                                                                            inputFormatters: [
-                                                                                              IndianNumberFormatter(maxIntegerDigits: 9)
-                                                                                            ],
-                                                                                            onTap: () {
-                                                                                              final cleaned = _nonSellableAreaControllers[index]!.text.replaceAll(',', '').replaceAll(' ', '').trim();
-                                                                                              if (cleaned == '0' || cleaned == '0.00') {
-                                                                                                _nonSellableAreaControllers[index]!.text = '';
-                                                                                                _nonSellableAreaControllers[index]!.selection = TextSelection.collapsed(offset: 0);
-                                                                                                setState(() {});
-                                                                                              }
-                                                                                            },
-                                                                                            onChanged: (value) {
-                                                                                              final rawValue = value.replaceAll(',', '').replaceAll(' ', '');
-                                                                                              setState(() {
-                                                                                                _nonSellableAreas[index]['area'] = rawValue.isEmpty ? '0.00' : rawValue;
-                                                                                              });
-                                                                                              _onDataChanged();
-                                                                                            },
-                                                                                            onEditingComplete: () {
-                                                                                              final cleaned = _nonSellableAreaControllers[index]!.text.replaceAll(',', '').replaceAll(' ', '');
-                                                                                              final formatted = _formatAmount(cleaned, decimalPlaces: 3);
-                                                                                              _nonSellableAreaFocusNodes[index]?.unfocus();
-                                                                                              _nonSellableAreaControllers[index]!.value = TextEditingValue(
-                                                                                                text: formatted,
-                                                                                                selection: TextSelection.collapsed(offset: formatted.length),
-                                                                                              );
-                                                                                              setState(() {
-                                                                                                _nonSellableAreas[index]['area'] = formatted.replaceAll(',', '');
-                                                                                              });
-                                                                                              _onDataChanged();
-                                                                                            },
-                                                                                            textInputAction: TextInputAction.done,
-                                                                                            contentPadding: const EdgeInsets.only(left: 0, right: 8, top: 8, bottom: 8),
-                                                                                          );
-                                                                                        },
-                                                                                      ),
-                                                                                    ),
-                                                                                    Padding(
-                                                                                      padding: const EdgeInsets.only(left: 8),
-                                                                                      child: Text(
-                                                                                        _areaUnitSuffix,
-                                                                                        style: GoogleFonts.inter(
-                                                                                          fontSize: 14,
-                                                                                          fontWeight: FontWeight.normal,
-                                                                                          color: const Color(0xFF5C5C5C),
-                                                                                        ),
-                                                                                      ),
-                                                                                    ),
-                                                                                  ],
-                                                                                ),
-                                                                              ),
-                                                                            ),
-                                                                            const SizedBox(width: 8),
-                                                                            // Name field
-                                                                            _buildFocusAwareInputContainer(
-                                                                              focusNode: _nonSellableNameFocusNodes.putIfAbsent(
-                                                                                index,
-                                                                                () => FocusNode(),
-                                                                              ),
-                                                                              width: 250,
-                                                                              height: 40,
-                                                                              backgroundColor: Colors.white,
-                                                                              defaultShadowColor: (_nonSellableAreas[index]['name']?.isEmpty ?? true) ? Colors.red : Colors.black.withOpacity(0.15),
-                                                                              onFocusLost: _onDataChanged,
-                                                                              child: Align(
-                                                                                alignment: Alignment.centerLeft,
-                                                                                child: TextField(
-                                                                                  textAlignVertical: TextAlignVertical.top,
-                                                                                  focusNode: _nonSellableNameFocusNodes[index],
-                                                                                  controller: _nonSellableNameControllers[index],
-                                                                                  textInputAction: TextInputAction.done,
-                                                                                  onChanged: (value) {
-                                                                                    setState(() {
-                                                                                      _nonSellableAreas[index]['name'] = value;
-                                                                                    });
-                                                                                    _onDataChanged();
-                                                                                  },
-                                                                                  onEditingComplete: () {
-                                                                                    _nonSellableNameFocusNodes[index]?.unfocus();
-                                                                                    _onDataChanged();
-                                                                                  },
-                                                                                  decoration: InputDecoration(
-                                                                                    hintText: 'Roads & Utilities',
-                                                                                    hintStyle: GoogleFonts.inter(
-                                                                                      fontSize: 14,
-                                                                                      fontWeight: FontWeight.w500,
-                                                                                      color: const Color.fromARGB(191, 173, 173, 173),
-                                                                                    ),
-                                                                                    border: InputBorder.none,
-                                                                                    contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                                                                                    isDense: true,
-                                                                                    alignLabelWithHint: false,
-                                                                                  ),
-                                                                                  style: GoogleFonts.inter(
-                                                                                    fontSize: 14,
-                                                                                    fontWeight: FontWeight.w500,
-                                                                                    color: Colors.black,
-                                                                                  ),
-                                                                                  maxLines: 1,
-                                                                                  inputFormatters: [
-                                                                                    FilteringTextInputFormatter.singleLineFormatter,
-                                                                                  ],
-                                                                                ),
-                                                                              ),
-                                                                            ),
-                                                                            const SizedBox(width: 8),
-                                                                            GestureDetector(
-                                                                              onTap: () {
-                                                                                setState(() {
-                                                                                  _nonSellableNameControllers[index]?.dispose();
-                                                                                  _nonSellableAreaControllers[index]?.dispose();
-                                                                                  _nonSellableNameFocusNodes[index]?.dispose();
-                                                                                  _nonSellableAreaFocusNodes[index]?.dispose();
-
-                                                                                  _nonSellableAreas.removeAt(index);
-
-                                                                                  final oldNameControllers = Map<int, TextEditingController>.from(_nonSellableNameControllers);
-                                                                                  final oldAreaControllers = Map<int, TextEditingController>.from(_nonSellableAreaControllers);
-                                                                                  final oldNameFocusNodes = Map<int, FocusNode>.from(_nonSellableNameFocusNodes);
-                                                                                  final oldAreaFocusNodes = Map<int, FocusNode>.from(_nonSellableAreaFocusNodes);
-
-                                                                                  _nonSellableNameControllers.clear();
-                                                                                  _nonSellableAreaControllers.clear();
-                                                                                  _nonSellableNameFocusNodes.clear();
-                                                                                  _nonSellableAreaFocusNodes.clear();
-
-                                                                                  for (int i = 0; i < _nonSellableAreas.length; i++) {
-                                                                                    final sourceIndex = i < index ? i : i + 1;
-                                                                                    _nonSellableNameControllers[i] = oldNameControllers[sourceIndex]!;
-                                                                                    _nonSellableAreaControllers[i] = oldAreaControllers[sourceIndex]!;
-                                                                                    _nonSellableNameFocusNodes[i] = oldNameFocusNodes[sourceIndex]!;
-                                                                                    _nonSellableAreaFocusNodes[i] = oldAreaFocusNodes[sourceIndex]!;
-                                                                                  }
-                                                                                });
-
-                                                                                if (_nonSellableAreas.isEmpty) {
-                                                                                  _setHideDefaultNonSellableTemplate(true);
-                                                                                }
-                                                                                _onDataChanged();
-                                                                              },
-                                                                              child: Container(
-                                                                                height: 36,
-                                                                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                                                                                decoration: BoxDecoration(
+                                                                            ],
+                                                                          ),
+                                                                          child:
+                                                                              Row(
+                                                                            mainAxisSize:
+                                                                                MainAxisSize.min,
+                                                                            children: [
+                                                                              Text(
+                                                                                'Add Non-Sellable Area',
+                                                                                style: GoogleFonts.inter(
+                                                                                  fontSize: 14,
+                                                                                  fontWeight: FontWeight.normal,
                                                                                   color: Colors.white,
-                                                                                  borderRadius: BorderRadius.circular(8),
-                                                                                  boxShadow: [
-                                                                                    BoxShadow(
-                                                                                      color: Colors.black.withOpacity(0.25),
-                                                                                      blurRadius: 2,
-                                                                                      offset: const Offset(0, 0),
-                                                                                      spreadRadius: 0,
-                                                                                    ),
-                                                                                  ],
-                                                                                ),
-                                                                                child: Center(
-                                                                                  child: Text(
-                                                                                    'Remove',
-                                                                                    style: GoogleFonts.inter(
-                                                                                      fontSize: 14,
-                                                                                      fontWeight: FontWeight.normal,
-                                                                                      color: Colors.red,
-                                                                                    ),
-                                                                                  ),
                                                                                 ),
                                                                               ),
-                                                                            ),
-                                                                          ],
-                                                                        ),
-                                                                      );
-                                                                    }),
-                                                                    const SizedBox(
-                                                                        height:
-                                                                            8),
-                                                                    // Total Remaining Area
-                                                                    Row(
-                                                                      children: [
-                                                                        Text(
-                                                                          'Remaining Area: ',
-                                                                          style:
-                                                                              GoogleFonts.inter(
-                                                                            fontSize:
-                                                                                14,
-                                                                            fontWeight:
-                                                                                FontWeight.w500,
-                                                                            color: ((double.tryParse(_sellingAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) && (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > 0)
-                                                                                ? Colors.red // Red when showing NA
-                                                                                : (_remainingArea != 0
-                                                                                    ? Colors.red // Red when remaining area is not 0
-                                                                                    : const Color(0xFF06AB00)), // Green when remaining area is exactly 0
-                                                                          ),
-                                                                        ),
-                                                                        Text(
-                                                                          ((double.tryParse(_sellingAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) && (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > 0)
-                                                                              ? 'NA'
-                                                                              : (_remainingArea < 0 ? '${_formatAreaDisplay(_remainingArea)} $_areaUnitSuffix [Exceeding Approved Selling Area ($_areaUnitSuffix)]' : '${_formatAreaDisplay(_remainingArea)} $_areaUnitSuffix'),
-                                                                          style:
-                                                                              GoogleFonts.inter(
-                                                                            fontSize:
-                                                                                14,
-                                                                            fontWeight:
-                                                                                FontWeight.normal,
-                                                                            color: ((double.tryParse(_sellingAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) && (double.tryParse(_totalAreaController.text.replaceAll(',', '').replaceAll(' ', '')) ?? 0) > 0)
-                                                                                ? Colors.red // Red when showing NA
-                                                                                : (_remainingArea != 0
-                                                                                    ? Colors.red // Red when remaining area is not 0
-                                                                                    : const Color(0xFF06AB00)), // Green when remaining area is exactly 0
-                                                                          ),
-                                                                        ),
-                                                                      ],
-                                                                    ),
-                                                                    const SizedBox(
-                                                                        height:
-                                                                            8),
-                                                                    // Add Non-Sellable Area button
-                                                                    GestureDetector(
-                                                                      onTap:
-                                                                          () {
-                                                                        setState(
-                                                                            () {
-                                                                          final newIndex =
-                                                                              _nonSellableAreas.length;
-                                                                          _nonSellableAreas
-                                                                              .add({
-                                                                            'name':
-                                                                                '',
-                                                                            'area':
-                                                                                '0',
-                                                                          });
-                                                                          _nonSellableNameControllers[newIndex] =
-                                                                              TextEditingController();
-                                                                          _nonSellableAreaControllers[newIndex] =
-                                                                              TextEditingController();
-                                                                          _nonSellableNameFocusNodes[newIndex] =
-                                                                              FocusNode();
-                                                                          _nonSellableAreaFocusNodes[newIndex] =
-                                                                              FocusNode();
-                                                                        });
-                                                                        _onDataChanged();
-                                                                      },
-                                                                      child:
-                                                                          Container(
-                                                                        height:
-                                                                            36,
-                                                                        padding: const EdgeInsets
-                                                                            .symmetric(
-                                                                            horizontal:
-                                                                                8),
-                                                                        decoration:
-                                                                            BoxDecoration(
-                                                                          color:
-                                                                              const Color(0xFF0C8CE9),
-                                                                          borderRadius:
-                                                                              BorderRadius.circular(8),
-                                                                          boxShadow: [
-                                                                            BoxShadow(
-                                                                              color: Colors.black.withOpacity(0.25),
-                                                                              blurRadius: 2,
-                                                                              offset: const Offset(0, 0),
-                                                                              spreadRadius: 0,
-                                                                            ),
-                                                                          ],
-                                                                        ),
-                                                                        child:
-                                                                            Row(
-                                                                          mainAxisSize:
-                                                                              MainAxisSize.min,
-                                                                          children: [
-                                                                            Text(
-                                                                              'Add Non-Sellable Area',
-                                                                              style: GoogleFonts.inter(
-                                                                                fontSize: 14,
-                                                                                fontWeight: FontWeight.normal,
-                                                                                color: Colors.white,
-                                                                              ),
-                                                                            ),
-                                                                            const SizedBox(width: 8),
-                                                                            SvgPicture.asset(
-                                                                              'assets/images/Cretae_new_projet_white.svg',
-                                                                              width: 12,
-                                                                              height: 12,
-                                                                              fit: BoxFit.contain,
-                                                                              placeholderBuilder: (context) => const SizedBox(
+                                                                              const SizedBox(width: 8),
+                                                                              SvgPicture.asset(
+                                                                                'assets/images/Cretae_new_projet_white.svg',
                                                                                 width: 12,
                                                                                 height: 12,
-                                                                              ),
-                                                                              errorBuilder: (context, error, stackTrace) {
-                                                                                return const SizedBox(
+                                                                                fit: BoxFit.contain,
+                                                                                placeholderBuilder: (context) => const SizedBox(
                                                                                   width: 12,
                                                                                   height: 12,
-                                                                                  child: Icon(Icons.add, size: 12, color: Colors.white),
-                                                                                );
-                                                                              },
-                                                                            ),
-                                                                          ],
+                                                                                ),
+                                                                                errorBuilder: (context, error, stackTrace) {
+                                                                                  return const SizedBox(
+                                                                                    width: 12,
+                                                                                    height: 12,
+                                                                                    child: Icon(Icons.add, size: 12, color: Colors.white),
+                                                                                  );
+                                                                                },
+                                                                              ),
+                                                                            ],
+                                                                          ),
                                                                         ),
                                                                       ),
-                                                                    ),
+                                                                    ],
                                                                   ],
-                                                                ],
+                                                                ),
                                                               ),
                                                             ),
                                                           ),
@@ -11375,10 +11358,9 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
         borderRadius: BorderRadius.circular(8),
         boxShadow: [
           BoxShadow(
-            color:
-                (!_isAmenityAreaExpanded && _hasAmenitySectionValidationErrors)
-                    ? Colors.red.withOpacity(0.6)
-                    : Colors.black.withOpacity(0.25),
+            color: _hasAmenitySectionValidationErrors
+                ? Colors.red.withOpacity(0.6)
+                : Colors.black.withOpacity(0.25),
             blurRadius: 2,
             offset: const Offset(0, 0),
             spreadRadius: 0,
@@ -11678,15 +11660,21 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
-                      color: const Color(0xFF06AB00),
+                      color: _remainingArea == 0
+                          ? const Color(0xFF06AB00)
+                          : Colors.red,
                     ),
                   ),
                   TextSpan(
-                    text: '0 $areaUnit',
+                    text: _remainingArea < 0
+                        ? '${_formatAreaDisplay(_remainingArea)} $areaUnit [Exceeding Total Area ($areaUnit)]'
+                        : '${_formatAreaDisplay(_remainingArea)} $areaUnit',
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w400,
-                      color: const Color(0xFF06AB00),
+                      color: _remainingArea == 0
+                          ? const Color(0xFF06AB00)
+                          : Colors.red,
                     ),
                   ),
                 ],
@@ -11755,7 +11743,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   Widget _buildAmenityAreaContent() {
     final totalAmenityArea = _totalAmenityArea;
     final totalAllocatedArea = _totalAmenityArea;
-    final totalRemainingArea = totalAmenityArea - totalAllocatedArea;
+    final totalRemainingArea = _remainingArea;
+    final hasNegativeRemainingArea = totalRemainingArea < 0;
     final totalPlotCost = _totalAmenityPlotCost;
 
     return Column(
@@ -11880,17 +11869,22 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   style: GoogleFonts.inter(
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
-                    color: const Color(0xFF06AB00),
+                    color: hasNegativeRemainingArea
+                        ? Colors.red
+                        : const Color(0xFF06AB00),
                   ),
                   children: [
                     const TextSpan(text: 'Total Remaining Area: '),
                     TextSpan(
-                      text:
-                          '${_formatAreaDisplay(totalRemainingArea)} $_areaUnitSuffix',
+                      text: hasNegativeRemainingArea
+                          ? '${_formatAreaDisplay(totalRemainingArea)} $_areaUnitSuffix [Exceeding Total Area ($_areaUnitSuffix)]'
+                          : '${_formatAreaDisplay(totalRemainingArea)} $_areaUnitSuffix',
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.w400,
-                        color: const Color(0xFF06AB00),
+                        color: hasNegativeRemainingArea
+                            ? Colors.red
+                            : const Color(0xFF06AB00),
                       ),
                     ),
                   ],
@@ -12330,44 +12324,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ),
                 ),
               ],
-              const SizedBox(height: 16),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Container(
-                  width: 52,
-                  height: 36,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.25),
-                        blurRadius: 2,
-                        offset: const Offset(0, 0),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(
-                      3,
-                      (index) => Padding(
-                        padding: EdgeInsets.only(right: index < 2 ? 4 : 0),
-                        child: Container(
-                          width: 4,
-                          height: 4,
-                          decoration: const BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -17962,7 +17918,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                                             .inter(
                                                                           fontSize:
                                                                               12,
-                                                                          fontWeight: FontWeight.normal,
+                                                                          fontWeight:
+                                                                              FontWeight.normal,
                                                                           color: compensationType == 'None'
                                                                               ? Colors.black
                                                                               : (selectedEarningType.isEmpty ? (_openProjectManagerEarningDropdownIndex == index ? Colors.black : const Color.fromARGB(191, 173, 173, 173)) : Colors.black),
@@ -19670,7 +19627,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                                             .inter(
                                                                           fontSize:
                                                                               12,
-                                                                          fontWeight: FontWeight.normal,
+                                                                          fontWeight:
+                                                                              FontWeight.normal,
                                                                           color: compensationType == 'None'
                                                                               ? Colors.black
                                                                               : (selectedEarningType.isEmpty ? (_openAgentEarningDropdownIndex == index ? Colors.black : const Color.fromARGB(191, 173, 173, 173)) : Colors.black),
@@ -24427,7 +24385,10 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     Expanded(
                       child: ListView.separated(
                         padding: const EdgeInsets.only(
-                            left: 8, right: 8, top: listTopPadding, bottom: listBottomPadding),
+                            left: 8,
+                            right: 8,
+                            top: listTopPadding,
+                            bottom: listBottomPadding),
                         itemCount: availablePartners.length,
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: optionGap),
@@ -26298,11 +26259,29 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                       _uploadExpenseDocumentForRow(index));
                                 }
                               },
-                              child: SvgPicture.asset(
-                                iconPath,
+                              child: Container(
                                 width: 40,
-                                height: 40,
-                                fit: BoxFit.contain,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(8),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withOpacity(0.25),
+                                      blurRadius: 2,
+                                      offset: const Offset(0, 0),
+                                      spreadRadius: 0,
+                                    ),
+                                  ],
+                                ),
+                                child: Center(
+                                  child: SvgPicture.asset(
+                                    iconPath,
+                                    width: 40,
+                                    height: 40,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
@@ -26494,10 +26473,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     );
 
     const double headerHorizontalPadding = 8;
+    const double headerTopPadding = 8;
+    const double headerBottomPadding = 8;
     const double listHorizontalPadding = 8;
-    const double listVerticalPadding = 0;
+    const double listTopPadding = 0;
+    const double listBottomPadding = 8;
     const double optionHeight = 32;
-    const double headerHeight = 40;
+    const double estimatedHeaderTextHeight = 16;
     const double dropdownOffset = 8;
     const double optionGap = 0;
     const double columnHorizontalInset = 8.0;
@@ -26519,11 +26501,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     final int optionCount = _expenseCategories.length;
     final bool showHeader =
         (_expenses[index]['category']?.toString() ?? '').trim().isNotEmpty;
-    final double calculatedMenuHeight = (showHeader ? headerHeight : 0) +
-        listVerticalPadding +
+    final double headerHeight = showHeader
+        ? (headerTopPadding + estimatedHeaderTextHeight + headerBottomPadding)
+        : 0;
+    final double calculatedMenuHeight = headerHeight +
+        listTopPadding +
         (optionCount * optionHeight) +
         ((optionCount - 1) * optionGap) +
-        listVerticalPadding;
+        listBottomPadding;
     final double overlayHeight = overlayBox.size.height;
     final double spaceBelow = overlayHeight - topBelow - dropdownOffset;
     final double spaceAbove = offset.dy - dropdownOffset;
@@ -26561,11 +26546,12 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (showHeader)
-                  Container(
-                    height: headerHeight,
-                    alignment: Alignment.centerLeft,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: headerHorizontalPadding,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      headerHorizontalPadding,
+                      headerTopPadding,
+                      headerHorizontalPadding,
+                      headerBottomPadding,
                     ),
                     child: Text(
                       'Select Category',
@@ -26577,49 +26563,55 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     ),
                   ),
                 Expanded(
-                  child: ListView.separated(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: listHorizontalPadding,
-                      vertical: listVerticalPadding,
-                    ),
-                    itemCount: _expenseCategories.length,
-                    separatorBuilder: (_, __) =>
-                        const SizedBox(height: optionGap),
-                    itemBuilder: (context, itemIndex) {
-                      final category = _expenseCategories[itemIndex];
-                      final categoryColor = _getCategoryColor(category);
-                      return GestureDetector(
-                        onTap: () {
-                          closeDropdown();
-                          _captureExpenseUndoSnapshot(
-                            selectIndex: index,
-                            selectField: 'item',
-                            source: _ExpenseUndoSource.category,
-                          );
-                          setState(() {
-                            _expenses[index]['category'] = category;
-                          });
-                          _onDataChanged();
-                        },
-                        child: SizedBox(
-                          height: optionHeight,
-                          child: Container(
-                            color: Colors.transparent,
-                            alignment: Alignment.centerLeft,
-                            child: _buildExpenseCategoryChip(
-                              label: category,
-                              color: categoryColor,
-                              fontSize: 11,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 3,
+                  child: ScrollConfiguration(
+                    behavior: const MaterialScrollBehavior()
+                        .copyWith(scrollbars: false),
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(
+                        listHorizontalPadding,
+                        listTopPadding,
+                        listHorizontalPadding,
+                        listBottomPadding,
+                      ),
+                      itemCount: _expenseCategories.length,
+                      separatorBuilder: (_, __) =>
+                          const SizedBox(height: optionGap),
+                      itemBuilder: (context, itemIndex) {
+                        final category = _expenseCategories[itemIndex];
+                        final categoryColor = _getCategoryColor(category);
+                        return GestureDetector(
+                          onTap: () {
+                            closeDropdown();
+                            _captureExpenseUndoSnapshot(
+                              selectIndex: index,
+                              selectField: 'item',
+                              source: _ExpenseUndoSource.category,
+                            );
+                            setState(() {
+                              _expenses[index]['category'] = category;
+                            });
+                            _onDataChanged();
+                          },
+                          child: SizedBox(
+                            height: optionHeight,
+                            child: Container(
+                              color: Colors.transparent,
+                              alignment: Alignment.centerLeft,
+                              child: _buildExpenseCategoryChip(
+                                label: category,
+                                color: categoryColor,
+                                fontSize: 11,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                borderRadius: 6,
                               ),
-                              borderRadius: 6,
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
               ],

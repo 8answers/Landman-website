@@ -753,7 +753,7 @@ class _DashboardPageState extends State<DashboardPage> {
       );
 
       final totalArea = (projectData['total_area'] as num?)?.toDouble() ?? 0.0;
-      final sellingArea =
+      final approvedSellingArea =
           (projectData['selling_area'] as num?)?.toDouble() ?? 0.0;
 
       final nonSellableArea = nonSellableAreas.fold<double>(
@@ -789,6 +789,7 @@ class _DashboardPageState extends State<DashboardPage> {
           ? (totalAmenityAreaValue / totalAmenityAreaSqft)
           : 0.0;
 
+      final sellingArea = approvedSellingArea;
       final allInCost = sellingArea > 0 ? totalExpenses / sellingArea : 0.0;
 
       final totalLayouts = layouts.length;
@@ -2534,6 +2535,9 @@ class _DashboardPageState extends State<DashboardPage> {
     final totalExpenses = _dashboardData!['totalExpenses'] as double;
     final budgetVariance = estimatedProjectCost - totalExpenses;
     final totalArea = _dashboardData!['totalArea'] as double;
+    final totalAmenityAreaSqft =
+        (_dashboardData!['totalAmenityAreaSqft'] as num?)?.toDouble() ?? 0.0;
+    final totalProjectAreaWithAmenity = totalArea + totalAmenityAreaSqft;
     final sellingArea = _dashboardData!['sellingArea'] as double;
     final nonSellableArea = _dashboardData!['nonSellableArea'] as double;
     final allInCost = _dashboardData!['allInCost'] as double;
@@ -2676,7 +2680,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         _buildSummaryAreaCard(
                           'Total Project Area',
                           AreaUnitUtils.areaFromSqftToDisplay(
-                              totalArea, _isSqm),
+                              totalProjectAreaWithAmenity, _isSqm),
                           width: cardWidth,
                         ),
                         const SizedBox(width: interCardGap),
@@ -4263,7 +4267,8 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   _AxisScale _buildSalesWaterfallAxisScale(double totalSalesValue) {
-    final sanitizedSales = totalSalesValue.isFinite ? totalSalesValue.abs() : 0.0;
+    final sanitizedSales =
+        totalSalesValue.isFinite ? totalSalesValue.abs() : 0.0;
     final axisMax = _roundUpNice(sanitizedSales <= 0 ? 5.0 : sanitizedSales);
     return _buildAxisScale(0, axisMax, axisMax);
   }
