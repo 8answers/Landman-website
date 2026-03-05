@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'pages/login_page.dart';
 import 'screens/account_settings_screen.dart';
@@ -198,6 +199,13 @@ class _AuthWrapperState extends State<AuthWrapper> {
   bool _oauthCallbackResolutionTimedOut = false;
   static const Duration _oauthCallbackWaitTimeout = Duration(seconds: 6);
 
+  Future<void> _markRecentProjectsAsStartPage() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('nav_current_page', 'recentProjects');
+    await prefs.remove('nav_previous_page');
+    await prefs.setBool('nav_force_recent_on_next_open', true);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -318,6 +326,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
       setState(() {
         if (event == AuthChangeEvent.signedIn && session != null) {
+          _markRecentProjectsAsStartPage();
           _isGoogleSignInInProgress = false;
           _isLoggedIn = true;
           _oauthCallbackResolutionTimedOut = false;

@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/project_storage_service.dart';
+import '../services/area_unit_service.dart';
 
 class SettingsPage extends StatefulWidget {
   final String? projectId;
@@ -19,17 +20,24 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  String _projectStatus = 'Active';
+  static const double _projectBaseUnitDropdownWidth = 186;
+  String _projectBaseUnitArea = AreaUnitService.defaultUnit;
+  static const List<String> _projectBaseUnitAreaOptions = <String>[
+    'Square Feet (sqft)',
+    'Square Meter (sqm)',
+  ];
   bool _isDropdownOpen = false;
   OverlayEntry? _overlayEntry;
   OverlayEntry? _deleteDialogOverlay;
-  final TextEditingController _deleteConfirmController = TextEditingController();
+  final GlobalKey _projectBaseUnitDropdownKey = GlobalKey();
+  final TextEditingController _deleteConfirmController =
+      TextEditingController();
   final FocusNode _deleteConfirmFocusNode = FocusNode();
 
   @override
   void initState() {
     super.initState();
-    _loadProjectStatus();
+    _loadProjectBaseUnitArea();
   }
 
   @override
@@ -41,36 +49,45 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  Future<void> _loadProjectStatus() async {
-    final projectId = widget.projectId;
-    if (projectId == null || projectId.isEmpty) return;
+  Future<void> _loadProjectBaseUnitArea() async {
     try {
-      final row = await Supabase.instance.client
-          .from('projects')
-          .select('project_status')
-          .eq('id', projectId)
-          .maybeSingle();
-      final status = (row?['project_status'] ?? '').toString().trim();
-      if (status.isNotEmpty && mounted) {
+      String? resolvedUnit;
+      final projectId = widget.projectId;
+      if (projectId != null && projectId.isNotEmpty) {
+        final row = await Supabase.instance.client
+            .from('projects')
+            .select('area_unit')
+            .eq('id', projectId)
+            .maybeSingle();
+        final dbUnit = (row?['area_unit'] ?? '').toString().trim();
+        if (dbUnit.isNotEmpty) {
+          resolvedUnit = dbUnit;
+          await AreaUnitService.setAreaUnit(projectId, dbUnit);
+        }
+      }
+      resolvedUnit ??= await AreaUnitService.getAreaUnit(widget.projectId);
+      if (mounted && resolvedUnit.isNotEmpty) {
         setState(() {
-          _projectStatus = status;
+          _projectBaseUnitArea = resolvedUnit!;
         });
       }
     } catch (e) {
-      print('SettingsPage: failed to load project_status: $e');
+      print('SettingsPage: failed to load project area unit: $e');
     }
   }
 
-  Future<void> _saveProjectStatus() async {
-    final projectId = widget.projectId;
-    if (projectId == null || projectId.isEmpty) return;
+  Future<void> _saveProjectBaseUnitArea() async {
     try {
-      await ProjectStorageService.saveProjectData(
-        projectId: projectId,
-        projectStatus: _projectStatus,
-      );
+      await AreaUnitService.setAreaUnit(widget.projectId, _projectBaseUnitArea);
+      final projectId = widget.projectId;
+      if (projectId != null && projectId.isNotEmpty) {
+        await ProjectStorageService.saveProjectData(
+          projectId: projectId,
+          projectAreaUnit: _projectBaseUnitArea,
+        );
+      }
     } catch (e) {
-      print('SettingsPage: failed to save project_status: $e');
+      print('SettingsPage: failed to save project area unit: $e');
     }
   }
 
@@ -100,7 +117,8 @@ class _SettingsPageState extends State<SettingsPage> {
           // Dialog centered at top
           Positioned(
             top: 24,
-            left: MediaQuery.of(context).size.width / 2 - 269, // Center (538/2 = 269)
+            left: MediaQuery.of(context).size.width / 2 -
+                269, // Center (538/2 = 269)
             child: Material(
               color: Colors.transparent,
               child: Container(
@@ -121,243 +139,254 @@ class _SettingsPageState extends State<SettingsPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                // Header with warning icon and close button
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
+                    // Header with warning icon and close button
                     Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Icon(
-                          Icons.warning,
-                          color: Colors.red,
-                          size: 24,
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.warning,
+                              color: Colors.red,
+                              size: 24,
+                            ),
+                            const SizedBox(width: 16),
+                            Text(
+                              'Delete Project?',
+                              style: GoogleFonts.inter(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black,
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 16),
-                        Text(
-                          'Delete Project?',
-                          style: GoogleFonts.inter(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
+                        GestureDetector(
+                          onTap: _removeDeleteDialog,
+                          child: Transform.rotate(
+                            angle: 0.785398, // 45 degrees
+                            child: const Icon(
+                              Icons.add,
+                              size: 24,
+                              color: Color(0xFF0C8CE9),
+                            ),
                           ),
                         ),
                       ],
                     ),
-                    GestureDetector(
-                      onTap: _removeDeleteDialog,
-                      child: Transform.rotate(
-                        angle: 0.785398, // 45 degrees
-                        child: const Icon(
-                          Icons.add,
-                          size: 24,
-                          color: Color(0xFF0C8CE9),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                // Warning message
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    RichText(
-                      text: TextSpan(
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.normal,
-                          color: Colors.black.withOpacity(0.8),
-                        ),
-                        children: const [
-                          TextSpan(text: 'This will permanently delete the '),
-                          TextSpan(text: 'project and all associated data'),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'This action cannot be undone.',
-                      style: GoogleFonts.inter(
-                        fontSize: 14,
-                        fontWeight: FontWeight.normal,
-                        color: Colors.black.withOpacity(0.8),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                // Confirmation input
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    RichText(
-                      text: TextSpan(
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          color: const Color(0xFF323232),
-                        ),
-                        children: [
-                          const TextSpan(
-                            text: 'Type ',
-                            style: TextStyle(fontWeight: FontWeight.normal),
-                          ),
-                          const TextSpan(
-                            text: 'delete ',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          const TextSpan(
-                            text: 'to confirm.',
-                            style: TextStyle(fontWeight: FontWeight.normal),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      width: 150,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: [
-                          BoxShadow(
-                            color: _deleteConfirmFocusNode.hasFocus
-                                ? const Color(0xFF0C8CE9)
-                                : const Color(0xFFFF0000),
-                            blurRadius: 2,
-                            spreadRadius: 0,
-                            offset: const Offset(0, 0),
-                          ),
-                        ],
-                      ),
-                      child: TextField(
-                        controller: _deleteConfirmController,
-                        focusNode: _deleteConfirmFocusNode,
-                        textAlignVertical: TextAlignVertical.center,
-                        onChanged: (value) {
-                          setState(() {}); // Rebuild to update button state
-                        },
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.only(left: 8, right: 8, top: 8, bottom: 16),
-                        ),
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                // Action buttons
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Cancel button
-                    GestureDetector(
-                      onTap: _removeDeleteDialog,
-                      child: Container(
-                        height: 44,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                            ),
-                          ],
-                        ),
-                        child: Center(
-                          child: Text(
-                            'Cancel',
+                    const SizedBox(height: 16),
+                    // Warning message
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        RichText(
+                          text: TextSpan(
                             style: GoogleFonts.inter(
                               fontSize: 14,
                               fontWeight: FontWeight.normal,
-                              color: const Color(0xFF0C8CE9),
+                              color: Colors.black.withOpacity(0.8),
+                            ),
+                            children: const [
+                              TextSpan(
+                                  text: 'This will permanently delete the '),
+                              TextSpan(text: 'project and all associated data'),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'This action cannot be undone.',
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            fontWeight: FontWeight.normal,
+                            color: Colors.black.withOpacity(0.8),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    // Confirmation input
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        RichText(
+                          text: TextSpan(
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              color: const Color(0xFF323232),
+                            ),
+                            children: [
+                              const TextSpan(
+                                text: 'Type ',
+                                style: TextStyle(fontWeight: FontWeight.normal),
+                              ),
+                              const TextSpan(
+                                text: 'delete ',
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              const TextSpan(
+                                text: 'to confirm.',
+                                style: TextStyle(fontWeight: FontWeight.normal),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          width: 150,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: _deleteConfirmFocusNode.hasFocus
+                                    ? const Color(0xFF0C8CE9)
+                                    : const Color(0xFFFF0000),
+                                blurRadius: 2,
+                                spreadRadius: 0,
+                                offset: const Offset(0, 0),
+                              ),
+                            ],
+                          ),
+                          child: TextField(
+                            controller: _deleteConfirmController,
+                            focusNode: _deleteConfirmFocusNode,
+                            textAlignVertical: TextAlignVertical.center,
+                            onChanged: (value) {
+                              setState(() {}); // Rebuild to update button state
+                            },
+                            decoration: const InputDecoration(
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.only(
+                                  left: 8, right: 8, top: 8, bottom: 16),
+                            ),
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              color: Colors.black,
                             ),
                           ),
                         ),
-                      ),
+                      ],
                     ),
-                    // Delete button
-                    GestureDetector(
-                      onTap: () async {
-                        if (_deleteConfirmController.text.toLowerCase() == 'delete') {
-                          if (widget.projectId != null) {
-                            try {
-                              await ProjectStorageService.deleteProject(widget.projectId!);
-                              _removeDeleteDialog();
-                              // Notify parent that project was deleted
-                              if (widget.onProjectDeleted != null) {
-                                widget.onProjectDeleted!();
-                              }
-                            } catch (e) {
-                              print('Error deleting project: $e');
-                              // Show error message
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Failed to delete project: $e'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
+                    const SizedBox(height: 24),
+                    // Action buttons
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        // Cancel button
+                        GestureDetector(
+                          onTap: _removeDeleteDialog,
+                          child: Container(
+                            height: 44,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.25),
+                                  blurRadius: 2,
+                                  offset: const Offset(0, 0),
+                                ),
+                              ],
+                            ),
+                            child: Center(
+                              child: Text(
+                                'Cancel',
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.normal,
+                                  color: const Color(0xFF0C8CE9),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Delete button
+                        GestureDetector(
+                          onTap: () async {
+                            if (_deleteConfirmController.text.toLowerCase() ==
+                                'delete') {
+                              if (widget.projectId != null) {
+                                try {
+                                  await ProjectStorageService.deleteProject(
+                                      widget.projectId!);
+                                  _removeDeleteDialog();
+                                  // Notify parent that project was deleted
+                                  if (widget.onProjectDeleted != null) {
+                                    widget.onProjectDeleted!();
+                                  }
+                                } catch (e) {
+                                  print('Error deleting project: $e');
+                                  // Show error message
+                                  if (mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                            'Failed to delete project: $e'),
+                                        backgroundColor: Colors.red,
+                                      ),
+                                    );
+                                  }
+                                }
                               }
                             }
-                          }
-                        }
-                      },
-                      child: Container(
-                        height: 44,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
+                          },
+                          child: Container(
+                            height: 44,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(8),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.25),
+                                  blurRadius: 2,
+                                  offset: const Offset(0, 0),
+                                ),
+                              ],
                             ),
-                          ],
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Delete Project',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.normal,
+                                    color: _deleteConfirmController.text
+                                                .toLowerCase() ==
+                                            'delete'
+                                        ? Colors.red
+                                        : Colors.red.withOpacity(0.5),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                SvgPicture.asset(
+                                  'assets/images/Delete_layout.svg',
+                                  width: 13,
+                                  height: 16,
+                                  colorFilter: ColorFilter.mode(
+                                    _deleteConfirmController.text
+                                                .toLowerCase() ==
+                                            'delete'
+                                        ? Colors.red
+                                        : Colors.red.withOpacity(0.5),
+                                    BlendMode.srcIn,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                        child: Row(
-                          children: [
-                            Text(
-                              'Delete Project',
-                              style: GoogleFonts.inter(
-                                fontSize: 14,
-                                fontWeight: FontWeight.normal,
-                                color: _deleteConfirmController.text.toLowerCase() == 'delete'
-                                    ? Colors.red
-                                    : Colors.red.withOpacity(0.5),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            SvgPicture.asset(
-                              'assets/images/Delete_layout.svg',
-                              width: 13,
-                              height: 16,
-                              colorFilter: ColorFilter.mode(
-                                _deleteConfirmController.text.toLowerCase() == 'delete'
-                                    ? Colors.red
-                                    : Colors.red.withOpacity(0.5),
-                                BlendMode.srcIn,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                      ],
                     ),
                   ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
           ),
         ],
       ),
@@ -381,11 +410,14 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _showDropdown(BuildContext context) {
-    final RenderBox? renderBox = context.findRenderObject() as RenderBox?;
+    final RenderBox? renderBox = _projectBaseUnitDropdownKey.currentContext
+        ?.findRenderObject() as RenderBox?;
     if (renderBox == null) return;
 
     final offset = renderBox.localToGlobal(Offset.zero);
     final size = renderBox.size;
+    final optionChipWidth = _getBaseUnitOptionChipWidth(context);
+    final dropdownWidth = optionChipWidth + 8;
 
     _overlayEntry = OverlayEntry(
       builder: (context) => Stack(
@@ -403,27 +435,38 @@ class _SettingsPageState extends State<SettingsPage> {
             top: offset.dy + size.height,
             child: Material(
               color: Colors.transparent,
-              child: Container(
-                width: size.width,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.25),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
+              child: SizedBox(
+                width: dropdownWidth,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.25),
+                        blurRadius: 2,
+                        offset: const Offset(0, 0),
+                        spreadRadius: 0,
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: _projectBaseUnitAreaOptions
+                          .asMap()
+                          .entries
+                          .expand((entry) {
+                        final isFirst = entry.key == 0;
+                        return [
+                          if (!isFirst) const SizedBox(height: 8),
+                          _buildDropdownItem(entry.value, optionChipWidth),
+                        ];
+                      }).toList(),
                     ),
-                  ],
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _buildDropdownItem('Active', const Color(0xFF06AB00)),
-                    _buildDropdownItem('On Hold', const Color(0xFFFFC107)),
-                    _buildDropdownItem('Completed', const Color(0xFF2196F3)),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -436,72 +479,70 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _isDropdownOpen = true);
   }
 
-  Widget _buildDropdownItem(String status, Color dotColor) {
-    final isSelected = _projectStatus == status;
-    Color badgeBackgroundColor;
-    
-    if (isSelected) {
-      // Selected item badge background
-      if (status == 'Active') {
-        badgeBackgroundColor = const Color(0xFFEBF8EB);
-      } else if (status == 'On Hold') {
-        badgeBackgroundColor = const Color(0xFFFFFFEB);
-      } else {
-        badgeBackgroundColor = const Color(0xFFECF6FD);
+  double _getBaseUnitOptionChipWidth(BuildContext context) {
+    final textStyle = GoogleFonts.inter(
+      fontSize: 11,
+      fontWeight: FontWeight.normal,
+      color: Colors.black,
+    );
+    double maxLabelWidth = 0;
+    for (final option in _projectBaseUnitAreaOptions) {
+      final textPainter = TextPainter(
+        text: TextSpan(text: option, style: textStyle),
+        maxLines: 1,
+        textDirection: TextDirection.ltr,
+        textScaler: MediaQuery.textScalerOf(context),
+      )..layout();
+      if (textPainter.width > maxLabelWidth) {
+        maxLabelWidth = textPainter.width;
       }
-    } else {
-      // Non-selected item badge background
-      badgeBackgroundColor = Colors.white;
     }
-    
+    // Add a bit of extra width so option chips are slightly wider than text.
+    return maxLabelWidth + 38;
+  }
+
+  Widget _buildDropdownItem(String option, double optionWidth) {
+    final isSelected = option == _projectBaseUnitArea;
+    final textStyle = GoogleFonts.inter(
+      fontSize: 11,
+      fontWeight: FontWeight.normal,
+      color: Colors.black,
+    );
+
     return GestureDetector(
       onTap: () {
         setState(() {
-          _projectStatus = status;
+          _projectBaseUnitArea = option;
         });
-        _saveProjectStatus();
+        _saveProjectBaseUnitArea();
         _removeOverlay();
       },
-      child: Container(
-        height: 48,
-        padding: const EdgeInsets.all(8),
-        color: Colors.white,
-        child: Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SizedBox(
+        width: optionWidth,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          height: 24,
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           decoration: BoxDecoration(
-            color: badgeBackgroundColor,
-            borderRadius: BorderRadius.circular(8),
+            color: isSelected ? const Color(0xFFECF6FD) : Colors.white,
+            borderRadius: BorderRadius.circular(6),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withOpacity(0.25),
                 blurRadius: 2,
                 offset: const Offset(0, 0),
+                spreadRadius: 0,
               ),
             ],
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.start,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  color: dotColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                status,
-                style: GoogleFonts.inter(
-                  fontSize: 14,
-                  fontWeight: FontWeight.normal,
-                  color: Colors.black,
-                ),
-              ),
-            ],
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              option,
+              style: textStyle,
+              maxLines: 1,
+              softWrap: false,
+            ),
           ),
         ),
       ),
@@ -547,249 +588,117 @@ class _SettingsPageState extends State<SettingsPage> {
         const SizedBox(height: 24),
         // Tabs section
         Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              decoration: const BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: Color(0xFF5C5C5C),
-                    width: 0.5,
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: Color(0xFF5C5C5C),
+                width: 0.5,
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              // General tab (active)
+              Container(
+                height: 32,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: Color(0xFF0C8CE9),
+                      width: 2,
+                    ),
+                  ),
+                ),
+                child: Center(
+                  child: Text(
+                    'General',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: const Color(0xFF0C8CE9),
+                      height: 1.43,
+                    ),
                   ),
                 ),
               ),
-              child: Row(
-                children: [
-                  // General tab (active)
-                  Container(
-                    height: 32,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    decoration: const BoxDecoration(
-                      border: Border(
-                        bottom: BorderSide(
-                          color: Color(0xFF0C8CE9),
-                          width: 2,
-                        ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 40),
+        // Content section
+        Padding(
+          padding: const EdgeInsets.only(left: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Project section
+              Container(
+                width: 617,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F9FA),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.25),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Project',
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black,
                       ),
                     ),
-                    child: Center(
-                      child: Text(
-                        'General',
+                    const SizedBox(height: 8),
+                    Text(
+                      'Update the operational status of this project.',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black.withOpacity(0.8),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    // Project Base Unit Area label
+                    RichText(
+                      text: TextSpan(
                         style: GoogleFonts.inter(
                           fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: const Color(0xFF0C8CE9),
-                          height: 1.43,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black,
                         ),
+                        children: const [
+                          TextSpan(text: 'Project Base Unit Area '),
+                          TextSpan(
+                            text: '*',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 40),
-            // Content section
-            Padding(
-              padding: const EdgeInsets.only(left: 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Project section
-                  Container(
-                    width: 617,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8F9FA),
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.25),
-                          blurRadius: 2,
-                          offset: const Offset(0, 0),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Project',
-                          style: GoogleFonts.inter(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Update the operational status of this project.',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black.withOpacity(0.8),
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        // Project Status label
-                        RichText(
-                          text: TextSpan(
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              color: Colors.black,
-                            ),
-                            children: const [
-                              TextSpan(text: 'Project Status '),
-                              TextSpan(
-                                text: '*',
-                                style: TextStyle(color: Colors.red),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        // Status dropdown
-                        Builder(
-                          builder: (BuildContext dropdownContext) {
-                            Color statusColor;
-                            Color statusBgColor;
-                            
-                            if (_projectStatus == 'Active') {
-                              statusColor = const Color(0xFF06AB00);
-                              statusBgColor = const Color(0xFFEBF8EB);
-                            } else if (_projectStatus == 'On Hold') {
-                              statusColor = const Color(0xFFFFC107);
-                              statusBgColor = const Color(0xFFFFFFEB);
-                            } else {
-                              statusColor = const Color(0xFF2196F3);
-                              statusBgColor = const Color(0xFFECF6FD);
-                            }
-                            
-                            return GestureDetector(
-                              onTap: () => _toggleDropdown(dropdownContext),
-                              child: Container(
-                                width: 145,
-                                height: 40,
-                                padding: const EdgeInsets.only(left: 4, right: 8, top: 4, bottom: 4),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.95),
-                                  borderRadius: BorderRadius.circular(8),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.25),
-                                      blurRadius: 2,
-                                      offset: const Offset(0, 0),
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    // Status badge
-                                    Container(
-                                      height: 32,
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                                      decoration: BoxDecoration(
-                                        color: statusBgColor,
-                                        borderRadius: BorderRadius.circular(8),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.25),
-                                            blurRadius: 2,
-                                            offset: const Offset(0, 0),
-                                          ),
-                                        ],
-                                      ),
-                                      child: Row(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        crossAxisAlignment: CrossAxisAlignment.center,
-                                        children: [
-                                          Container(
-                                            width: 16,
-                                            height: 16,
-                                            decoration: BoxDecoration(
-                                              color: statusColor,
-                                              shape: BoxShape.circle,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            _projectStatus,
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.normal,
-                                              color: Colors.black,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    // Dropdown arrow
-                                    Container(
-                                      height: 32,
-                                      alignment: const Alignment(0, -0.3),
-                                      child: Transform.rotate(
-                                        angle: -1.5708, // -90 degrees in radians
-                                        child: const Icon(
-                                          Icons.arrow_back_ios,
-                                          size: 14,
-                                          color: Colors.black,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 36),
-                  // Delete Project section
-                  Container(
-                    width: 617,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8F9FA),
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.25),
-                          blurRadius: 2,
-                          offset: const Offset(0, 0),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Delete Project',
-                          style: GoogleFonts.inter(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Permanently remove this project and all associated data. This action cannot be undone.',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.black.withOpacity(0.8),
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        // Delete button
-                        GestureDetector(
-                          onTap: _showDeleteDialog,
+                    const SizedBox(height: 8),
+                    // Project Base Unit Area dropdown
+                    Builder(
+                      builder: (BuildContext dropdownContext) {
+                        return GestureDetector(
+                          onTap: () => _toggleDropdown(dropdownContext),
                           child: Container(
-                            height: 44,
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                            key: _projectBaseUnitDropdownKey,
+                            width: _projectBaseUnitDropdownWidth,
+                            height: 40,
+                            padding: const EdgeInsets.only(left: 4, right: 8),
                             decoration: BoxDecoration(
-                              color: Colors.white,
+                              color: Colors.white.withOpacity(0.95),
                               borderRadius: BorderRadius.circular(8),
                               boxShadow: [
                                 BoxShadow(
@@ -800,33 +709,116 @@ class _SettingsPageState extends State<SettingsPage> {
                               ],
                             ),
                             child: Row(
-                              mainAxisSize: MainAxisSize.min,
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              crossAxisAlignment: CrossAxisAlignment.center,
                               children: [
                                 Text(
-                                  'Delete Project',
+                                  _projectBaseUnitArea,
                                   style: GoogleFonts.inter(
                                     fontSize: 14,
                                     fontWeight: FontWeight.normal,
-                                    color: Colors.red,
+                                    color: Colors.black,
                                   ),
                                 ),
-                                const SizedBox(width: 8),
+                                // Dropdown arrow
                                 SvgPicture.asset(
-                                  'assets/images/Delete_layout.svg',
-                                  width: 13,
-                                  height: 16,
+                                  'assets/images/Drrrop_down.svg',
+                                  width: 14,
+                                  height: 7,
+                                  fit: BoxFit.contain,
                                 ),
                               ],
                             ),
                           ),
-                        ),
-                      ],
+                        );
+                      },
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
-        );
+              const SizedBox(height: 36),
+              // Delete Project section
+              Container(
+                width: 617,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F9FA),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.25),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Delete Project',
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Permanently remove this project and all associated data. This action cannot be undone.',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black.withOpacity(0.8),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    // Delete button
+                    GestureDetector(
+                      onTap: _showDeleteDialog,
+                      child: Container(
+                        height: 44,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.25),
+                              blurRadius: 2,
+                              offset: const Offset(0, 0),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Delete Project',
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.red,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            SvgPicture.asset(
+                              'assets/images/Delete_layout.svg',
+                              width: 13,
+                              height: 16,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }

@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' show max, min, pi;
 import 'dart:ui' show BoxHeightStyle, BoxWidthStyle;
 import 'dart:typed_data';
 // ignore: avoid_web_libraries_in_flutter
@@ -7,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:archive/archive.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -51,6 +55,7 @@ class _UploadProgress {
 
 class _DocumentsPageState extends State<DocumentsPage> {
   final SupabaseClient _supabase = Supabase.instance.client;
+  static const String _defaultExpensesFolderName = 'Expenses';
   String _searchQuery = '';
   final List<Map<String, dynamic>> _documents = [];
   bool _isLoading = false;
@@ -69,6 +74,39 @@ class _DocumentsPageState extends State<DocumentsPage> {
   bool _showUploadedPopup = false; // Control uploaded popup visibility
   bool _isSelectMode = false; // Track if we're in select mode
   final Set<String> _selectedDocumentIds = {}; // Track selected document IDs
+  bool _isLayoutImageViewerOpen = false;
+  String _activeLayoutImageUrl = '';
+  String _activeLayoutImageStoragePath = '';
+  String _activeLayoutImageDocId = '';
+  String _activeLayoutImageName = '';
+  String _activeLayoutImageExtension = '';
+  bool _isLayoutPenModeActive = true;
+  bool _isLayoutEraserModeActive = false;
+  bool _isLayoutPanModeActive = false;
+  bool _isLayoutThicknessPickerVisible = false;
+  bool _isLayoutThicknessPickerForEraser = false;
+  int _selectedLayoutThicknessIndex = 1;
+  int _selectedLayoutEraserThicknessIndex = 1;
+  static const List<double> _layoutThicknessOptions = [1, 3, 5, 7];
+  bool _isLayoutColorPickerVisible = false;
+  int _selectedLayoutColorIndex = 0;
+  static const List<Color> _layoutColorOptions = [
+    Color(0xFF06AB00),
+    Color(0xFFFF0000),
+    Color(0xFF0C8CE9),
+    Color(0xFFFFB12A),
+  ];
+  final List<_DocumentLayoutViewerStroke> _layoutViewerStrokes =
+      <_DocumentLayoutViewerStroke>[];
+  int? _activeLayoutStrokeIndex;
+  int? _activeLayoutStrokePointerId;
+  final ValueNotifier<int> _layoutViewerPaintVersion = ValueNotifier<int>(0);
+  Size _layoutViewerLastCanvasSize = Size.zero;
+  final TransformationController _layoutImageViewerController =
+      TransformationController();
+  bool _hasPendingLayoutViewerEdits = false;
+  bool _isSavingLayoutViewerEdits = false;
+  Timer? _layoutViewerAutosaveTimer;
 
   Widget _skeletonBlock({required double width, required double height}) {
     return Container(
@@ -174,6 +212,14 @@ class _DocumentsPageState extends State<DocumentsPage> {
     _loadDocuments();
   }
 
+  @override
+  void dispose() {
+    _layoutViewerAutosaveTimer?.cancel();
+    _layoutImageViewerController.dispose();
+    _layoutViewerPaintVersion.dispose();
+    super.dispose();
+  }
+
   int _consumeNextId() {
     final nextId = _nextId ?? 0;
     _nextId = nextId + 1;
@@ -232,15 +278,61 @@ class _DocumentsPageState extends State<DocumentsPage> {
           .from('documents')
           .select()
           .eq('project_id', widget.projectId!);
+      final docs = List<dynamic>.from(response as List);
+
+      final hasRootExpensesFolder = docs.any((doc) {
+        if (doc is! Map) return false;
+        final type = (doc['type'] ?? '').toString().toLowerCase();
+        final name = (doc['name'] ?? '').toString().trim().toLowerCase();
+        final parentId = doc['parent_id'];
+        final isRoot = parentId == null || parentId.toString().trim().isEmpty;
+        return type == 'folder' &&
+            name == _defaultExpensesFolderName.toLowerCase() &&
+            isRoot;
+      });
+
+      if (!hasRootExpensesFolder) {
+        try {
+          final inserted = await _supabase
+              .from('documents')
+              .insert({
+                'project_id': widget.projectId!,
+                'name': _defaultExpensesFolderName,
+                'type': 'folder',
+                'parent_id': null,
+              })
+              .select()
+              .single();
+          docs.add(inserted);
+        } catch (e) {
+          debugPrint('Error ensuring default Expenses folder: $e');
+          try {
+            final retry = await _supabase
+                .from('documents')
+                .select()
+                .eq('project_id', widget.projectId!)
+                .eq('type', 'folder')
+                .eq('name', _defaultExpensesFolderName)
+                .limit(1);
+            if (retry is List && retry.isNotEmpty) {
+              docs.add(retry.first);
+            }
+          } catch (_) {
+            // ignore follow-up retry error
+          }
+        }
+      }
 
       setState(() {
         _documents.clear();
-        for (var doc in response as List) {
+        for (var doc in docs) {
+          final resolvedExtension =
+              _resolveDocumentExtension(Map<String, dynamic>.from(doc));
           _documents.add({
             'id': doc['id'],
             'name': doc['name'],
             'type': doc['type'],
-            'extension': doc['extension'],
+            'extension': resolvedExtension,
             'parentId': doc['parent_id'],
             'createdDate': doc['created_at'],
             'uploadedLabel': doc['created_at'] != null
@@ -552,6 +644,14 @@ class _DocumentsPageState extends State<DocumentsPage> {
     return parts.length > 1 ? parts.last.toLowerCase() : 'file';
   }
 
+  String _resolveDocumentExtension(Map<String, dynamic> doc) {
+    final extension = (doc['extension'] ?? '').toString().trim().toLowerCase();
+    if (extension.isNotEmpty) return extension;
+    final name = (doc['name'] ?? '').toString().trim();
+    if (name.isEmpty) return 'file';
+    return _getFileExtension(name);
+  }
+
   bool _isBlockedExtension(String extension) {
     const blockedExtensions = [
       'exe',
@@ -588,8 +688,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
       'txt': 'assets/images/txt.svg',
       'dxf': 'assets/images/dxf.svg',
     };
-    return iconMap[extension.toLowerCase()] ??
-        'assets/images/no_format.svg';
+    return iconMap[extension.toLowerCase()] ?? 'assets/images/no_format.svg';
   }
 
   String _getContentType(String extension) {
@@ -643,6 +742,1408 @@ class _DocumentsPageState extends State<DocumentsPage> {
     pathParts.add(file['name'] as String);
 
     return pathParts.join('/');
+  }
+
+  bool _isImageExtension(String extension) {
+    final e = extension.trim().toLowerCase();
+    return e == 'png' ||
+        e == 'jpg' ||
+        e == 'jpeg' ||
+        e == 'webp' ||
+        e == 'gif' ||
+        e == 'svg';
+  }
+
+  String _resolveDocumentStoragePath(String urlOrPath) {
+    final raw = urlOrPath.trim();
+    if (raw.isEmpty) return '';
+    if (!raw.startsWith('http')) return raw;
+    final parts = raw.split('/documents/');
+    if (parts.length > 1) {
+      return parts.sublist(1).join('/documents/').trim();
+    }
+    return raw;
+  }
+
+  String _resolveDocumentPublicUrl(String urlOrPath) {
+    final path = _resolveDocumentStoragePath(urlOrPath);
+    if (path.isEmpty) return '';
+    if (path.startsWith('http')) return path;
+    return _supabase.storage.from('documents').getPublicUrl(path);
+  }
+
+  void _openDocumentFile(Map<String, dynamic> doc) {
+    final urlOrPath = (doc['url'] ?? '').toString().trim();
+    if (urlOrPath.isEmpty) return;
+    final extension = _resolveDocumentExtension(doc);
+    if (_isImageExtension(extension)) {
+      _openLayoutImageViewerForDocument(doc);
+      return;
+    }
+    final finalUrl = _resolveDocumentPublicUrl(urlOrPath);
+    if (finalUrl.isNotEmpty) {
+      html.window.open(finalUrl, '_blank');
+    }
+  }
+
+  String _activeLayoutImageDownloadName() {
+    final name = _activeLayoutImageName.trim();
+    if (name.isNotEmpty) return name;
+    final extension = _activeLayoutImageExtension.trim().toLowerCase();
+    if (extension.isNotEmpty) {
+      return 'layout_image.$extension';
+    }
+    return 'layout_image.png';
+  }
+
+  Future<void> _printActiveLayoutImage() async {
+    if (_hasPendingLayoutViewerEdits) {
+      try {
+        await _saveLayoutViewerEditsIfNeeded();
+      } catch (_) {}
+    }
+    final resolvedUrl =
+        _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
+    final imageUrl =
+        resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
+    if (imageUrl.isEmpty) return;
+    html.IFrameElement? printFrame;
+    String? objectUrl;
+    try {
+      final response = await http.get(Uri.parse(imageUrl));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+      final mimeType = response.headers['content-type'] ?? 'image/png';
+      final blob = html.Blob([response.bodyBytes], mimeType);
+      objectUrl = html.Url.createObjectUrlFromBlob(blob);
+
+      printFrame = html.IFrameElement()
+        ..style.position = 'fixed'
+        ..style.right = '0'
+        ..style.bottom = '0'
+        ..style.width = '0'
+        ..style.height = '0'
+        ..style.border = '0'
+        ..style.visibility = 'hidden';
+      html.document.body?.append(printFrame);
+      final escapedTitle = htmlEscape.convert(_activeLayoutImageDownloadName());
+      final escapedObjectUrl = htmlEscape.convert(objectUrl);
+      final frameDoc = '''
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>$escapedTitle</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        width: 100%;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      img {
+        max-width: 100vw;
+        max-height: 100vh;
+        object-fit: contain;
+      }
+    </style>
+  </head>
+  <body>
+    <img src="$escapedObjectUrl" alt="$escapedTitle" onload="setTimeout(function(){ window.focus(); window.print(); }, 50);" />
+  </body>
+</html>
+''';
+      printFrame.srcdoc = frameDoc;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to print image: $e')),
+        );
+      }
+    } finally {
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        printFrame?.remove();
+        if (objectUrl != null && objectUrl!.isNotEmpty) {
+          html.Url.revokeObjectUrl(objectUrl!);
+        }
+      });
+    }
+  }
+
+  Future<void> _downloadActiveLayoutImage() async {
+    if (_hasPendingLayoutViewerEdits) {
+      try {
+        await _saveLayoutViewerEditsIfNeeded();
+      } catch (_) {}
+    }
+    final resolvedUrl =
+        _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
+    final downloadUrl =
+        resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
+    if (downloadUrl.isEmpty) return;
+    try {
+      final response = await http.get(Uri.parse(downloadUrl));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+      final mimeType =
+          response.headers['content-type'] ?? 'application/octet-stream';
+      final blob = html.Blob([response.bodyBytes], mimeType);
+      final objectUrl = html.Url.createObjectUrlFromBlob(blob);
+      final anchor = html.AnchorElement(href: objectUrl)
+        ..download = _activeLayoutImageDownloadName()
+        ..style.display = 'none';
+      html.document.body?.append(anchor);
+      anchor.click();
+      anchor.remove();
+      html.Url.revokeObjectUrl(objectUrl);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to download image: $e')),
+        );
+      }
+    }
+  }
+
+  void _openLayoutImageViewerForDocument(Map<String, dynamic> doc) {
+    final urlOrPath = (doc['url'] ?? '').toString().trim();
+    if (urlOrPath.isEmpty) return;
+    final storagePath = _resolveDocumentStoragePath(urlOrPath);
+    final finalUrl = _resolveDocumentPublicUrl(storagePath);
+    if (finalUrl.isEmpty) return;
+
+    setState(() {
+      _activeLayoutImageUrl = finalUrl;
+      _activeLayoutImageStoragePath = storagePath;
+      _activeLayoutImageDocId = (doc['id'] ?? '').toString().trim();
+      _activeLayoutImageName = (doc['name'] ?? '').toString().trim();
+      _activeLayoutImageExtension =
+          _resolveDocumentExtension(Map<String, dynamic>.from(doc));
+      _isLayoutImageViewerOpen = true;
+      _isLayoutPenModeActive = true;
+      _isLayoutEraserModeActive = false;
+      _isLayoutPanModeActive = false;
+      _isLayoutThicknessPickerVisible = false;
+      _isLayoutThicknessPickerForEraser = false;
+      _isLayoutColorPickerVisible = false;
+      _layoutViewerStrokes.clear();
+      _activeLayoutStrokeIndex = null;
+      _activeLayoutStrokePointerId = null;
+      _layoutViewerLastCanvasSize = Size.zero;
+      _hasPendingLayoutViewerEdits = false;
+    });
+    _layoutViewerAutosaveTimer?.cancel();
+    _layoutImageViewerController.value = Matrix4.identity();
+  }
+
+  void _closeLayoutImageViewer() {
+    unawaited(_closeLayoutImageViewerAndPersistEdits());
+  }
+
+  Future<void> _closeLayoutImageViewerAndPersistEdits() async {
+    if (_isSavingLayoutViewerEdits) return;
+    _layoutViewerAutosaveTimer?.cancel();
+    _isSavingLayoutViewerEdits = true;
+    try {
+      await _saveLayoutViewerEditsIfNeeded();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save layout edits: $e')),
+        );
+      }
+    } finally {
+      _isSavingLayoutViewerEdits = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _isLayoutImageViewerOpen = false;
+      _activeLayoutImageUrl = '';
+      _activeLayoutImageStoragePath = '';
+      _activeLayoutImageDocId = '';
+      _activeLayoutImageName = '';
+      _activeLayoutImageExtension = '';
+      _isLayoutPenModeActive = true;
+      _isLayoutEraserModeActive = false;
+      _isLayoutPanModeActive = false;
+      _isLayoutThicknessPickerVisible = false;
+      _isLayoutThicknessPickerForEraser = false;
+      _isLayoutColorPickerVisible = false;
+      _layoutViewerStrokes.clear();
+      _activeLayoutStrokeIndex = null;
+      _activeLayoutStrokePointerId = null;
+      _layoutViewerLastCanvasSize = Size.zero;
+      _hasPendingLayoutViewerEdits = false;
+    });
+    _layoutImageViewerController.value = Matrix4.identity();
+  }
+
+  Future<void> _saveLayoutViewerEditsIfNeeded() async {
+    if (!_hasPendingLayoutViewerEdits || _layoutViewerStrokes.isEmpty) return;
+    final projectId = widget.projectId?.trim();
+    if (projectId == null || projectId.isEmpty) {
+      throw Exception('Please save project first.');
+    }
+    String storagePath =
+        _resolveDocumentStoragePath(_activeLayoutImageStoragePath);
+    String docId = _activeLayoutImageDocId.trim();
+    if (storagePath.isEmpty && docId.isNotEmpty) {
+      final byId = await _supabase
+          .from('documents')
+          .select('file_url')
+          .eq('id', docId)
+          .maybeSingle();
+      storagePath = _resolveDocumentStoragePath(
+        (byId?['file_url'] ?? '').toString(),
+      );
+    }
+    if (storagePath.isEmpty) throw Exception('No storage path found.');
+    final baseUrl = _resolveDocumentPublicUrl(storagePath);
+    if (baseUrl.isEmpty) throw Exception('Could not resolve source image.');
+
+    final editedBytes = await _renderLayoutViewerCompositePng(
+      imageUrl: baseUrl,
+      strokes: _layoutViewerStrokes,
+      drawingCanvasSize: _layoutViewerLastCanvasSize,
+    );
+    final nextStoragePath = _buildEditedLayoutImageStoragePath(
+      basePath: storagePath,
+      imageName: _activeLayoutImageName,
+    );
+    final nextName = nextStoragePath.split('/').last;
+
+    await _supabase.storage.from('documents').uploadBinary(
+          nextStoragePath,
+          editedBytes,
+          fileOptions: const FileOptions(
+            contentType: 'image/png',
+            cacheControl: '3600',
+            upsert: true,
+          ),
+        );
+
+    if (docId.isEmpty) {
+      final byPath = await _supabase
+          .from('documents')
+          .select('id')
+          .eq('project_id', projectId)
+          .eq('file_url', storagePath)
+          .limit(1)
+          .maybeSingle();
+      docId = (byPath?['id'] ?? '').toString().trim();
+    }
+    if (docId.isEmpty) throw Exception('Linked document row not found.');
+
+    await _supabase.from('documents').update({
+      'name': nextName,
+      'extension': 'png',
+      'file_url': nextStoragePath,
+      'file_size': editedBytes.length,
+    }).eq('id', docId);
+
+    // Keep layouts page in sync even when edit is done from Documents page.
+    try {
+      await _supabase
+          .from('layouts')
+          .update({
+            'layout_image_name': nextName,
+            'layout_image_path': nextStoragePath,
+            'layout_image_extension': 'png',
+          })
+          .eq('project_id', projectId)
+          .eq('layout_image_doc_id', docId);
+    } catch (_) {
+      // layout image columns may not exist in older DB schema
+    }
+
+    if (mounted) {
+      setState(() {
+        final idx = _documents
+            .indexWhere((item) => (item['id'] ?? '').toString() == docId);
+        if (idx >= 0) {
+          _documents[idx]['name'] = nextName;
+          _documents[idx]['extension'] = 'png';
+          _documents[idx]['url'] = nextStoragePath;
+          _documents[idx]['file_size'] = editedBytes.length;
+          _documents[idx]['updatedLabel'] =
+              'Updated: ${_formatDate(DateTime.now())}';
+        }
+      });
+    }
+
+    _activeLayoutImageStoragePath = nextStoragePath;
+    _activeLayoutImageDocId = docId;
+    _activeLayoutImageName = nextName;
+    _activeLayoutImageExtension = 'png';
+    _hasPendingLayoutViewerEdits = false;
+  }
+
+  String _buildEditedLayoutImageStoragePath({
+    required String basePath,
+    required String imageName,
+  }) {
+    final normalized = _resolveDocumentStoragePath(basePath);
+    final slashIndex = normalized.lastIndexOf('/');
+    final folderPath =
+        slashIndex >= 0 ? normalized.substring(0, slashIndex) : '';
+    final safeName = imageName.trim().isEmpty
+        ? 'layout_image'
+        : imageName.trim().replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+    final dotIndex = safeName.lastIndexOf('.');
+    final baseName = dotIndex > 0 ? safeName.substring(0, dotIndex) : safeName;
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final fileName = '${baseName}_edited_$ts.png';
+    return folderPath.isEmpty ? fileName : '$folderPath/$fileName';
+  }
+
+  Future<Uint8List> _renderLayoutViewerCompositePng({
+    required String imageUrl,
+    required List<_DocumentLayoutViewerStroke> strokes,
+    required Size drawingCanvasSize,
+  }) async {
+    final response = await http.get(Uri.parse(imageUrl));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Could not load source image (${response.statusCode})');
+    }
+    final contentType = response.headers['content-type'] ?? 'image/png';
+    final sourceImage = await _loadImageElementFromBytes(
+      response.bodyBytes,
+      contentType,
+    );
+
+    final width = max(1, sourceImage.naturalWidth ?? sourceImage.width ?? 0);
+    final height = max(1, sourceImage.naturalHeight ?? sourceImage.height ?? 0);
+    final widthScale =
+        drawingCanvasSize.width > 0 ? width / drawingCanvasSize.width : 1.0;
+    final heightScale =
+        drawingCanvasSize.height > 0 ? height / drawingCanvasSize.height : 1.0;
+    final strokeScale = min(widthScale, heightScale);
+    final canvas = html.CanvasElement(width: width, height: height);
+    final ctx = canvas.context2D;
+    ctx.drawImageScaled(sourceImage, 0, 0, width.toDouble(), height.toDouble());
+
+    for (final stroke in strokes) {
+      if (stroke.normalizedPoints.isEmpty) continue;
+      final lineWidth = max(1.0, stroke.thickness * 2.0 * strokeScale);
+      final strokeStyle = _cssColorFromColor(stroke.color);
+      if (stroke.normalizedPoints.length == 1) {
+        final p = stroke.normalizedPoints.first;
+        ctx
+          ..fillStyle = strokeStyle
+          ..beginPath()
+          ..arc(p.dx * width, p.dy * height, lineWidth / 2, 0, pi * 2)
+          ..fill();
+        continue;
+      }
+      final first = stroke.normalizedPoints.first;
+      ctx
+        ..beginPath()
+        ..strokeStyle = strokeStyle
+        ..lineWidth = lineWidth
+        ..lineCap = 'round'
+        ..lineJoin = 'round'
+        ..moveTo(first.dx * width, first.dy * height);
+      for (int i = 1; i < stroke.normalizedPoints.length; i++) {
+        final p = stroke.normalizedPoints[i];
+        ctx.lineTo(p.dx * width, p.dy * height);
+      }
+      ctx.stroke();
+    }
+    final dataUrl = canvas.toDataUrl('image/png');
+    final commaIndex = dataUrl.indexOf(',');
+    if (commaIndex < 0 || commaIndex + 1 >= dataUrl.length) {
+      throw Exception('Could not encode edited image');
+    }
+    return base64Decode(dataUrl.substring(commaIndex + 1));
+  }
+
+  Future<html.ImageElement> _loadImageElementFromBytes(
+    Uint8List bytes,
+    String contentType,
+  ) async {
+    final blob = html.Blob([bytes], contentType);
+    final objectUrl = html.Url.createObjectUrlFromBlob(blob);
+    final image = html.ImageElement();
+    final completer = Completer<html.ImageElement>();
+    late StreamSubscription loadSub;
+    late StreamSubscription errorSub;
+    loadSub = image.onLoad.listen((_) {
+      loadSub.cancel();
+      errorSub.cancel();
+      completer.complete(image);
+    });
+    errorSub = image.onError.listen((_) {
+      loadSub.cancel();
+      errorSub.cancel();
+      completer.completeError(Exception('Could not decode source image'));
+    });
+    image.src = objectUrl;
+    return completer.future.whenComplete(() {
+      html.Url.revokeObjectUrl(objectUrl);
+    });
+  }
+
+  String _cssColorFromColor(Color color) {
+    final alpha = (color.alpha / 255).toStringAsFixed(3);
+    return 'rgba(${color.red},${color.green},${color.blue},$alpha)';
+  }
+
+  void _notifyLayoutViewerPaint() {
+    _layoutViewerPaintVersion.value++;
+  }
+
+  void _markLayoutViewerEditsDirty() {
+    _hasPendingLayoutViewerEdits = true;
+    _scheduleLayoutViewerAutosave();
+  }
+
+  void _scheduleLayoutViewerAutosave() {
+    _layoutViewerAutosaveTimer?.cancel();
+    if (!_isLayoutImageViewerOpen) return;
+    _layoutViewerAutosaveTimer = Timer(const Duration(seconds: 2), () async {
+      if (!_isLayoutImageViewerOpen ||
+          _isSavingLayoutViewerEdits ||
+          !_hasPendingLayoutViewerEdits) {
+        return;
+      }
+      _isSavingLayoutViewerEdits = true;
+      try {
+        await _saveLayoutViewerEditsIfNeeded();
+      } catch (_) {
+        // keep pending edits to retry on close
+      } finally {
+        _isSavingLayoutViewerEdits = false;
+      }
+    });
+  }
+
+  void _setLayoutThicknessPickerVisible(
+    bool visible, {
+    bool forEraser = false,
+  }) {
+    setState(() {
+      _isLayoutThicknessPickerVisible = visible;
+      if (visible) {
+        _isLayoutThicknessPickerForEraser = forEraser;
+        _isLayoutColorPickerVisible = false;
+      } else {
+        _isLayoutThicknessPickerForEraser = false;
+      }
+    });
+  }
+
+  void _setLayoutColorPickerVisible(bool visible) {
+    setState(() {
+      _isLayoutColorPickerVisible = visible;
+      if (visible) {
+        _isLayoutThicknessPickerVisible = false;
+        _isLayoutThicknessPickerForEraser = false;
+      }
+    });
+  }
+
+  void _closeLayoutToolPickers() {
+    setState(() {
+      _isLayoutThicknessPickerVisible = false;
+      _isLayoutThicknessPickerForEraser = false;
+      _isLayoutColorPickerVisible = false;
+    });
+  }
+
+  void _selectLayoutColorOption(int index) {
+    if (index < 0 || index >= _layoutColorOptions.length) return;
+    setState(() => _selectedLayoutColorIndex = index);
+  }
+
+  void _selectLayoutThicknessOption(int index) {
+    if (index < 0 || index >= _layoutThicknessOptions.length) return;
+    setState(() => _selectedLayoutThicknessIndex = index);
+  }
+
+  void _selectLayoutEraserThicknessOption(int index) {
+    if (index < 0 || index >= _layoutThicknessOptions.length) return;
+    setState(() => _selectedLayoutEraserThicknessIndex = index);
+  }
+
+  void _toggleLayoutPenMode() {
+    setState(() {
+      _isLayoutPenModeActive = !_isLayoutPenModeActive;
+      if (_isLayoutPenModeActive) {
+        _isLayoutEraserModeActive = false;
+        _isLayoutPanModeActive = false;
+      }
+      if (!_isLayoutPenModeActive) {
+        _activeLayoutStrokeIndex = null;
+        _activeLayoutStrokePointerId = null;
+      }
+    });
+  }
+
+  void _activateLayoutPanMode() {
+    setState(() {
+      _isLayoutPanModeActive = true;
+      _isLayoutPenModeActive = false;
+      _isLayoutEraserModeActive = false;
+      _activeLayoutStrokeIndex = null;
+      _activeLayoutStrokePointerId = null;
+    });
+  }
+
+  void _activateLayoutEraserMode() {
+    setState(() {
+      _isLayoutEraserModeActive = true;
+      _isLayoutPenModeActive = false;
+      _isLayoutPanModeActive = false;
+      _activeLayoutStrokeIndex = null;
+      _activeLayoutStrokePointerId = null;
+    });
+  }
+
+  void _zoomLayoutImageViewerByStep(double step) {
+    final matrix = _layoutImageViewerController.value.clone();
+    final currentScale = matrix.getMaxScaleOnAxis();
+    final targetScale = (currentScale + step).clamp(0.5, 4.0);
+    final scaleFactor = targetScale / currentScale;
+    matrix.scale(scaleFactor);
+    _layoutImageViewerController.value = matrix;
+  }
+
+  Offset? _layoutScenePositionFromLocal({
+    required Offset localPosition,
+    required Size canvasSize,
+    bool clampToBounds = false,
+  }) {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) return null;
+    Offset scenePosition = _layoutImageViewerController.toScene(localPosition);
+    if (clampToBounds) {
+      return Offset(
+        scenePosition.dx.clamp(0.0, canvasSize.width),
+        scenePosition.dy.clamp(0.0, canvasSize.height),
+      );
+    }
+    if (scenePosition.dx < 0 ||
+        scenePosition.dy < 0 ||
+        scenePosition.dx > canvasSize.width ||
+        scenePosition.dy > canvasSize.height) {
+      return null;
+    }
+    return scenePosition;
+  }
+
+  void _beginLayoutViewerStroke({
+    required Offset localPosition,
+    required Size canvasSize,
+  }) {
+    if (!_isLayoutPenModeActive) return;
+    final scenePosition = _layoutScenePositionFromLocal(
+      localPosition: localPosition,
+      canvasSize: canvasSize,
+    );
+    if (scenePosition == null) return;
+    final selectedColor =
+        _layoutColorOptions[_selectedLayoutColorIndex].withValues(alpha: 0.5);
+    final selectedThickness =
+        _layoutThicknessOptions[_selectedLayoutThicknessIndex];
+    final normalizedPoint = Offset(
+      scenePosition.dx / canvasSize.width,
+      scenePosition.dy / canvasSize.height,
+    );
+    _layoutViewerStrokes.add(
+      _DocumentLayoutViewerStroke(
+        normalizedPoints: <Offset>[normalizedPoint],
+        color: selectedColor,
+        thickness: selectedThickness,
+      ),
+    );
+    _activeLayoutStrokeIndex = _layoutViewerStrokes.length - 1;
+    _markLayoutViewerEditsDirty();
+    _notifyLayoutViewerPaint();
+  }
+
+  void _appendLayoutViewerStrokePoint({
+    required Offset localPosition,
+    required Size canvasSize,
+  }) {
+    if (!_isLayoutPenModeActive) return;
+    if (_activeLayoutStrokeIndex == null ||
+        _activeLayoutStrokeIndex! < 0 ||
+        _activeLayoutStrokeIndex! >= _layoutViewerStrokes.length) {
+      _beginLayoutViewerStroke(
+        localPosition: localPosition,
+        canvasSize: canvasSize,
+      );
+      return;
+    }
+    final scenePosition = _layoutScenePositionFromLocal(
+      localPosition: localPosition,
+      canvasSize: canvasSize,
+      clampToBounds: true,
+    );
+    if (scenePosition == null) return;
+    final normalizedPoint = Offset(
+      scenePosition.dx / canvasSize.width,
+      scenePosition.dy / canvasSize.height,
+    );
+    final points =
+        _layoutViewerStrokes[_activeLayoutStrokeIndex!].normalizedPoints;
+    if (points.isNotEmpty) {
+      final last = points.last;
+      final dx = (normalizedPoint.dx - last.dx) * canvasSize.width;
+      final dy = (normalizedPoint.dy - last.dy) * canvasSize.height;
+      if ((dx * dx) + (dy * dy) < 0.25) return;
+    }
+    points.add(normalizedPoint);
+    _markLayoutViewerEditsDirty();
+    _notifyLayoutViewerPaint();
+  }
+
+  void _endLayoutViewerStroke() {
+    if (_activeLayoutStrokeIndex == null) return;
+    _activeLayoutStrokeIndex = null;
+  }
+
+  void _eraseLayoutViewerAt({
+    required Offset localPosition,
+    required Size canvasSize,
+  }) {
+    if (!_isLayoutEraserModeActive) return;
+    final scenePosition = _layoutScenePositionFromLocal(
+      localPosition: localPosition,
+      canvasSize: canvasSize,
+      clampToBounds: true,
+    );
+    if (scenePosition == null || _layoutViewerStrokes.isEmpty) return;
+    final eraserThickness =
+        _layoutThicknessOptions[_selectedLayoutEraserThicknessIndex];
+    final eraserRadiusPx = max(8.0, eraserThickness * 8.0);
+    final eraserRadiusSq = eraserRadiusPx * eraserRadiusPx;
+    final List<_DocumentLayoutViewerStroke> updated =
+        <_DocumentLayoutViewerStroke>[];
+    bool changed = false;
+
+    for (final stroke in _layoutViewerStrokes) {
+      if (stroke.normalizedPoints.isEmpty) continue;
+      final List<List<Offset>> segments = <List<Offset>>[];
+      List<Offset> current = <Offset>[];
+      bool strokeChanged = false;
+      for (final point in stroke.normalizedPoints) {
+        final dx = (point.dx * canvasSize.width) - scenePosition.dx;
+        final dy = (point.dy * canvasSize.height) - scenePosition.dy;
+        final shouldErase = (dx * dx) + (dy * dy) <= eraserRadiusSq;
+        if (shouldErase) {
+          strokeChanged = true;
+          if (current.isNotEmpty) {
+            segments.add(current);
+            current = <Offset>[];
+          }
+          continue;
+        }
+        current.add(point);
+      }
+      if (current.isNotEmpty) segments.add(current);
+      if (!strokeChanged) {
+        updated.add(stroke);
+        continue;
+      }
+      changed = true;
+      for (final segment in segments) {
+        if (segment.isEmpty) continue;
+        updated.add(
+          _DocumentLayoutViewerStroke(
+            normalizedPoints: List<Offset>.from(segment),
+            color: stroke.color,
+            thickness: stroke.thickness,
+          ),
+        );
+      }
+    }
+    if (!changed) return;
+    _layoutViewerStrokes
+      ..clear()
+      ..addAll(updated);
+    _markLayoutViewerEditsDirty();
+    _notifyLayoutViewerPaint();
+  }
+
+  void _handleLayoutViewerPointerDown({
+    required PointerDownEvent details,
+    required Size canvasSize,
+  }) {
+    _layoutViewerLastCanvasSize = canvasSize;
+    _activeLayoutStrokePointerId = details.pointer;
+    if (_isLayoutPenModeActive) {
+      _beginLayoutViewerStroke(
+        localPosition: details.localPosition,
+        canvasSize: canvasSize,
+      );
+      return;
+    }
+    if (_isLayoutEraserModeActive) {
+      _eraseLayoutViewerAt(
+        localPosition: details.localPosition,
+        canvasSize: canvasSize,
+      );
+    }
+  }
+
+  void _handleLayoutViewerPointerMove({
+    required PointerMoveEvent details,
+    required Size canvasSize,
+  }) {
+    _layoutViewerLastCanvasSize = canvasSize;
+    if (_activeLayoutStrokePointerId != details.pointer) return;
+    if (_isLayoutPenModeActive) {
+      _appendLayoutViewerStrokePoint(
+        localPosition: details.localPosition,
+        canvasSize: canvasSize,
+      );
+      return;
+    }
+    if (_isLayoutEraserModeActive) {
+      _eraseLayoutViewerAt(
+        localPosition: details.localPosition,
+        canvasSize: canvasSize,
+      );
+    }
+  }
+
+  void _handleLayoutViewerPointerUpOrCancel({
+    required int pointerId,
+  }) {
+    if (_activeLayoutStrokePointerId != pointerId) return;
+    _activeLayoutStrokePointerId = null;
+    _endLayoutViewerStroke();
+  }
+
+  Widget _buildLayoutImageViewerToolButton({
+    required String iconAssetPath,
+    required VoidCallback onTap,
+    double width = 75,
+    double height = 73,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: SvgPicture.asset(iconAssetPath, fit: BoxFit.fill),
+      ),
+    );
+  }
+
+  Widget _buildLayoutThicknessPicker({
+    required double panelWidth,
+    required Color optionColor,
+    required int selectedIndex,
+    required ValueChanged<int> onOptionTap,
+  }) {
+    const double rowHeight = 24;
+    const double rowGap = 16;
+    const double lineLength = 50;
+    return Container(
+      width: panelWidth,
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(16),
+          bottomLeft: Radius.circular(16),
+          bottomRight: Radius.circular(16),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 4,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(_layoutThicknessOptions.length, (index) {
+          final isSelected = index == selectedIndex;
+          final strokeHeight = _layoutThicknessOptions[index];
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: index == _layoutThicknessOptions.length - 1 ? 0 : rowGap,
+            ),
+            child: GestureDetector(
+              onTapDown: (_) => onOptionTap(index),
+              onTap: () => onOptionTap(index),
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: double.infinity,
+                height: rowHeight,
+                color:
+                    isSelected ? const Color(0xFFDDDEDE) : Colors.transparent,
+                alignment: Alignment.center,
+                child: Container(
+                  width: lineLength,
+                  height: strokeHeight,
+                  decoration: BoxDecoration(
+                    color: optionColor,
+                    borderRadius: BorderRadius.circular(strokeHeight / 2),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildLayoutColorPicker({
+    required double panelWidth,
+  }) {
+    const double rowHeight = 24;
+    const double rowGap = 16;
+    const double circleSize = 16;
+    return Container(
+      width: panelWidth,
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(16),
+          bottomLeft: Radius.circular(16),
+          bottomRight: Radius.circular(16),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 4,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(_layoutColorOptions.length, (index) {
+          final isSelected = index == _selectedLayoutColorIndex;
+          final color = _layoutColorOptions[index];
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: index == _layoutColorOptions.length - 1 ? 0 : rowGap,
+            ),
+            child: GestureDetector(
+              onTapDown: (_) => _selectLayoutColorOption(index),
+              onTap: () => _selectLayoutColorOption(index),
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: double.infinity,
+                height: rowHeight,
+                color:
+                    isSelected ? const Color(0xFFDDDEDE) : Colors.transparent,
+                alignment: Alignment.center,
+                child: Container(
+                  width: circleSize,
+                  height: circleSize,
+                  decoration:
+                      BoxDecoration(color: color, shape: BoxShape.circle),
+                ),
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildLayoutImageViewerOverlay() {
+    if (!_isLayoutImageViewerOpen || _activeLayoutImageUrl.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    const double baseImageBoxWidth = 1080;
+    const double baseImageBoxHeight = 768;
+    const double optionWidth = 75;
+    const double optionHeight = 73;
+    const double optionGap = 12;
+    const double railGapFromImage = 20;
+    const double viewportPadding = 24;
+    const double thicknessPanelWidth = 91;
+    const double thicknessPanelTopOffset = 0;
+    const double thicknessPanelRightShift = 4;
+    const double thicknessIconExtraWidth = 8;
+    const double thicknessIconExpandedWidth =
+        optionWidth + thicknessIconExtraWidth;
+    const double bottomActionIconSize = 75;
+    const double bottomActionIconGap = 35;
+    const double bottomActionTopGap = 24;
+    const int toolCount = 8;
+
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _closeLayoutImageViewer,
+            child: Container(
+              color: Colors.black.withValues(alpha: 0.3),
+            ),
+          ),
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final availableWidth =
+                    (constraints.maxWidth - (viewportPadding * 2)).clamp(
+                  200.0,
+                  double.infinity,
+                );
+                final availableHeight =
+                    (constraints.maxHeight - (viewportPadding * 2)).clamp(
+                  200.0,
+                  double.infinity,
+                );
+                final maxImageWidth = max(
+                  200.0,
+                  availableWidth - railGapFromImage - optionWidth,
+                );
+                final scale = min(
+                  1.0,
+                  min(
+                    maxImageWidth / baseImageBoxWidth,
+                    availableHeight / baseImageBoxHeight,
+                  ),
+                );
+                final imageBoxWidth = baseImageBoxWidth * scale;
+                final imageBoxHeight = baseImageBoxHeight * scale;
+                final railBaseHeight =
+                    (optionHeight * toolCount) + (optionGap * (toolCount - 1));
+                final viewerHeight = max(imageBoxHeight, railBaseHeight);
+                final railTopInset = (viewerHeight - railBaseHeight) / 2;
+                final imageTopInset =
+                    max(0.0, (viewerHeight - imageBoxHeight) / 2);
+                double toolTop(int toolIndex) =>
+                    railTopInset + ((optionHeight + optionGap) * toolIndex);
+
+                return Center(
+                  child: GestureDetector(
+                    onTap: () {},
+                    child: SizedBox(
+                      width: imageBoxWidth + railGapFromImage + optionWidth,
+                      height: viewerHeight,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: imageBoxWidth,
+                                height: imageBoxHeight,
+                                clipBehavior: Clip.hardEdge,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Listener(
+                                  behavior: HitTestBehavior.opaque,
+                                  onPointerDown: (details) {
+                                    _handleLayoutViewerPointerDown(
+                                      details: details,
+                                      canvasSize:
+                                          Size(imageBoxWidth, imageBoxHeight),
+                                    );
+                                  },
+                                  onPointerMove: (details) {
+                                    _handleLayoutViewerPointerMove(
+                                      details: details,
+                                      canvasSize:
+                                          Size(imageBoxWidth, imageBoxHeight),
+                                    );
+                                  },
+                                  onPointerUp: (details) {
+                                    _handleLayoutViewerPointerUpOrCancel(
+                                      pointerId: details.pointer,
+                                    );
+                                  },
+                                  onPointerCancel: (details) {
+                                    _handleLayoutViewerPointerUpOrCancel(
+                                      pointerId: details.pointer,
+                                    );
+                                  },
+                                  child: InteractiveViewer(
+                                    transformationController:
+                                        _layoutImageViewerController,
+                                    minScale: 0.5,
+                                    maxScale: 4.0,
+                                    panEnabled: !_isLayoutPenModeActive &&
+                                        !_isLayoutEraserModeActive,
+                                    scaleEnabled: !_isLayoutPenModeActive &&
+                                        !_isLayoutEraserModeActive,
+                                    clipBehavior: Clip.hardEdge,
+                                    child: SizedBox(
+                                      width: imageBoxWidth,
+                                      height: imageBoxHeight,
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          Image.network(
+                                            _activeLayoutImageUrl,
+                                            fit: BoxFit.contain,
+                                            alignment: Alignment.center,
+                                          ),
+                                          IgnorePointer(
+                                            child: CustomPaint(
+                                              painter:
+                                                  _DocumentLayoutViewerStrokesPainter(
+                                                strokes: _layoutViewerStrokes,
+                                                repaint:
+                                                    _layoutViewerPaintVersion,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: railGapFromImage),
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _buildLayoutImageViewerToolButton(
+                                    iconAssetPath: _isLayoutPenModeActive
+                                        ? 'assets/images/Pen_active.svg'
+                                        : 'assets/images/Pen.svg',
+                                    onTap: _toggleLayoutPenMode,
+                                    width: optionWidth,
+                                    height: optionHeight,
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      SizedBox(
+                                        width: optionWidth,
+                                        height: optionHeight,
+                                        child: Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            Positioned(
+                                              right: 0,
+                                              top: 0,
+                                              child: _isLayoutThicknessPickerVisible &&
+                                                      !_isLayoutThicknessPickerForEraser
+                                                  ? GestureDetector(
+                                                      onTap: () {
+                                                        final shouldClose =
+                                                            _isLayoutThicknessPickerVisible &&
+                                                                !_isLayoutThicknessPickerForEraser;
+                                                        _setLayoutThicknessPickerVisible(
+                                                          !shouldClose,
+                                                        );
+                                                      },
+                                                      behavior: HitTestBehavior
+                                                          .opaque,
+                                                      child: SizedBox(
+                                                        width:
+                                                            thicknessIconExpandedWidth,
+                                                        height: optionHeight,
+                                                        child: ClipRRect(
+                                                          borderRadius:
+                                                              const BorderRadius
+                                                                  .only(
+                                                            topRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                            bottomRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                          ),
+                                                          child:
+                                                              SvgPicture.asset(
+                                                            'assets/images/Thickness_open_active.svg',
+                                                            fit: BoxFit.fill,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : _buildLayoutImageViewerToolButton(
+                                                      iconAssetPath:
+                                                          'assets/images/Thickness.svg',
+                                                      onTap: () {
+                                                        final shouldClose =
+                                                            _isLayoutThicknessPickerVisible &&
+                                                                !_isLayoutThicknessPickerForEraser;
+                                                        _setLayoutThicknessPickerVisible(
+                                                          !shouldClose,
+                                                        );
+                                                      },
+                                                      width: optionWidth,
+                                                      height: optionHeight,
+                                                    ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      SizedBox(
+                                        width: optionWidth,
+                                        height: optionHeight,
+                                        child: Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            Positioned(
+                                              right: 0,
+                                              top: 0,
+                                              child: _isLayoutColorPickerVisible
+                                                  ? GestureDetector(
+                                                      onTap: () {
+                                                        final shouldClose =
+                                                            _isLayoutColorPickerVisible;
+                                                        _setLayoutColorPickerVisible(
+                                                          !shouldClose,
+                                                        );
+                                                      },
+                                                      behavior: HitTestBehavior
+                                                          .opaque,
+                                                      child: SizedBox(
+                                                        width:
+                                                            thicknessIconExpandedWidth,
+                                                        height: optionHeight,
+                                                        child: ClipRRect(
+                                                          borderRadius:
+                                                              const BorderRadius
+                                                                  .only(
+                                                            topRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                            bottomRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                          ),
+                                                          child:
+                                                              SvgPicture.asset(
+                                                            'assets/images/Color_open_active.svg',
+                                                            fit: BoxFit.fill,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : _buildLayoutImageViewerToolButton(
+                                                      iconAssetPath:
+                                                          'assets/images/Color.svg',
+                                                      onTap: () {
+                                                        final shouldClose =
+                                                            _isLayoutColorPickerVisible;
+                                                        _setLayoutColorPickerVisible(
+                                                          !shouldClose,
+                                                        );
+                                                      },
+                                                      width: optionWidth,
+                                                      height: optionHeight,
+                                                    ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      SizedBox(
+                                        width: optionWidth,
+                                        height: optionHeight,
+                                        child: Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            Positioned(
+                                              right: 0,
+                                              top: 0,
+                                              child: (_isLayoutThicknessPickerVisible &&
+                                                      _isLayoutThicknessPickerForEraser)
+                                                  ? GestureDetector(
+                                                      onTap: () {
+                                                        _activateLayoutEraserMode();
+                                                        final shouldClose =
+                                                            _isLayoutThicknessPickerVisible &&
+                                                                _isLayoutThicknessPickerForEraser;
+                                                        _setLayoutThicknessPickerVisible(
+                                                          !shouldClose,
+                                                          forEraser: true,
+                                                        );
+                                                      },
+                                                      behavior: HitTestBehavior
+                                                          .opaque,
+                                                      child: SizedBox(
+                                                        width:
+                                                            thicknessIconExpandedWidth,
+                                                        height: optionHeight,
+                                                        child: ClipRRect(
+                                                          borderRadius:
+                                                              const BorderRadius
+                                                                  .only(
+                                                            topRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                            bottomRight:
+                                                                Radius.circular(
+                                                                    16),
+                                                          ),
+                                                          child:
+                                                              SvgPicture.asset(
+                                                            'assets/images/Eraser_open_active.svg',
+                                                            fit: BoxFit.fill,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : _buildLayoutImageViewerToolButton(
+                                                      iconAssetPath:
+                                                          'assets/images/Eraser.svg',
+                                                      onTap: () {
+                                                        _activateLayoutEraserMode();
+                                                        final shouldClose =
+                                                            _isLayoutThicknessPickerVisible &&
+                                                                _isLayoutThicknessPickerForEraser;
+                                                        _setLayoutThicknessPickerVisible(
+                                                          !shouldClose,
+                                                          forEraser: true,
+                                                        );
+                                                      },
+                                                      width: optionWidth,
+                                                      height: optionHeight,
+                                                    ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  _buildLayoutImageViewerToolButton(
+                                    iconAssetPath: 'assets/images/Zoom in.svg',
+                                    onTap: () {
+                                      _closeLayoutToolPickers();
+                                      _zoomLayoutImageViewerByStep(0.1);
+                                    },
+                                    width: optionWidth,
+                                    height: optionHeight,
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  _buildLayoutImageViewerToolButton(
+                                    iconAssetPath: 'assets/images/Zoom out.svg',
+                                    onTap: () {
+                                      _closeLayoutToolPickers();
+                                      _zoomLayoutImageViewerByStep(-0.1);
+                                    },
+                                    width: optionWidth,
+                                    height: optionHeight,
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  _buildLayoutImageViewerToolButton(
+                                    iconAssetPath: _isLayoutPanModeActive
+                                        ? 'assets/images/Pan_active.svg'
+                                        : 'assets/images/Pan.svg',
+                                    onTap: () {
+                                      _closeLayoutToolPickers();
+                                      _activateLayoutPanMode();
+                                    },
+                                    width: optionWidth,
+                                    height: optionHeight,
+                                  ),
+                                  const SizedBox(height: optionGap),
+                                  _buildLayoutImageViewerToolButton(
+                                    iconAssetPath:
+                                        'assets/images/Delete_image.svg',
+                                    onTap: _closeLayoutImageViewer,
+                                    width: optionWidth,
+                                    height: optionHeight,
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          if (_isLayoutThicknessPickerVisible &&
+                              !_isLayoutThicknessPickerForEraser)
+                            Positioned(
+                              right: thicknessIconExpandedWidth -
+                                  thicknessPanelRightShift,
+                              top: toolTop(1) + thicknessPanelTopOffset,
+                              child: _buildLayoutThicknessPicker(
+                                panelWidth: thicknessPanelWidth,
+                                optionColor: Colors.black,
+                                selectedIndex: _selectedLayoutThicknessIndex,
+                                onOptionTap: _selectLayoutThicknessOption,
+                              ),
+                            ),
+                          if (_isLayoutColorPickerVisible)
+                            Positioned(
+                              right: thicknessIconExpandedWidth -
+                                  thicknessPanelRightShift,
+                              top: toolTop(2) + thicknessPanelTopOffset,
+                              child: _buildLayoutColorPicker(
+                                panelWidth: thicknessPanelWidth,
+                              ),
+                            ),
+                          if (_isLayoutThicknessPickerVisible &&
+                              _isLayoutThicknessPickerForEraser)
+                            Positioned(
+                              right: thicknessIconExpandedWidth -
+                                  thicknessPanelRightShift,
+                              top: toolTop(3) + thicknessPanelTopOffset,
+                              child: _buildLayoutThicknessPicker(
+                                panelWidth: thicknessPanelWidth,
+                                optionColor:
+                                    Colors.black.withValues(alpha: 0.5),
+                                selectedIndex:
+                                    _selectedLayoutEraserThicknessIndex,
+                                onOptionTap: _selectLayoutEraserThicknessOption,
+                              ),
+                            ),
+                          Positioned(
+                            right: railGapFromImage + optionWidth,
+                            top: imageTopInset +
+                                imageBoxHeight +
+                                bottomActionTopGap,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _buildLayoutImageViewerToolButton(
+                                  iconAssetPath:
+                                      'assets/images/Download_doc.svg',
+                                  onTap: _downloadActiveLayoutImage,
+                                  width: bottomActionIconSize,
+                                  height: bottomActionIconSize,
+                                ),
+                                const SizedBox(width: bottomActionIconGap),
+                                _buildLayoutImageViewerToolButton(
+                                  iconAssetPath: 'assets/images/Print doc.svg',
+                                  onTap: _printActiveLayoutImage,
+                                  width: bottomActionIconSize,
+                                  height: bottomActionIconSize,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _downloadDocuments() async {
@@ -944,7 +2445,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
     final folderPath = _getFolderPath(_currentFolderId);
     final screenWidth = MediaQuery.of(context).size.width;
     final scaleMetrics = AppScaleMetrics.of(context);
-    final tabLineWidth = scaleMetrics?.designViewportWidth ?? screenWidth;
+    final tabLineWidth = (scaleMetrics?.designViewportWidth ?? screenWidth) +
+        (scaleMetrics?.rightOverflowWidth ?? 0.0);
     final extraTabLineWidth =
         tabLineWidth > screenWidth ? tabLineWidth - screenWidth : 0.0;
 
@@ -995,10 +2497,13 @@ class _DocumentsPageState extends State<DocumentsPage> {
                     ),
                   ),
                   const SizedBox(width: 24),
-                  _StorageIndicator(
-                    usedStorage: usedStorage,
-                    totalStorage: totalStorage,
-                    percentage: storagePercentage,
+                  Transform.translate(
+                    offset: Offset(extraTabLineWidth, 0),
+                    child: _StorageIndicator(
+                      usedStorage: usedStorage,
+                      totalStorage: totalStorage,
+                      percentage: storagePercentage,
+                    ),
                   ),
                 ],
               ),
@@ -1016,219 +2521,286 @@ class _DocumentsPageState extends State<DocumentsPage> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Row(
-                                  children: [
-                                    // Upload
-                                    _PrimaryActionButton(
-                                      label: 'Upload',
-                                      iconAssetPath:
-                                          'assets/images/Upload.svg',
-                                      onTap: _uploadDocuments,
-                                    ),
-                                    const SizedBox(width: 24),
-                                    // Add Folder
-                                    _PrimaryActionButton(
-                                      label: 'Add Folder',
-                                      iconAssetPath:
-                                          'assets/images/Add_folder.svg',
-                                      onTap: _createFolder,
-                                    ),
-                                    const SizedBox(width: 24),
-                                    // Filter
-                                    Opacity(
-                                      opacity: documents.isEmpty ? 0.5 : 1.0,
-                                      child: IgnorePointer(
-                                        ignoring: documents.isEmpty,
-                                        child: _SecondaryActionButton(
-                                          key: _filterButtonKey,
-                                          label: 'Filter',
-                                          leading: SvgPicture.asset(
-                                            'assets/images/Filter.svg',
-                                            width: 16,
-                                            height: 10,
-                                            colorFilter: const ColorFilter.mode(
-                                                Color(0xFF0C8CE9),
-                                                BlendMode.srcIn),
-                                          ),
-                                          onTap: _filterDocuments,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 24),
-                                    // Download All
-                                    Opacity(
-                                      opacity: documents.isEmpty ? 0.5 : 1.0,
-                                      child: IgnorePointer(
-                                        ignoring: documents.isEmpty,
-                                        child: _SecondaryActionButton(
-                                          label: 'Download All',
-                                          trailing: SvgPicture.asset(
-                                            'assets/images/Download_all.svg',
-                                            width: 16,
-                                            height: 16,
-                                            colorFilter: const ColorFilter.mode(
-                                                Color(0xFF0C8CE9),
-                                                BlendMode.srcIn),
-                                          ),
-                                          onTap: _downloadDocuments,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 24),
-                                    // Select / Cancel button
-                                    Opacity(
-                                      opacity: documents.isEmpty ? 0.5 : 1.0,
-                                      child: IgnorePointer(
-                                        ignoring: documents.isEmpty,
-                                        child: _isSelectMode
-                                            ? _SecondaryActionButton(
-                                                label: 'Cancel',
-                                                trailing: SvgPicture.asset(
-                                                  'assets/images/cross.svg',
-                                                  width: 16,
-                                                  height: 16,
-                                                  colorFilter:
-                                                      const ColorFilter.mode(
-                                                          Color(0xFF0C8CE9),
-                                                          BlendMode.srcIn),
-                                                ),
-                                                onTap: () {
-                                                  setState(() {
-                                                    _exitSelectMode();
-                                                  });
-                                                },
-                                                // Removed backgroundColor and textColor to inherit hover effect
-                                              )
-                                            : _SecondaryActionButton(
-                                                label: 'Select',
-                                                trailing: SvgPicture.asset(
-                                                  'assets/images/select.svg',
-                                                  width: 16,
-                                                  height: 16,
-                                                  colorFilter:
-                                                      const ColorFilter.mode(
-                                                          Color(0xFF0C8CE9),
-                                                          BlendMode.srcIn),
-                                                ),
-                                                onTap: () {
-                                                  setState(() =>
-                                                      _isSelectMode = true);
-                                                },
+                                LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final actionRowWidth =
+                                        constraints.maxWidth +
+                                            extraTabLineWidth;
+                                    const actionRowHeight = 36.0;
+                                    return SizedBox(
+                                      height: actionRowHeight,
+                                      child: OverflowBox(
+                                        alignment: Alignment.centerLeft,
+                                        minWidth: actionRowWidth,
+                                        maxWidth: actionRowWidth,
+                                        minHeight: actionRowHeight,
+                                        maxHeight: actionRowHeight,
+                                        child: SizedBox(
+                                          width: actionRowWidth,
+                                          height: actionRowHeight,
+                                          child: Row(
+                                            children: [
+                                              // Upload
+                                              _PrimaryActionButton(
+                                                label: 'Upload',
+                                                iconAssetPath:
+                                                    'assets/images/Upload.svg',
+                                                onTap: _uploadDocuments,
                                               ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 24),
-                                    // Search
-                                    Expanded(
-                                      child: Container(
-                                        height: 36,
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(32),
-                                          border: Border.all(
-                                              color: Colors.black, width: 0.5),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.05),
-                                              blurRadius: 1.75,
-                                              offset: const Offset(0, 0),
-                                            ),
-                                          ],
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Padding(
-                                              padding: const EdgeInsets.only(
-                                                  left: 10),
-                                              child: SvgPicture.asset(
-                                                'assets/images/Search_doc.svg',
-                                                width: 16,
-                                                height: 16,
-                                                colorFilter:
-                                                    const ColorFilter.mode(
-                                                        Colors.black,
-                                                        BlendMode.srcIn),
+                                              const SizedBox(width: 24),
+                                              // Add Folder
+                                              _PrimaryActionButton(
+                                                label: 'Add Folder',
+                                                iconAssetPath:
+                                                    'assets/images/Add_folder.svg',
+                                                onTap: _createFolder,
                                               ),
-                                            ),
-                                            Expanded(
-                                              child: TextField(
-                                                onChanged: (value) => setState(
-                                                    () => _searchQuery = value),
-                                                textAlignVertical:
-                                                    TextAlignVertical.center,
-                                                decoration: InputDecoration(
-                                                  hintText: 'Search Documents',
-                                                  hintStyle: GoogleFonts.inter(
-                                                    fontSize: 14,
-                                                    fontWeight:
-                                                        FontWeight.normal,
-                                                    color: Colors.black
-                                                        .withOpacity(0.5),
-                                                  ),
-                                                  border: InputBorder.none,
-                                                  contentPadding:
-                                                      const EdgeInsets
-                                                          .symmetric(
-                                                          horizontal: 12,
-                                                          vertical: 10),
-                                                  isDense: true,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 24),
-                                    _activeUploads.isNotEmpty
-                                        ? GestureDetector(
-                                            onTap: () => setState(() =>
-                                                _showUploadingPopup =
-                                                    !_showUploadingPopup),
-                                            child: SizedBox(
-                                              width: 24,
-                                              height: 24,
-                                              child: Lottie.asset(
-                                                'assets/images/Animation - 1770546911567.json',
-                                                width: 24,
-                                                height: 24,
-                                                fit: BoxFit.contain,
-                                                repeat: true,
-                                                delegates: LottieDelegates(
-                                                  values: [
-                                                    ValueDelegate.color(
-                                                      const ["**"],
-                                                      value: const Color(
-                                                          0xFF0C8CE9),
+                                              const SizedBox(width: 24),
+                                              // Filter
+                                              Opacity(
+                                                opacity: documents.isEmpty
+                                                    ? 0.5
+                                                    : 1.0,
+                                                child: IgnorePointer(
+                                                  ignoring: documents.isEmpty,
+                                                  child: _SecondaryActionButton(
+                                                    key: _filterButtonKey,
+                                                    label: 'Filter',
+                                                    leading: SvgPicture.asset(
+                                                      'assets/images/Filter.svg',
+                                                      width: 16,
+                                                      height: 10,
+                                                      colorFilter:
+                                                          const ColorFilter
+                                                              .mode(
+                                                              Color(0xFF0C8CE9),
+                                                              BlendMode.srcIn),
                                                     ),
-                                                  ],
+                                                    onTap: _filterDocuments,
+                                                  ),
                                                 ),
                                               ),
-                                            ),
-                                          )
-                                        : (_completedUploads.isNotEmpty
-                                            ? GestureDetector(
-                                                onTap: () => setState(() =>
-                                                    _showUploadedPopup =
-                                                        !_showUploadedPopup),
-                                                child: SvgPicture.asset(
-                                                  'assets/images/active_upload.svg',
-                                                  width: 24,
-                                                  height: 24,
-                                                  colorFilter:
-                                                      const ColorFilter.mode(
-                                                          Color(0xFF0C8CE9),
-                                                          BlendMode.srcIn),
+                                              const SizedBox(width: 24),
+                                              // Download All
+                                              Opacity(
+                                                opacity: documents.isEmpty
+                                                    ? 0.5
+                                                    : 1.0,
+                                                child: IgnorePointer(
+                                                  ignoring: documents.isEmpty,
+                                                  child: _SecondaryActionButton(
+                                                    label: 'Download All',
+                                                    trailing: SvgPicture.asset(
+                                                      'assets/images/Download_all.svg',
+                                                      width: 16,
+                                                      height: 16,
+                                                      colorFilter:
+                                                          const ColorFilter
+                                                              .mode(
+                                                              Color(0xFF0C8CE9),
+                                                              BlendMode.srcIn),
+                                                    ),
+                                                    onTap: _downloadDocuments,
+                                                  ),
                                                 ),
-                                              )
-                                            : SvgPicture.asset(
-                                                'assets/images/upload_doc.svg',
-                                                width: 24,
-                                                height: 24,
-                                              )),
-                                  ],
+                                              ),
+                                              const SizedBox(width: 24),
+                                              // Select / Cancel button
+                                              Opacity(
+                                                opacity: documents.isEmpty
+                                                    ? 0.5
+                                                    : 1.0,
+                                                child: IgnorePointer(
+                                                  ignoring: documents.isEmpty,
+                                                  child: _isSelectMode
+                                                      ? _SecondaryActionButton(
+                                                          label: 'Cancel',
+                                                          trailing:
+                                                              SvgPicture.asset(
+                                                            'assets/images/cross.svg',
+                                                            width: 16,
+                                                            height: 16,
+                                                            colorFilter:
+                                                                const ColorFilter
+                                                                    .mode(
+                                                                    Color(
+                                                                        0xFF0C8CE9),
+                                                                    BlendMode
+                                                                        .srcIn),
+                                                          ),
+                                                          onTap: () {
+                                                            setState(() {
+                                                              _exitSelectMode();
+                                                            });
+                                                          },
+                                                          // Removed backgroundColor and textColor to inherit hover effect
+                                                        )
+                                                      : _SecondaryActionButton(
+                                                          label: 'Select',
+                                                          trailing:
+                                                              SvgPicture.asset(
+                                                            'assets/images/select.svg',
+                                                            width: 16,
+                                                            height: 16,
+                                                            colorFilter:
+                                                                const ColorFilter
+                                                                    .mode(
+                                                                    Color(
+                                                                        0xFF0C8CE9),
+                                                                    BlendMode
+                                                                        .srcIn),
+                                                          ),
+                                                          onTap: () {
+                                                            setState(() =>
+                                                                _isSelectMode =
+                                                                    true);
+                                                          },
+                                                        ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 24),
+                                              // Search
+                                              Expanded(
+                                                child: Container(
+                                                  height: 36,
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            32),
+                                                    border: Border.all(
+                                                        color: Colors.black,
+                                                        width: 0.5),
+                                                    boxShadow: [
+                                                      BoxShadow(
+                                                        color: Colors.black
+                                                            .withOpacity(0.05),
+                                                        blurRadius: 1.75,
+                                                        offset:
+                                                            const Offset(0, 0),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Row(
+                                                    children: [
+                                                      Padding(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .only(left: 10),
+                                                        child: SvgPicture.asset(
+                                                          'assets/images/Search_doc.svg',
+                                                          width: 16,
+                                                          height: 16,
+                                                          colorFilter:
+                                                              const ColorFilter
+                                                                  .mode(
+                                                                  Colors.black,
+                                                                  BlendMode
+                                                                      .srcIn),
+                                                        ),
+                                                      ),
+                                                      Expanded(
+                                                        child: TextField(
+                                                          onChanged: (value) =>
+                                                              setState(() =>
+                                                                  _searchQuery =
+                                                                      value),
+                                                          textAlignVertical:
+                                                              TextAlignVertical
+                                                                  .center,
+                                                          decoration:
+                                                              InputDecoration(
+                                                            hintText:
+                                                                'Search Documents',
+                                                            hintStyle:
+                                                                GoogleFonts
+                                                                    .inter(
+                                                              fontSize: 14,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .normal,
+                                                              color: Colors
+                                                                  .black
+                                                                  .withOpacity(
+                                                                      0.5),
+                                                            ),
+                                                            border: InputBorder
+                                                                .none,
+                                                            contentPadding:
+                                                                const EdgeInsets
+                                                                    .symmetric(
+                                                                    horizontal:
+                                                                        12,
+                                                                    vertical:
+                                                                        10),
+                                                            isDense: true,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 24),
+                                              _activeUploads.isNotEmpty
+                                                  ? GestureDetector(
+                                                      onTap: () => setState(() =>
+                                                          _showUploadingPopup =
+                                                              !_showUploadingPopup),
+                                                      child: SizedBox(
+                                                        width: 24,
+                                                        height: 24,
+                                                        child: Lottie.asset(
+                                                          'assets/images/Animation - 1770546911567.json',
+                                                          width: 24,
+                                                          height: 24,
+                                                          fit: BoxFit.contain,
+                                                          repeat: true,
+                                                          delegates:
+                                                              LottieDelegates(
+                                                            values: [
+                                                              ValueDelegate
+                                                                  .color(
+                                                                const ["**"],
+                                                                value: const Color(
+                                                                    0xFF0C8CE9),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : (_completedUploads
+                                                          .isNotEmpty
+                                                      ? GestureDetector(
+                                                          onTap: () => setState(() =>
+                                                              _showUploadedPopup =
+                                                                  !_showUploadedPopup),
+                                                          child:
+                                                              SvgPicture.asset(
+                                                            'assets/images/active_upload.svg',
+                                                            width: 24,
+                                                            height: 24,
+                                                            colorFilter:
+                                                                const ColorFilter
+                                                                    .mode(
+                                                                    Color(
+                                                                        0xFF0C8CE9),
+                                                                    BlendMode
+                                                                        .srcIn),
+                                                          ),
+                                                        )
+                                                      : SvgPicture.asset(
+                                                          'assets/images/upload_doc.svg',
+                                                          width: 24,
+                                                          height: 24,
+                                                        )),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
                                 ),
                               ],
                             ),
@@ -1439,6 +3011,10 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                           index++)
                                         () {
                                           final doc = documents[index];
+                                          final docExtension =
+                                              _resolveDocumentExtension(
+                                            Map<String, dynamic>.from(doc),
+                                          );
                                           final isUploadingDoc =
                                               doc['isUploading'] == true;
                                           final docId =
@@ -1484,37 +3060,10 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                     'folder') {
                                                   _openFolder(docId);
                                                 } else {
-                                                  if (doc['url'] != null &&
-                                                      (doc['url'] as String)
-                                                          .isNotEmpty) {
-                                                    final urlOrPath =
-                                                        doc['url'] as String;
-                                                    String finalUrl;
-                                                    if (urlOrPath
-                                                        .startsWith('http')) {
-                                                      final parts = urlOrPath
-                                                          .split('/documents/');
-                                                      if (parts.length > 1) {
-                                                        final storagePath =
-                                                            parts[1];
-                                                        finalUrl = _supabase
-                                                            .storage
-                                                            .from('documents')
-                                                            .getPublicUrl(
-                                                                storagePath);
-                                                      } else {
-                                                        finalUrl = urlOrPath;
-                                                      }
-                                                    } else {
-                                                      finalUrl = _supabase
-                                                          .storage
-                                                          .from('documents')
-                                                          .getPublicUrl(
-                                                              urlOrPath);
-                                                    }
-                                                    html.window.open(
-                                                        finalUrl, '_blank');
-                                                  }
+                                                  _openDocumentFile(
+                                                    Map<String, dynamic>.from(
+                                                        doc),
+                                                  );
                                                 }
                                               }
                                             },
@@ -1732,13 +3281,11 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                         '')
                                                                     .toString(),
                                                             extension:
-                                                                (doc['extension'] ??
-                                                                        '')
-                                                                    .toString(),
-                                                            iconPath: _getFileIconPath(
-                                                                (doc['extension'] ??
-                                                                        '')
-                                                                    .toString()),
+                                                                docExtension,
+                                                            iconPath:
+                                                                _getFileIconPath(
+                                                              docExtension,
+                                                            ),
                                                             uploadedLabel:
                                                                 (doc['uploadedLabel'] ??
                                                                         '')
@@ -1857,58 +3404,11 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                               }
                                                             },
                                                             onOpen: () {
-                                                              debugPrint(
-                                                                  'Open file: ${doc['name']}');
-                                                              final urlOrPath =
-                                                                  doc['url']
-                                                                      as String?;
-                                                              debugPrint(
-                                                                  'URL/Path from database: $urlOrPath');
-                                                              if (urlOrPath !=
-                                                                      null &&
-                                                                  urlOrPath
-                                                                      .isNotEmpty) {
-                                                                String finalUrl;
-                                                                if (urlOrPath
-                                                                    .startsWith(
-                                                                        'http')) {
-                                                                  final parts =
-                                                                      urlOrPath
-                                                                          .split(
-                                                                              '/documents/');
-                                                                  if (parts
-                                                                          .length >
-                                                                      1) {
-                                                                    final storagePath =
-                                                                        parts[
-                                                                            1];
-                                                                    finalUrl = _supabase
-                                                                        .storage
-                                                                        .from(
-                                                                            'documents')
-                                                                        .getPublicUrl(
-                                                                            storagePath);
-                                                                  } else {
-                                                                    finalUrl =
-                                                                        urlOrPath;
-                                                                  }
-                                                                } else {
-                                                                  finalUrl = _supabase
-                                                                      .storage
-                                                                      .from(
-                                                                          'documents')
-                                                                      .getPublicUrl(
-                                                                          urlOrPath);
-                                                                }
-                                                                debugPrint(
-                                                                    'Opening file in new tab: $finalUrl');
-                                                                html.window.open(
-                                                                    finalUrl,
-                                                                    '_blank');
-                                                              } else {
-                                                                debugPrint(
-                                                                    'File path not available');
-                                                              }
+                                                              _openDocumentFile(
+                                                                Map<String,
+                                                                        dynamic>.from(
+                                                                    doc),
+                                                              );
                                                             },
                                                           ),
                                                   ),
@@ -1949,8 +3449,75 @@ class _DocumentsPageState extends State<DocumentsPage> {
             uploads: _completedUploads,
             onClose: _closeUploadedPopup,
           ),
+        if (_isLayoutImageViewerOpen) _buildLayoutImageViewerOverlay(),
       ],
     );
+  }
+}
+
+class _DocumentLayoutViewerStroke {
+  final List<Offset> normalizedPoints;
+  final Color color;
+  final double thickness;
+
+  _DocumentLayoutViewerStroke({
+    required this.normalizedPoints,
+    required this.color,
+    required this.thickness,
+  });
+}
+
+class _DocumentLayoutViewerStrokesPainter extends CustomPainter {
+  final List<_DocumentLayoutViewerStroke> strokes;
+
+  const _DocumentLayoutViewerStrokesPainter({
+    required this.strokes,
+    Listenable? repaint,
+  }) : super(repaint: repaint);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final stroke in strokes) {
+      if (stroke.normalizedPoints.isEmpty) continue;
+
+      final strokePaint = Paint()
+        ..color = stroke.color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = max(1.0, stroke.thickness * 2)
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      Offset denormalize(Offset point) => Offset(
+            point.dx * size.width,
+            point.dy * size.height,
+          );
+
+      if (stroke.normalizedPoints.length == 1) {
+        final center = denormalize(stroke.normalizedPoints.first);
+        final dotPaint = Paint()
+          ..color = stroke.color
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(center, strokePaint.strokeWidth / 2, dotPaint);
+        continue;
+      }
+
+      final path = Path()
+        ..moveTo(
+          stroke.normalizedPoints.first.dx * size.width,
+          stroke.normalizedPoints.first.dy * size.height,
+        );
+      for (int i = 1; i < stroke.normalizedPoints.length; i++) {
+        final point = denormalize(stroke.normalizedPoints[i]);
+        path.lineTo(point.dx, point.dy);
+      }
+      canvas.drawPath(path, strokePaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(
+      covariant _DocumentLayoutViewerStrokesPainter oldDelegate) {
+    return true;
   }
 }
 
@@ -3564,76 +5131,76 @@ class _StorageIndicator extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-                Container(
-                  width: 287,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Color(0xFFE0E0E0),
-                        Color(0xFFF0F0F0),
-                      ],
-                      stops: [0.0, 0.5],
+              Container(
+                width: 287,
+                height: 8,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0xFFE0E0E0),
+                      Color(0xFFF0F0F0),
+                    ],
+                    stops: [0.0, 0.5],
+                  ),
+                  borderRadius: BorderRadius.circular(100),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1A000000),
+                      blurRadius: 2,
+                      spreadRadius: 0,
+                      offset: Offset(0, 1),
+                      blurStyle: BlurStyle.inner,
                     ),
-                    borderRadius: BorderRadius.circular(100),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x1A000000),
-                        blurRadius: 2,
-                        spreadRadius: 0,
-                        offset: Offset(0, 1),
-                        blurStyle: BlurStyle.inner,
-                      ),
-                    ],
-                  ),
-                  child: Stack(
-                    children: [
-                      if (percentage > 0)
-                        Container(
-                          width: (287 * percentage / 100).clamp(0.0, 287.0),
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: _getBarColor(),
-                            borderRadius: BorderRadius.circular(100),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Color(0x1A000000),
-                                blurRadius: 2,
-                                spreadRadius: 0,
-                                offset: Offset(0, 1),
-                                blurStyle: BlurStyle.inner,
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
+                  ],
                 ),
-                const SizedBox(height: 4),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                child: Stack(
                   children: [
+                    if (percentage > 0)
+                      Container(
+                        width: (287 * percentage / 100).clamp(0.0, 287.0),
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: _getBarColor(),
+                          borderRadius: BorderRadius.circular(100),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x1A000000),
+                              blurRadius: 2,
+                              spreadRadius: 0,
+                              offset: Offset(0, 1),
+                              blurStyle: BlurStyle.inner,
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    '(${_formatSize(usedStorage)} of ${_formatSize(totalStorage)})',
+                    style: GoogleFonts.inter(
+                      fontSize: 10,
+                      fontWeight: FontWeight.normal,
+                      color: const Color(0xFF5C5C5C),
+                    ),
+                  ),
+                  if (percentage >= 100)
                     Text(
-                      '(${_formatSize(usedStorage)} of ${_formatSize(totalStorage)})',
+                      'Storage is full',
                       style: GoogleFonts.inter(
                         fontSize: 10,
                         fontWeight: FontWeight.normal,
                         color: const Color(0xFF5C5C5C),
                       ),
                     ),
-                    if (percentage >= 100)
-                      Text(
-                        'Storage is full',
-                        style: GoogleFonts.inter(
-                          fontSize: 10,
-                          fontWeight: FontWeight.normal,
-                          color: const Color(0xFF5C5C5C),
-                        ),
-                      ),
-                  ],
-                ),
+                ],
+              ),
             ],
           ),
         ],
@@ -4056,8 +5623,7 @@ class _UploadItemState extends State<_UploadItem>
       'txt': 'assets/images/txt.svg',
       'dxf': 'assets/images/dxf.svg',
     };
-    return iconMap[extension.toLowerCase()] ??
-        'assets/images/no_format.svg';
+    return iconMap[extension.toLowerCase()] ?? 'assets/images/no_format.svg';
   }
 
   @override
@@ -4209,8 +5775,7 @@ class _UploadedPopup extends StatelessWidget {
       'txt': 'assets/images/txt.svg',
       'dxf': 'assets/images/dxf.svg',
     };
-    return iconMap[extension.toLowerCase()] ??
-        'assets/images/no_format.svg';
+    return iconMap[extension.toLowerCase()] ?? 'assets/images/no_format.svg';
   }
 
   @override
@@ -4358,8 +5923,7 @@ class _UploadedItem extends StatelessWidget {
       'txt': 'assets/images/txt.svg',
       'dxf': 'assets/images/dxf.svg',
     };
-    return iconMap[extension.toLowerCase()] ??
-        'assets/images/no_format.svg';
+    return iconMap[extension.toLowerCase()] ?? 'assets/images/no_format.svg';
   }
 
   String _formatFileSize(int bytes) {

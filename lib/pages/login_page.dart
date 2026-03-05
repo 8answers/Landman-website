@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../screens/account_settings_screen.dart';
 
 class LoginPage extends StatefulWidget {
@@ -155,12 +156,20 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  void _navigateToDashboard() {
+  Future<void> _navigateToDashboard() async {
+    // Ensure fresh login always starts from Recent Projects.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('nav_current_page', 'recentProjects');
+    await prefs.remove('nav_previous_page');
+    await prefs.setBool('nav_force_recent_on_next_open', true);
+
     // Navigate to account settings screen (main app screen)
-    Navigator.of(context).pushReplacement(
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(
         builder: (context) => const AccountSettingsScreen(),
       ),
+      (route) => false,
     );
   }
 

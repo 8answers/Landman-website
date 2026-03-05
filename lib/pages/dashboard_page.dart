@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/area_unit_service.dart';
 import '../utils/area_unit_utils.dart';
 import '../widgets/area_unit_selector.dart';
+import '../widgets/app_scale_metrics.dart';
 import 'project_details_page.dart';
 
 enum DashboardTab {
@@ -15,6 +16,7 @@ enum DashboardTab {
   sales,
   profitRoi,
   site,
+  amenityArea,
   partners,
   projectManagers,
   agents,
@@ -177,6 +179,7 @@ class _DashboardPageState extends State<DashboardPage> {
   List<Map<String, dynamic>> _projectManagers = [];
   List<Map<String, dynamic>> _agents = [];
   List<Map<String, dynamic>> _compensationLayouts = [];
+  List<Map<String, dynamic>> _amenityAreaRows = [];
   double _totalCompensation = 0.0;
 
   // Loading state flags for individual data sections
@@ -193,6 +196,9 @@ class _DashboardPageState extends State<DashboardPage> {
   final ScrollController _agentsTableScrollController = ScrollController();
   final ScrollController _compensationTableScrollController =
       ScrollController();
+  final ScrollController _amenityAgentTableScrollController =
+      ScrollController();
+  final ScrollController _amenityAreaTableScrollController = ScrollController();
   final Map<int, ScrollController> _siteLayoutTableScrollControllers = {};
 
   // Tab state
@@ -205,6 +211,8 @@ class _DashboardPageState extends State<DashboardPage> {
   final Set<int> _collapsedLayouts = {};
   double _tableZoomLevel = 1.0;
   String _selectedLayoutFilter = 'All';
+  bool _isAmenityAreaSectionCollapsed = false;
+  String _selectedAmenityFilter = 'All';
 
   // Compensation Layouts toolbar state (Agents tab)
   final Set<int> _collapsedCompensationLayouts = {};
@@ -292,6 +300,7 @@ class _DashboardPageState extends State<DashboardPage> {
       } else {
         setState(() {
           _dashboardData = null;
+          _amenityAreaRows = [];
           _isLoading = false;
         });
         _notifyLoadingState(false);
@@ -307,6 +316,8 @@ class _DashboardPageState extends State<DashboardPage> {
     _layoutPlotsTableScrollController.dispose();
     _agentsTableScrollController.dispose();
     _compensationTableScrollController.dispose();
+    _amenityAgentTableScrollController.dispose();
+    _amenityAreaTableScrollController.dispose();
     for (final controller in _siteLayoutTableScrollControllers.values) {
       controller.dispose();
     }
@@ -684,6 +695,28 @@ class _DashboardPageState extends State<DashboardPage> {
           .select('area')
           .eq('project_id', projectId);
 
+      // Fetch amenity areas
+      List<dynamic> amenityAreas;
+      try {
+        amenityAreas = await _supabase
+            .from('amenity_areas')
+            .select(
+                'id, name, area, all_in_cost, status, sale_price, sale_value, buyer_name, payment, agent_name, sale_date')
+            .eq('project_id', projectId)
+            .order('sort_order', ascending: true)
+            .order('created_at', ascending: true)
+            .order('id', ascending: true);
+      } catch (_) {
+        // Fallback for older schemas where sales/status columns may be missing.
+        amenityAreas = await _supabase
+            .from('amenity_areas')
+            .select('id, name, area, all_in_cost')
+            .eq('project_id', projectId)
+            .order('sort_order', ascending: true)
+            .order('created_at', ascending: true)
+            .order('id', ascending: true);
+      }
+
       // Fetch layouts
       final layouts = await _supabase
           .from('layouts')
@@ -727,6 +760,34 @@ class _DashboardPageState extends State<DashboardPage> {
         0.0,
         (sum, area) => sum + ((area['area'] as num?)?.toDouble() ?? 0.0),
       );
+
+      final amenityAreaRows = amenityAreas
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+      final validAmenityAreas = amenityAreaRows.where((row) {
+        final name = (row['name'] ?? '').toString().trim();
+        final areaSqft = (row['area'] as num?)?.toDouble() ?? 0.0;
+        final allInCostPerSqft =
+            (row['all_in_cost'] as num?)?.toDouble() ?? 0.0;
+        return name.isNotEmpty || areaSqft > 0 || allInCostPerSqft > 0;
+      }).toList();
+
+      final totalAmenityAreaSqft = validAmenityAreas.fold<double>(
+        0.0,
+        (sum, row) => sum + ((row['area'] as num?)?.toDouble() ?? 0.0),
+      );
+      final totalAmenityAreaValue = validAmenityAreas.fold<double>(
+        0.0,
+        (sum, row) {
+          final areaSqft = (row['area'] as num?)?.toDouble() ?? 0.0;
+          final allInCostPerSqft =
+              (row['all_in_cost'] as num?)?.toDouble() ?? 0.0;
+          return sum + (areaSqft * allInCostPerSqft);
+        },
+      );
+      final amenityAllInCostPerSqft = totalAmenityAreaSqft > 0
+          ? (totalAmenityAreaValue / totalAmenityAreaSqft)
+          : 0.0;
 
       final allInCost = sellingArea > 0 ? totalExpenses / sellingArea : 0.0;
 
@@ -801,6 +862,7 @@ class _DashboardPageState extends State<DashboardPage> {
       // Set loading flags for data sections and store dashboard data
       if (!_isDashboardLoadCurrent(loadGeneration)) return;
       setState(() {
+        _amenityAreaRows = amenityAreaRows;
         _dashboardData = {
           'estimatedDevelopmentCost': estimatedDevelopmentCost,
           'totalExpenses': totalExpenses,
@@ -809,6 +871,11 @@ class _DashboardPageState extends State<DashboardPage> {
           'totalArea': totalArea,
           'sellingArea': sellingArea,
           'nonSellableArea': nonSellableArea,
+          'amenityAreaRowCount': amenityAreaRows.length,
+          'amenityAreaCount': validAmenityAreas.length,
+          'totalAmenityAreaSqft': totalAmenityAreaSqft,
+          'amenityAllInCostPerSqft': amenityAllInCostPerSqft,
+          'totalAmenityAreaValue': totalAmenityAreaValue,
           'totalLayouts': totalLayouts,
           'totalPlots': totalPlots,
           'availablePlots': availablePlots,
@@ -938,6 +1005,12 @@ class _DashboardPageState extends State<DashboardPage> {
               _dashboardData!['avgSalePricePerSqft'], // For compatibility
           'totalExpenses': _dashboardData!['totalExpenses'],
           'allInCost': _dashboardData!['allInCost'],
+          'amenityAreaCount': _dashboardData!['amenityAreaCount'] ?? 0,
+          'totalAmenityAreaSqft': _dashboardData!['totalAmenityAreaSqft'] ?? 0,
+          'amenityAllInCostPerSqft':
+              _dashboardData!['amenityAllInCostPerSqft'] ?? 0,
+          'totalAmenityAreaValue':
+              _dashboardData!['totalAmenityAreaValue'] ?? 0,
           'estimatedDevelopmentCost':
               _dashboardData!['estimatedDevelopmentCost'] ?? 0,
           'grossProfit': grossProfit,
@@ -963,6 +1036,7 @@ class _DashboardPageState extends State<DashboardPage> {
       print('Error loading dashboard data: $e');
       if (!_isDashboardLoadCurrent(loadGeneration)) return;
       setState(() {
+        _amenityAreaRows = [];
         _isLoading = false;
         _isPartnersLoading = false;
         _isProjectManagersLoading = false;
@@ -1885,6 +1959,27 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final scaleMetrics = AppScaleMetrics.of(context);
+    final tabLineWidth = (scaleMetrics?.designViewportWidth ?? screenWidth) +
+        (scaleMetrics?.rightOverflowWidth ?? 0.0);
+    final extraTabLineWidth =
+        tabLineWidth > screenWidth ? tabLineWidth - screenWidth : 0.0;
+    final hasAmenityArea =
+        ((_dashboardData?['amenityAreaRowCount'] as num?)?.toInt() ?? 0) > 0 ||
+            ((_dashboardData?['amenityAreaCount'] as num?)?.toInt() ?? 0) > 0 ||
+            ((_dashboardData?['totalAmenityAreaSqft'] as num?)?.toDouble() ??
+                    0) >
+                0 ||
+            _amenityAreaRows.isNotEmpty;
+    if (!hasAmenityArea && _activeTab == DashboardTab.amenityArea) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          _activeTab = DashboardTab.overview;
+        });
+      });
+    }
     final hasPendingPlots =
         !_isLoading && (((_dashboardData?['pendingPlots'] as int?) ?? 0) > 0);
 
@@ -1927,10 +2022,13 @@ class _DashboardPageState extends State<DashboardPage> {
                   ],
                 ),
               ),
-              AreaUnitSelector(
-                selectedUnit: _areaUnit,
-                projectId: widget.projectId,
-                onUnitChanged: (unit) => setState(() => _areaUnit = unit),
+              Transform.translate(
+                offset: Offset(extraTabLineWidth, 0),
+                child: AreaUnitSelector(
+                  selectedUnit: _areaUnit,
+                  projectId: widget.projectId,
+                  onUnitChanged: (unit) => setState(() => _areaUnit = unit),
+                ),
               ),
             ],
           ),
@@ -1944,7 +2042,7 @@ class _DashboardPageState extends State<DashboardPage> {
             children: [
               Positioned(
                 left: 0,
-                right: 0,
+                right: -extraTabLineWidth,
                 bottom: 0,
                 child: Container(
                   height: 0.5,
@@ -2113,6 +2211,45 @@ class _DashboardPageState extends State<DashboardPage> {
                     ),
                   ),
                   const SizedBox(width: 36),
+                  if (hasAmenityArea) ...[
+                    // Amenity Area tab
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _activeTab = DashboardTab.amenityArea;
+                        });
+                      },
+                      child: Container(
+                        height: 32,
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: _activeTab == DashboardTab.amenityArea
+                            ? BoxDecoration(
+                                border: Border(
+                                  bottom: BorderSide(
+                                    color: const Color(0xFF0C8CE9),
+                                    width: 2,
+                                  ),
+                                ),
+                              )
+                            : null,
+                        child: Center(
+                          child: Text(
+                            'Amenity Area',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: _activeTab == DashboardTab.amenityArea
+                                  ? FontWeight.w500
+                                  : FontWeight.normal,
+                              color: _activeTab == DashboardTab.amenityArea
+                                  ? const Color(0xFF0C8CE9)
+                                  : const Color(0xFF5C5C5C),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 36),
+                  ],
                   // Partner(s) tab
                   GestureDetector(
                     onTap: () =>
@@ -2287,6 +2424,8 @@ class _DashboardPageState extends State<DashboardPage> {
                           _buildSalesTabLoadingSkeleton(),
                         ] else if (_activeTab == DashboardTab.site) ...[
                           _buildSiteTabLoadingSkeleton(),
+                        ] else if (_activeTab == DashboardTab.amenityArea) ...[
+                          _buildSiteTabLoadingSkeleton(),
                         ] else if (_activeTab == DashboardTab.partners) ...[
                           _buildPartnersLoadingSkeleton(),
                         ] else if (_activeTab ==
@@ -2314,6 +2453,13 @@ class _DashboardPageState extends State<DashboardPage> {
                       _buildCostAndAreaSummary(),
                       const SizedBox(height: 24),
 
+                      // Amenity Area Summary
+                      if (((_dashboardData!['amenityAreaCount'] as int?) ?? 0) >
+                          0) ...[
+                        _buildAmenityAreaSummaryCard(),
+                        const SizedBox(height: 24),
+                      ],
+
                       // Profit and ROI section
                       _buildProfitAndROISection(),
                       const SizedBox(height: 24),
@@ -2340,6 +2486,10 @@ class _DashboardPageState extends State<DashboardPage> {
                         ),
                       const SizedBox(height: 24),
 
+                      // Sales, Expenses & Profit Overview (Waterfall)
+                      _buildSalesExpensesProfitOverview(),
+                      const SizedBox(height: 24),
+
                       // Total Expenses Breakdown
                       _buildTotalExpensesBreakdown(),
                       const SizedBox(height: 24),
@@ -2353,6 +2503,9 @@ class _DashboardPageState extends State<DashboardPage> {
                       _buildSalesTabContent(),
                     ] else if (_activeTab == DashboardTab.site) ...[
                       _buildSiteTabContent(),
+                    ] else if (_activeTab == DashboardTab.amenityArea &&
+                        hasAmenityArea) ...[
+                      _buildAmenityAreaTabContent(),
                     ] else if (_activeTab == DashboardTab.partners) ...[
                       // Partners tab content
                       _buildPartnersSection(),
@@ -2555,6 +2708,163 @@ class _DashboardPageState extends State<DashboardPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildAmenityAreaSummaryCard() {
+    final totalAmenityAreaSqft =
+        (_dashboardData!['totalAmenityAreaSqft'] as num?)?.toDouble() ?? 0.0;
+    final amenityAllInCostPerSqft =
+        (_dashboardData!['amenityAllInCostPerSqft'] as num?)?.toDouble() ?? 0.0;
+    final totalAmenityAreaValue =
+        (_dashboardData!['totalAmenityAreaValue'] as num?)?.toDouble() ?? 0.0;
+
+    final totalAmenityAreaDisplay =
+        AreaUnitUtils.areaFromSqftToDisplay(totalAmenityAreaSqft, _isSqm);
+    final amenityAllInCostDisplay = AreaUnitUtils.rateFromSqftToDisplay(
+      amenityAllInCostPerSqft,
+      _isSqm,
+    );
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SizedBox(
+        width: 860,
+        height: 162,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F9FA),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Amenity Area Summary',
+                style: GoogleFonts.inter(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                  height: 1.0,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  _buildAmenitySummaryMetricCard(
+                    width: 265,
+                    label: 'Total Amenity Area',
+                    value: _formatNumberNoDecimals(totalAmenityAreaDisplay),
+                    suffix: _areaUnitSuffix,
+                  ),
+                  const SizedBox(width: 16),
+                  _buildAmenitySummaryMetricCard(
+                    width: 266,
+                    label: 'Amenity Area All-in Cost (₹ / $_areaUnitSuffix)',
+                    prefix: '₹',
+                    value: _formatNumberNoDecimals(amenityAllInCostDisplay),
+                  ),
+                  const SizedBox(width: 16),
+                  _buildAmenitySummaryMetricCard(
+                    width: 265,
+                    label: 'Amenity Area Total Value',
+                    prefix: '₹',
+                    value: _formatNumberNoDecimals(totalAmenityAreaValue),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAmenitySummaryMetricCard({
+    required double width,
+    required String label,
+    required String value,
+    String? prefix,
+    String? suffix,
+  }) {
+    return Container(
+      width: width,
+      height: 88,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: const Color(0xFF5C5C5C),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              if (prefix != null) ...[
+                Text(
+                  prefix,
+                  style: GoogleFonts.inter(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w400,
+                    color: Colors.black,
+                    height: 1.0,
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Text(
+                  value,
+                  style: GoogleFonts.inter(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w400,
+                    color: Colors.black,
+                    height: 1.0,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (suffix != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  suffix,
+                  style: GoogleFonts.inter(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w400,
+                    color: Colors.black,
+                    height: 1.0,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -3210,11 +3520,8 @@ class _DashboardPageState extends State<DashboardPage> {
 
     const chartWidth = 549.0;
     const rowHeight = 32.0;
-    const rowGap = 16.0;
     const dividerGap = 12.0;
     const dividerHeight = 1.0;
-    const dividerTotalHeight =
-        dividerGap + dividerHeight + dividerGap; // 25px - matches chart spacing
     const axisGap = 8.0;
     const axisLineHeight = 1.0;
     const axisTopExtension = 20.0;
@@ -3227,25 +3534,9 @@ class _DashboardPageState extends State<DashboardPage> {
     final compensationEndValue = compensationStartValue + totalCompensation;
     final netProfitStartValue = compensationEndValue;
 
-    // Axis range must include waterfall start/end points to avoid clipping.
-    final chartSpanValues = <double>[
-      0.0,
-      totalSalesValue,
-      0.0,
-      totalExpenses,
-      grossStartValue,
-      grossStartValue + grossProfit,
-      compensationStartValue,
-      compensationEndValue,
-      netProfitStartValue,
-      netProfitStartValue + netProfit,
-    ];
-    final minValue = chartSpanValues.reduce(math.min);
-    final maxRawValue = chartSpanValues.reduce(math.max);
-    final maxValue =
-        chartSpanValues.map((value) => value.abs()).reduce(math.max);
-
-    final axisScale = _buildAxisScale(minValue, maxRawValue, maxValue);
+    // X-axis range is based on total sales value:
+    // round up to the nearest nice 5/10-like multiple, then split into 5 intervals.
+    final axisScale = _buildSalesWaterfallAxisScale(totalSalesValue);
     final axisRange = axisScale.axisMax - axisScale.axisMin;
     final zeroX = axisRange <= 0
         ? 0.0
@@ -3275,8 +3566,9 @@ class _DashboardPageState extends State<DashboardPage> {
       return ((value - axisScale.axisMin) / axisRange) * chartWidth;
     });
 
-    // Keep chart width fixed to Figma spec to prevent overview overflow.
-    final totalChartWidth = chartWidth;
+    // Keep bar geometry fixed, but provide 8px extra canvas width on the right
+    // so the x-axis arrow appears 8px after the last black tick/extension.
+    final totalChartWidth = chartWidth + 24;
 
     final chartHeight = (rowHeight * 5) +
         (dividerHeight * 4) +
@@ -3970,6 +4262,12 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  _AxisScale _buildSalesWaterfallAxisScale(double totalSalesValue) {
+    final sanitizedSales = totalSalesValue.isFinite ? totalSalesValue.abs() : 0.0;
+    final axisMax = _roundUpNice(sanitizedSales <= 0 ? 5.0 : sanitizedSales);
+    return _buildAxisScale(0, axisMax, axisMax);
+  }
+
   double _roundUpNice(double value) {
     if (value <= 0) return 1;
     final exponent =
@@ -4528,6 +4826,18 @@ class _DashboardPageState extends State<DashboardPage> {
     final availablePlots = _dashboardData!['availablePlots'] as int;
     final pendingPlots = _dashboardData!['pendingPlots'] as int? ?? 0;
     final allInCost = _dashboardData!['allInCost'] as double;
+    final amenityAreaRowCount =
+        (_dashboardData!['amenityAreaRowCount'] as num?)?.toInt() ?? 0;
+    final amenityAreaCount =
+        (_dashboardData!['amenityAreaCount'] as num?)?.toInt() ?? 0;
+    final totalAmenityAreaSqft =
+        (_dashboardData!['totalAmenityAreaSqft'] as num?)?.toDouble() ?? 0.0;
+    final totalAmenityAreaValue =
+        (_dashboardData!['totalAmenityAreaValue'] as num?)?.toDouble() ?? 0.0;
+    final hasAmenityArea = amenityAreaRowCount > 0 ||
+        amenityAreaCount > 0 ||
+        totalAmenityAreaSqft > 0 ||
+        totalAmenityAreaValue > 0;
 
     // Calculate sales by date (for chart) based on selected time filter
     int todaysSales = 0; // For backward compatibility
@@ -4629,6 +4939,8 @@ class _DashboardPageState extends State<DashboardPage> {
     // For now, using a simple calculation: total sales / months since project start
     // This would need actual date data for proper calculation
     final monthlySalesRunRate = soldPlots > 0 ? totalSalesValue : 0.0;
+    final totalRevenueWithAmenity = totalSalesValue + totalAmenityAreaValue;
+    final monthlySalesRunRateWithAmenity = totalRevenueWithAmenity;
 
     if (pendingPlots > 0) {
       final pendingSalesMetrics = _calculatePendingSalesMetrics();
@@ -4647,6 +4959,9 @@ class _DashboardPageState extends State<DashboardPage> {
         availablePlots: availablePlots,
         pendingPlots: pendingPlots,
         monthlySalesRunRate: monthlySalesRunRate,
+        hasAmenityArea: hasAmenityArea,
+        totalRevenueWithAmenity: totalRevenueWithAmenity,
+        allInCost: allInCost,
         averageSalesPricePerSqft: averageSalesPrice,
         averagePendingAndSoldPricePerSqft: averagePendingAndSoldPricePerSqft,
         collectionsReceived: collectionsReceived,
@@ -4678,67 +4993,82 @@ class _DashboardPageState extends State<DashboardPage> {
         const SizedBox(height: 24),
 
         // Sales metrics cards
-        Align(
-          alignment: Alignment.centerLeft,
-          child: IntrinsicWidth(
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF8F9FA),
-                borderRadius: BorderRadius.circular(8),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.25),
-                    blurRadius: 2,
-                    offset: const Offset(0, 0),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Sales',
-                    style: GoogleFonts.inter(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
+        if (hasAmenityArea) ...[
+          _buildSalesRevenueCardsForAmenity(
+            totalRevenue: totalRevenueWithAmenity,
+            monthlyRunRate: monthlySalesRunRateWithAmenity,
+          ),
+          const SizedBox(height: 24),
+          _buildSalesCardsForAmenity(
+            totalSalesValue: totalSalesValue,
+            soldPlots: soldPlots,
+            averageSalesPrice: averageSalesPrice,
+            allInCost: allInCost,
+            monthlySalesRunRate: monthlySalesRunRate,
+          ),
+        ] else
+          Align(
+            alignment: Alignment.centerLeft,
+            child: IntrinsicWidth(
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F9FA),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.25),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      _buildSalesMetricCard(
-                        'Total Sales Value',
-                        totalSalesValue,
-                        '$soldPlots plots sold',
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sales',
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black,
                       ),
-                      const SizedBox(width: 16),
-                      _buildSalesMetricCard(
-                        'Average Sales Price (₹ / $_areaUnitSuffix)',
-                        AreaUnitUtils.rateFromSqftToDisplay(
-                            averageSalesPrice, _isSqm),
-                        'Based on sold plots',
-                      ),
-                      const SizedBox(width: 16),
-                      _buildSalesMetricCard(
-                        'All-in Cost (₹ / $_areaUnitSuffix)',
-                        AreaUnitUtils.rateFromSqftToDisplay(allInCost, _isSqm),
-                        'Total cost per $_areaUnitSuffix',
-                      ),
-                      const SizedBox(width: 16),
-                      _buildSalesMetricCard(
-                        'Monthly Sales Run Rate',
-                        monthlySalesRunRate,
-                        '$soldPlots Plots sold this month',
-                      ),
-                    ],
-                  ),
-                ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        _buildSalesMetricCard(
+                          'Total Sales Value',
+                          totalSalesValue,
+                          '$soldPlots plots sold',
+                        ),
+                        const SizedBox(width: 16),
+                        _buildSalesMetricCard(
+                          'Average Sales Price (₹ / $_areaUnitSuffix)',
+                          AreaUnitUtils.rateFromSqftToDisplay(
+                              averageSalesPrice, _isSqm),
+                          'Based on sold plots',
+                        ),
+                        const SizedBox(width: 16),
+                        _buildSalesMetricCard(
+                          'All-in Cost (₹ / $_areaUnitSuffix)',
+                          AreaUnitUtils.rateFromSqftToDisplay(
+                              allInCost, _isSqm),
+                          'Total cost per $_areaUnitSuffix',
+                        ),
+                        const SizedBox(width: 16),
+                        _buildSalesMetricCard(
+                          'Monthly Sales Run Rate',
+                          monthlySalesRunRate,
+                          '$soldPlots Plots sold this month',
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
         const SizedBox(height: 24),
 
         // Sales Activity and Site sections
@@ -5032,6 +5362,154 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  Widget _buildSalesRevenueCardsForAmenity({
+    required double totalRevenue,
+    required double monthlyRunRate,
+  }) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        width: 578,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8F9FA),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 2,
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Sales Revenue',
+              style: GoogleFonts.inter(
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+                color: Colors.black,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                _buildSalesMetricCard(
+                  'Total Revenue',
+                  totalRevenue,
+                  'Based on sold plots & Amenity Area',
+                  width: 265,
+                  height: 130,
+                  titleMaxLines: 1,
+                  footerMaxLines: 2,
+                ),
+                const SizedBox(width: 16),
+                _buildSalesMetricCard(
+                  'Monthly Sales Run Rate',
+                  monthlyRunRate,
+                  'Based on sold plots & Amenity Area',
+                  width: 265,
+                  height: 130,
+                  titleMaxLines: 1,
+                  footerMaxLines: 2,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSalesCardsForAmenity({
+    required double totalSalesValue,
+    required int soldPlots,
+    required double averageSalesPrice,
+    required double allInCost,
+    required double monthlySalesRunRate,
+  }) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: 1140,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F9FA),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Sales',
+                style: GoogleFonts.inter(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  _buildSalesMetricCard(
+                    'Total Sales Value',
+                    totalSalesValue,
+                    '$soldPlots plots sold',
+                    width: 265,
+                    height: 130,
+                    titleMaxLines: 1,
+                    footerMaxLines: 1,
+                  ),
+                  const SizedBox(width: 16),
+                  _buildSalesMetricCard(
+                    'Average Sales Price (₹ / $_areaUnitSuffix)',
+                    AreaUnitUtils.rateFromSqftToDisplay(
+                        averageSalesPrice, _isSqm),
+                    'Based on sold plots',
+                    width: 265,
+                    height: 130,
+                    titleMaxLines: 1,
+                    footerMaxLines: 1,
+                  ),
+                  const SizedBox(width: 16),
+                  _buildSalesMetricCard(
+                    'All-in Cost (₹ / $_areaUnitSuffix)',
+                    AreaUnitUtils.rateFromSqftToDisplay(allInCost, _isSqm),
+                    'Total cost per $_areaUnitSuffix',
+                    width: 265,
+                    height: 130,
+                    titleMaxLines: 1,
+                    footerMaxLines: 1,
+                  ),
+                  const SizedBox(width: 16),
+                  _buildSalesMetricCard(
+                    'Monthly Sales Run Rate',
+                    monthlySalesRunRate,
+                    '$soldPlots plots',
+                    width: 265,
+                    height: 130,
+                    titleMaxLines: 1,
+                    footerMaxLines: 1,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSalesTabContentWithPending({
     required double totalSalesValue,
     required int soldPlots,
@@ -5040,6 +5518,9 @@ class _DashboardPageState extends State<DashboardPage> {
     required int availablePlots,
     required int pendingPlots,
     required double monthlySalesRunRate,
+    required bool hasAmenityArea,
+    required double totalRevenueWithAmenity,
+    required double allInCost,
     required double averageSalesPricePerSqft,
     required double averagePendingAndSoldPricePerSqft,
     required double collectionsReceived,
@@ -5061,6 +5542,21 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
         ),
         const SizedBox(height: 24),
+        if (hasAmenityArea) ...[
+          _buildSalesRevenueCardsForAmenity(
+            totalRevenue: totalRevenueWithAmenity,
+            monthlyRunRate: totalRevenueWithAmenity,
+          ),
+          const SizedBox(height: 24),
+          _buildSalesCardsForAmenity(
+            totalSalesValue: totalSalesValue,
+            soldPlots: soldPlots,
+            averageSalesPrice: averageSalesPricePerSqft,
+            allInCost: allInCost,
+            monthlySalesRunRate: monthlySalesRunRate,
+          ),
+          const SizedBox(height: 24),
+        ],
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Container(
@@ -8146,6 +8642,1221 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
         ],
       ),
+    );
+  }
+
+  String _normalizeAmenityStatus(dynamic value) {
+    final raw = (value ?? 'available').toString().trim().toLowerCase();
+    if (raw == 'sold') return 'sold';
+    if (raw == 'pending' || raw == 'reserved') return 'pending';
+    return 'available';
+  }
+
+  bool _amenityRowMatchesFilter(Map<String, dynamic> row) {
+    if (_selectedAmenityFilter == 'All') return true;
+    final status = _normalizeAmenityStatus(row['status']);
+    if (_selectedAmenityFilter == 'Sold out') return status == 'sold';
+    if (_selectedAmenityFilter == 'Available') return status != 'sold';
+    return true;
+  }
+
+  double _amenityAreaSqft(Map<String, dynamic> row) {
+    return _parsePlotNumeric(row['area']);
+  }
+
+  double _amenityAllInCostSqft(Map<String, dynamic> row) {
+    return _parsePlotNumeric(row['all_in_cost']);
+  }
+
+  double _amenitySalePriceSqft(Map<String, dynamic> row) {
+    return _parsePlotNumeric(row['sale_price']);
+  }
+
+  double _amenitySaleValue(Map<String, dynamic> row) {
+    final explicit = _parsePlotNumeric(row['sale_value']);
+    if (explicit > 0) return explicit;
+    final area = _amenityAreaSqft(row);
+    final salePrice = _amenitySalePriceSqft(row);
+    if (area <= 0 || salePrice <= 0) return 0.0;
+    return area * salePrice;
+  }
+
+  double _calculateAmenityAgentEarnings(Map<String, dynamic> row) {
+    final status = _normalizeAmenityStatus(row['status']);
+    if (status != 'sold') return 0.0;
+
+    final agentName = (row['agent_name'] ?? '').toString().trim().toLowerCase();
+    if (agentName.isEmpty || _agents.isEmpty) return 0.0;
+
+    final matchedAgent = _agents.firstWhere(
+      (agent) =>
+          (agent['name'] ?? '').toString().trim().toLowerCase() == agentName,
+      orElse: () => <String, dynamic>{},
+    );
+    if (matchedAgent.isEmpty) return 0.0;
+
+    // Mirror exactly what is shown in Agent(s) tab.
+    return _calculateAgentEarnings(matchedAgent);
+  }
+
+  String _formatDashboardDateValue(dynamic value) {
+    final raw = (value ?? '').toString().trim();
+    if (raw.isEmpty) return '-';
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return raw;
+    final dd = parsed.day.toString().padLeft(2, '0');
+    final mm = parsed.month.toString().padLeft(2, '0');
+    final yyyy = parsed.year.toString();
+    return '$dd/$mm/$yyyy';
+  }
+
+  Widget _buildAmenityPlotHeaderCell({
+    bool isLast = false,
+  }) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE2E2E2),
+        borderRadius: isLast
+            ? const BorderRadius.only(topRight: Radius.circular(8))
+            : null,
+      ),
+      child: Align(
+        alignment: Alignment.center,
+        child: RichText(
+          text: TextSpan(
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: Colors.black,
+            ),
+            children: const [
+              TextSpan(text: 'Amenity plot'),
+              TextSpan(text: '*', style: TextStyle(color: Color(0xFFFF0000))),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAmenityMetricCard({
+    required double width,
+    required String title,
+    required Widget valueWidget,
+    EdgeInsetsGeometry? padding,
+  }) {
+    return Container(
+      width: width,
+      padding: padding ?? const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: const Color(0xFF5C5C5C),
+            ),
+          ),
+          const SizedBox(height: 16),
+          valueWidget,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAmenityAreaSalesProgressCard({
+    required double totalSalesValue,
+    required double totalAreaSoldSqft,
+    required int soldPlots,
+    required int availablePlots,
+    required int totalPlots,
+  }) {
+    final soldPercent = totalPlots > 0 ? (soldPlots / totalPlots) * 100 : 0.0;
+    final availablePercent = totalPlots > 0
+        ? (availablePlots / totalPlots) * 100
+        : (soldPlots > 0 ? 0.0 : 100.0);
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: 1140,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F9FA),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Amenity Area Sales Progress',
+                style: GoogleFonts.inter(
+                  fontSize: 32 > 20 ? 32 - 12 : 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  _buildAmenityMetricCard(
+                    width: 265,
+                    title: 'Total Amenity Plot Sales Value',
+                    valueWidget: Row(
+                      children: [
+                        Text(
+                          '₹',
+                          style: GoogleFonts.inter(
+                            fontSize: 32 > 20 ? 32 - 12 : 20,
+                            fontWeight: FontWeight.w400,
+                            color: Colors.black,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _formatNumberNoDecimals(totalSalesValue),
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(
+                              fontSize: 32 > 20 ? 32 - 12 : 20,
+                              fontWeight: FontWeight.w400,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildAmenityMetricCard(
+                    width: 265,
+                    title: 'Total Amenity Area Sold',
+                    valueWidget: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _formatNumberNoDecimals(
+                                AreaUnitUtils.areaFromSqftToDisplay(
+                                    totalAreaSoldSqft, _isSqm)),
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w400,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _areaUnitSuffix,
+                          style: GoogleFonts.inter(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w400,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildAmenityMetricCard(
+                    width: 156,
+                    title: 'Sold Amenity Plot',
+                    valueWidget: Text(
+                      soldPlots.toString(),
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w400,
+                        color: const Color(0xFF06AB00),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildAmenityMetricCard(
+                    width: 156,
+                    title: 'Available Amenity Plot',
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 5,
+                    ),
+                    valueWidget: Text(
+                      availablePlots.toString(),
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w400,
+                        color: const Color(0xFFCF9B00),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildAmenityMetricCard(
+                    width: 172,
+                    title: 'Total Amenity Plot',
+                    valueWidget: Text(
+                      totalPlots.toString(),
+                      style: GoogleFonts.inter(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w400,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final soldFraction = totalPlots > 0
+                          ? (soldPlots / totalPlots).clamp(0.0, 1.0)
+                          : 0.0;
+                      final availableFraction =
+                          (1.0 - soldFraction).clamp(0.0, 1.0);
+                      final soldWidth = constraints.maxWidth * soldFraction;
+                      final availableWidth =
+                          constraints.maxWidth * availableFraction;
+
+                      return Stack(
+                        children: [
+                          if (availableWidth > 0)
+                            Positioned(
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: availableWidth,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFCF9B00),
+                                  borderRadius: availableFraction >= 1.0
+                                      ? BorderRadius.circular(8)
+                                      : const BorderRadius.only(
+                                          topRight: Radius.circular(8),
+                                          bottomRight: Radius.circular(8),
+                                        ),
+                                ),
+                              ),
+                            ),
+                          if (soldWidth > 0)
+                            Positioned(
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: soldWidth,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF06AB00),
+                                  borderRadius: soldFraction >= 1.0
+                                      ? BorderRadius.circular(8)
+                                      : const BorderRadius.only(
+                                          topLeft: Radius.circular(8),
+                                          bottomLeft: Radius.circular(8),
+                                        ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    '${soldPercent.toStringAsFixed(0)}%',
+                    style: GoogleFonts.inter(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF06AB00),
+                    ),
+                  ),
+                  Text(
+                    '${availablePercent.toStringAsFixed(0)}%',
+                    style: GoogleFonts.inter(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFFCF9B00),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Sold',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF06AB00),
+                    ),
+                  ),
+                  Text(
+                    'Available',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFFCF9B00),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAmenityAgentTable(List<Map<String, dynamic>> rows) {
+    return Table(
+      border: TableBorder(
+        horizontalInside: const BorderSide(color: Colors.black, width: 1),
+        verticalInside: const BorderSide(color: Colors.black, width: 1),
+      ),
+      columnWidths: const {
+        0: FixedColumnWidth(60),
+        1: FixedColumnWidth(266),
+        2: FixedColumnWidth(215),
+        3: FixedColumnWidth(248),
+        4: FixedColumnWidth(241),
+        5: FixedColumnWidth(167),
+      },
+      children: [
+        TableRow(
+          decoration: const BoxDecoration(color: Color(0xFFE2E2E2)),
+          children: [
+            _buildTableHeaderCell('Sl. No.', isFirst: true, centerAlign: true),
+            _buildAmenityPlotHeaderCell(),
+            _buildTableHeaderCell('Area ($_areaUnitSuffix)', centerAlign: true),
+            _buildTableHeaderCell('Agent', centerAlign: true),
+            _buildTableHeaderCell('Earnings (₹)', centerAlign: true),
+            _buildTableHeaderCell('Sale date', isLast: true, centerAlign: true),
+          ],
+        ),
+        ...rows.asMap().entries.map((entry) {
+          final index = entry.key;
+          final row = entry.value;
+          final status = _normalizeAmenityStatus(row['status']);
+          final isSold = status == 'sold';
+          final amenityName = (row['name'] ?? '').toString().trim();
+          final areaDisplay = AreaUnitUtils.areaFromSqftToDisplay(
+            _amenityAreaSqft(row),
+            _isSqm,
+          );
+          final agentName = (row['agent_name'] ?? '').toString().trim();
+          final earnings = _calculateAmenityAgentEarnings(row);
+          final saleDate = _formatDashboardDateValue(row['sale_date']);
+          final isLastRow = index == rows.length - 1;
+
+          return TableRow(
+            children: [
+              _buildTableDataCell(
+                '${index + 1}',
+                isFirst: true,
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                amenityName.isEmpty ? '-' : amenityName,
+                isLastRow: isLastRow,
+              ),
+              _buildAreaCell(areaDisplay, isLastRow),
+              _buildTableDataCell(
+                isSold && agentName.isNotEmpty ? agentName : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                isSold ? '₹ ${_formatCurrencyNumber(earnings)}' : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildSaleDateCell(
+                isSold ? (saleDate == '-' ? '' : saleDate) : '',
+                isSold,
+                isLastRow,
+                isLast: true,
+              ),
+            ],
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _buildAmenityAgentSection(List<Map<String, dynamic>> rows) {
+    const tableBaseWidth = 1197.0;
+    final baseHeaderHeight = 48.0;
+    final baseRowHeight = 48.0;
+    final baseHeight = baseHeaderHeight + (rows.length * baseRowHeight);
+    final scaledHeight = (baseHeight * _tableZoomLevel)
+        .clamp(baseHeaderHeight * _tableZoomLevel, double.infinity);
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: 1140,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8F9FA),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 2,
+                offset: const Offset(0, 0),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Agent',
+                style: GoogleFonts.inter(
+                  fontSize: 32 > 20 ? 32 - 12 : 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8F9FA),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.25),
+                      blurRadius: 2,
+                      offset: const Offset(0, 0),
+                    ),
+                  ],
+                ),
+                child: Scrollbar(
+                  controller: _amenityAgentTableScrollController,
+                  thumbVisibility: true,
+                  child: SingleChildScrollView(
+                    controller: _amenityAgentTableScrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      height: scaledHeight,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          left:
+                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                          right: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0) +
+                              ((_tableZoomLevel - 1.0) * tableBaseWidth)
+                                  .clamp(0.0, tableBaseWidth),
+                          top:
+                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                          bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0) +
+                              ((_tableZoomLevel - 1.0) * 100.0)
+                                  .clamp(0.0, 100.0),
+                        ),
+                        child: Transform.scale(
+                          scale: _tableZoomLevel,
+                          alignment: Alignment.topLeft,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.black,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            padding: const EdgeInsets.all(1),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(7),
+                              child: Container(
+                                color: Colors.white,
+                                child: _buildAmenityAgentTable(rows),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAmenityAreaDetailedTable(List<Map<String, dynamic>> rows) {
+    final totalProjectManagerCompensation =
+        _calculateTotalProjectManagersCompensation();
+
+    return Table(
+      border: TableBorder(
+        horizontalInside: const BorderSide(color: Colors.black, width: 1),
+        verticalInside: const BorderSide(color: Colors.black, width: 1),
+      ),
+      columnWidths: const {
+        0: FixedColumnWidth(60),
+        1: FixedColumnWidth(266),
+        2: FixedColumnWidth(215),
+        3: FixedColumnWidth(145),
+        4: FixedColumnWidth(215),
+        5: FixedColumnWidth(215),
+        6: FixedColumnWidth(215),
+        7: FixedColumnWidth(215),
+        8: FixedColumnWidth(215),
+        9: FixedColumnWidth(215),
+        10: FixedColumnWidth(241),
+        11: FixedColumnWidth(320),
+        12: FixedColumnWidth(241),
+        13: FixedColumnWidth(167),
+      },
+      children: [
+        TableRow(
+          decoration: const BoxDecoration(color: Color(0xFFE2E2E2)),
+          children: [
+            _buildTableHeaderCell('Sl. No.', isFirst: true, centerAlign: true),
+            _buildAmenityPlotHeaderCell(),
+            _buildTableHeaderCell('Area ($_areaUnitSuffix)', centerAlign: true),
+            _buildTableHeaderCell('Status', centerAlign: true),
+            _buildTableHeaderCell('All-in Cost (₹/$_areaUnitSuffix)',
+                centerAlign: true),
+            _buildTableHeaderCell('Plot Cost (₹)', centerAlign: true),
+            _buildTableHeaderCell('Sale Price (₹/$_areaUnitSuffix)',
+                centerAlign: true),
+            _buildTableHeaderCell('Sale Value (₹)', centerAlign: true),
+            _buildTableHeaderCell('Gross Profit (₹)', centerAlign: true),
+            _buildTableHeaderCell('Net Profit (₹)', centerAlign: true),
+            _buildTableHeaderCell('Partner(s)', centerAlign: true),
+            _buildTableHeaderCell('Buyer Name', centerAlign: true),
+            _buildTableHeaderCell('Agent', centerAlign: true),
+            _buildTableHeaderCell('Sale date', isLast: true, centerAlign: true),
+          ],
+        ),
+        ...rows.asMap().entries.map((entry) {
+          final index = entry.key;
+          final row = entry.value;
+          final status = _normalizeAmenityStatus(row['status']);
+          final isSold = status == 'sold';
+          final isPending = status == 'pending';
+          final showSaleDetails = isSold || isPending;
+          final statusLabel =
+              isSold ? 'Sold' : (isPending ? 'Pending' : 'Available');
+          final areaSqft = _amenityAreaSqft(row);
+          final allInCostSqft = _amenityAllInCostSqft(row);
+          final salePriceSqft = _amenitySalePriceSqft(row);
+          final plotCost = areaSqft * allInCostSqft;
+          final saleValue = _amenitySaleValue(row);
+          final grossProfit =
+              showSaleDetails && saleValue > 0 ? saleValue - plotCost : 0.0;
+          final agentCompensation = _calculateAmenityAgentEarnings(row);
+          final netProfit = showSaleDetails && saleValue > 0
+              ? (grossProfit -
+                  agentCompensation -
+                  totalProjectManagerCompensation)
+              : 0.0;
+          final amenityName = (row['name'] ?? '').toString().trim();
+          final buyerName = (row['buyer_name'] ?? '').toString().trim();
+          final agentName = (row['agent_name'] ?? '').toString().trim();
+          final saleDate = _formatDashboardDateValue(row['sale_date']);
+          final isLastRow = index == rows.length - 1;
+
+          return TableRow(
+            children: [
+              _buildTableDataCell(
+                '${index + 1}',
+                isFirst: true,
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                amenityName.isEmpty ? '-' : amenityName,
+                isLastRow: isLastRow,
+              ),
+              _buildAreaCell(
+                AreaUnitUtils.areaFromSqftToDisplay(areaSqft, _isSqm),
+                isLastRow,
+              ),
+              _buildStatusCell(statusLabel, isSold, isPending, isLastRow),
+              _buildCostCell(
+                '₹/$_areaUnitSuffix',
+                _formatCurrencyNumber(
+                  AreaUnitUtils.rateFromSqftToDisplay(allInCostSqft, _isSqm),
+                ),
+                isLastRow,
+              ),
+              _buildCostCell('₹', _formatCurrencyNumber(plotCost), isLastRow),
+              _buildTableDataCell(
+                showSaleDetails && salePriceSqft > 0
+                    ? '₹/$_areaUnitSuffix ${_formatCurrencyNumber(AreaUnitUtils.rateFromSqftToDisplay(salePriceSqft, _isSqm))}'
+                    : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                showSaleDetails && saleValue > 0
+                    ? '₹ ${_formatCurrencyNumber(saleValue)}'
+                    : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                showSaleDetails && saleValue > 0
+                    ? '₹ ${_formatCurrencyNumber(grossProfit)}'
+                    : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                showSaleDetails && saleValue > 0
+                    ? '₹ ${_formatCurrencyNumber(netProfit)}'
+                    : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell('-', isLastRow: isLastRow),
+              _buildTableDataCell(
+                showSaleDetails && buyerName.isNotEmpty ? buyerName : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildTableDataCell(
+                showSaleDetails && agentName.isNotEmpty ? agentName : '-',
+                isLastRow: isLastRow,
+              ),
+              _buildSaleDateCell(
+                showSaleDetails && saleDate != '-' ? saleDate : '',
+                showSaleDetails && saleDate != '-',
+                isLastRow,
+                isLast: true,
+              ),
+            ],
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _buildAmenityLayoutsToolbar(int amenityCount) {
+    const filterIconAsset = 'assets/images/Filter.svg';
+    const expandIconAsset = 'assets/images/Expand.svg';
+    const collapseIconAsset = 'assets/images/Collapse.svg';
+    const zoomOutAsset = 'assets/images/Zoom_out.svg';
+    const zoomInAsset = 'assets/images/Zoom_in.svg';
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          'Amenity Area',
+          style: GoogleFonts.inter(
+            fontSize: 32 > 20 ? 32 - 12 : 20,
+            fontWeight: FontWeight.w600,
+            color: Colors.black,
+          ),
+        ),
+        Row(
+          children: [
+            PopupMenuButton<String>(
+              initialValue: _selectedAmenityFilter,
+              onSelected: (value) {
+                setState(() {
+                  _selectedAmenityFilter = value;
+                });
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: 'All',
+                  child: Text('All'),
+                ),
+                PopupMenuItem(
+                  value: 'Available',
+                  child: Text('Available'),
+                ),
+                PopupMenuItem(
+                  value: 'Sold out',
+                  child: Text('Sold'),
+                ),
+              ],
+              child: _buildLayoutsActionButton(
+                label: 'Filter',
+                leading: SvgPicture.asset(
+                  filterIconAsset,
+                  width: 16,
+                  height: 10,
+                  fit: BoxFit.contain,
+                  placeholderBuilder: (context) => const SizedBox(
+                    width: 16,
+                    height: 10,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            _buildLayoutsActionButton(
+              label: 'Expand all layouts',
+              trailing: SvgPicture.asset(
+                expandIconAsset,
+                width: 14,
+                height: 7,
+                fit: BoxFit.contain,
+                placeholderBuilder: (context) => const SizedBox(
+                  width: 14,
+                  height: 7,
+                ),
+              ),
+              onTap: amenityCount == 0
+                  ? null
+                  : () {
+                      setState(() {
+                        _isAmenityAreaSectionCollapsed = false;
+                      });
+                    },
+            ),
+            const SizedBox(width: 16),
+            _buildLayoutsActionButton(
+              label: 'Collapse all layouts',
+              trailing: SvgPicture.asset(
+                collapseIconAsset,
+                width: 14,
+                height: 7,
+                fit: BoxFit.contain,
+                placeholderBuilder: (context) => const SizedBox(
+                  width: 14,
+                  height: 7,
+                ),
+              ),
+              onTap: amenityCount == 0
+                  ? null
+                  : () {
+                      setState(() {
+                        _isAmenityAreaSectionCollapsed = true;
+                      });
+                    },
+            ),
+            const SizedBox(width: 16),
+            Row(
+              children: [
+                Text(
+                  'Zoom:',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _buildZoomButton(
+                  zoomOutAsset,
+                  onTap: () {
+                    setState(() {
+                      _tableZoomLevel =
+                          _stepZoomLevel(_tableZoomLevel, increase: false);
+                    });
+                  },
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(_tableZoomLevel * 100).round()}%',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.black.withOpacity(0.75),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _buildZoomButton(
+                  zoomInAsset,
+                  onTap: () {
+                    setState(() {
+                      _tableZoomLevel =
+                          _stepZoomLevel(_tableZoomLevel, increase: true);
+                    });
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAmenityAreaSummarySection({
+    required List<Map<String, dynamic>> allRows,
+    required List<Map<String, dynamic>> filteredRows,
+  }) {
+    final totalRows = allRows.length;
+    final soldRows = allRows
+        .where((row) => _normalizeAmenityStatus(row['status']) == 'sold')
+        .length;
+    final soldPercent = totalRows > 0 ? (soldRows / totalRows) * 100 : 0.0;
+
+    final totalAreaSqft = filteredRows.fold<double>(
+      0.0,
+      (sum, row) => sum + _amenityAreaSqft(row),
+    );
+    final totalPlotCost = filteredRows.fold<double>(
+      0.0,
+      (sum, row) => sum + (_amenityAreaSqft(row) * _amenityAllInCostSqft(row)),
+    );
+    final totalSaleValue = filteredRows.fold<double>(
+      0.0,
+      (sum, row) {
+        final status = _normalizeAmenityStatus(row['status']);
+        if (status != 'sold') return sum;
+        return sum + _amenitySaleValue(row);
+      },
+    );
+    final grossProfit = filteredRows.fold<double>(
+      0.0,
+      (sum, row) {
+        final status = _normalizeAmenityStatus(row['status']);
+        if (status != 'sold') return sum;
+        final plotCost = _amenityAreaSqft(row) * _amenityAllInCostSqft(row);
+        return sum + (_amenitySaleValue(row) - plotCost);
+      },
+    );
+    final totalAgentCompensation = filteredRows.fold<double>(
+      0.0,
+      (sum, row) => sum + _calculateAmenityAgentEarnings(row),
+    );
+    final totalProjectManagerCompensation =
+        _calculateTotalProjectManagersCompensation();
+    final netProfit =
+        grossProfit - totalAgentCompensation - totalProjectManagerCompensation;
+    final avgAllInCostSqft =
+        totalAreaSqft > 0 ? (totalPlotCost / totalAreaSqft) : 0.0;
+
+    const collapseIconAsset = 'assets/images/Indi_collapse.svg';
+    const expandIconAsset = 'assets/images/Indi_expand.svg';
+    const tableBaseWidth = 2920.0;
+
+    final baseHeaderHeight = 48.0;
+    final baseRowHeight = 48.0;
+    final rowCount = filteredRows.isEmpty ? 1 : filteredRows.length;
+    final baseHeight = baseHeaderHeight + (rowCount * baseRowHeight);
+    final scaledHeight = (baseHeight * _tableZoomLevel)
+        .clamp(baseHeaderHeight * _tableZoomLevel, double.infinity);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F9FA),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Amenity Area',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                ),
+              ),
+              Text(
+                '${soldPercent.toStringAsFixed(0)}%',
+                style: GoogleFonts.inter(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.black,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Text(
+              '$soldRows/$totalRows Amenity plot sold',
+              style: GoogleFonts.inter(
+                fontSize: 24 > 14 ? 24 - 10 : 14,
+                fontWeight: FontWeight.w400,
+                color: Colors.black.withOpacity(0.75),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 0,
+            runSpacing: 8,
+            children: [
+              Text(
+                '${filteredRows.length} ${filteredRows.length == 1 ? 'Amenity Area' : 'Amenity Areas'}',
+                style: GoogleFonts.inter(
+                  fontSize: 24 > 14 ? 24 - 10 : 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+              _buildLayoutInfoDot(),
+              _buildLayoutInfoItem(
+                label: 'Total Area:',
+                value:
+                    '${_formatNumberNoDecimals(AreaUnitUtils.areaFromSqftToDisplay(totalAreaSqft, _isSqm))} $_areaUnitSuffix',
+              ),
+              _buildLayoutInfoDot(),
+              _buildLayoutInfoItem(
+                label: 'All-in Cost:',
+                value:
+                    '₹/$_areaUnitSuffix ${_formatCurrencyNumber(AreaUnitUtils.rateFromSqftToDisplay(avgAllInCostSqft, _isSqm))}',
+              ),
+              _buildLayoutInfoDot(),
+              _buildLayoutInfoItem(
+                label: 'Total Plot Cost:',
+                value: '₹ ${_formatCurrencyNumber(totalPlotCost)}',
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 0,
+            runSpacing: 8,
+            children: [
+              _buildLayoutInfoItem(
+                label: 'Total Sale Value:',
+                value: '₹ ${_formatCurrencyNumber(totalSaleValue)}',
+                valueColor: Colors.black.withOpacity(0.75),
+              ),
+              _buildLayoutInfoDot(),
+              _buildLayoutInfoItem(
+                label: 'Gross Profit:',
+                value: '₹ ${_formatCurrencyNumber(grossProfit)}',
+                valueColor: Colors.black.withOpacity(0.75),
+              ),
+              _buildLayoutInfoDot(),
+              _buildLayoutInfoItem(
+                label: 'Net Profit:',
+                value: '₹ ${_formatCurrencyNumber(netProfit)}',
+                valueColor: Colors.black.withOpacity(0.75),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: GestureDetector(
+              onTap: () {
+                setState(() {
+                  _isAmenityAreaSectionCollapsed =
+                      !_isAmenityAreaSectionCollapsed;
+                });
+              },
+              child: SvgPicture.asset(
+                _isAmenityAreaSectionCollapsed
+                    ? expandIconAsset
+                    : collapseIconAsset,
+                width: 12,
+                height: 12,
+                fit: BoxFit.contain,
+                placeholderBuilder: (context) => const SizedBox(
+                  width: 12,
+                  height: 12,
+                ),
+              ),
+            ),
+          ),
+          if (!_isAmenityAreaSectionCollapsed) ...[
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                  ),
+                ],
+              ),
+              child: Scrollbar(
+                controller: _amenityAreaTableScrollController,
+                thumbVisibility: true,
+                child: SingleChildScrollView(
+                  controller: _amenityAreaTableScrollController,
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    height: scaledHeight,
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        left: ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                        right:
+                            ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0) +
+                                ((_tableZoomLevel - 1.0) * tableBaseWidth)
+                                    .clamp(0.0, tableBaseWidth),
+                        top: ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
+                        bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                .clamp(0.0, 10.0) +
+                            ((_tableZoomLevel - 1.0) * 100.0).clamp(0.0, 100.0),
+                      ),
+                      child: Transform.scale(
+                        scale: _tableZoomLevel,
+                        alignment: Alignment.topLeft,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.black,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          padding: const EdgeInsets.all(1),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(7),
+                            child: Container(
+                              color: Colors.white,
+                              child:
+                                  _buildAmenityAreaDetailedTable(filteredRows),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAmenityAreaTabContent() {
+    if (_dashboardData == null) {
+      return _buildSiteTabLoadingSkeleton();
+    }
+
+    final allRows = _amenityAreaRows
+        .map((row) => Map<String, dynamic>.from(row))
+        .where((row) {
+      final name = (row['name'] ?? '').toString().trim();
+      final area = _amenityAreaSqft(row);
+      final allInCost = _amenityAllInCostSqft(row);
+      return name.isNotEmpty || area > 0 || allInCost > 0;
+    }).toList();
+
+    if (allRows.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8F9FA),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 2,
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+        child: Text(
+          'No amenity area found',
+          style: GoogleFonts.inter(
+            fontSize: 16,
+            fontWeight: FontWeight.normal,
+            color: const Color(0xFF5C5C5C),
+          ),
+        ),
+      );
+    }
+
+    final soldRows = allRows
+        .where((row) => _normalizeAmenityStatus(row['status']) == 'sold')
+        .toList();
+    final totalPlots = allRows.length;
+    final soldPlots = soldRows.length;
+    final availablePlots = math.max(0, totalPlots - soldPlots);
+    final totalAreaSoldSqft = soldRows.fold<double>(
+      0.0,
+      (sum, row) => sum + _amenityAreaSqft(row),
+    );
+    final totalSalesValue = soldRows.fold<double>(
+      0.0,
+      (sum, row) => sum + _amenitySaleValue(row),
+    );
+    final filteredRows = allRows.where(_amenityRowMatchesFilter).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Last updated: 1 sec ago',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: const Color(0xFF5C5C5C),
+          ),
+        ),
+        const SizedBox(height: 24),
+        _buildAmenityAreaSalesProgressCard(
+          totalSalesValue: totalSalesValue,
+          totalAreaSoldSqft: totalAreaSoldSqft,
+          soldPlots: soldPlots,
+          availablePlots: availablePlots,
+          totalPlots: totalPlots,
+        ),
+        const SizedBox(height: 24),
+        _buildAmenityAgentSection(allRows),
+        const SizedBox(height: 24),
+        _buildAmenityLayoutsToolbar(allRows.length),
+        const SizedBox(height: 24),
+        _buildAmenityAreaSummarySection(
+          allRows: allRows,
+          filteredRows: filteredRows,
+        ),
+      ],
     );
   }
 

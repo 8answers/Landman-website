@@ -9,6 +9,12 @@ class LayoutStorageService {
   static const String _projectMapsLinkKeyPrefix = 'project_maps_link_';
   static const String _agentsKey = 'project_agents_data';
 
+  static String _layoutsStorageKeyForProject(String? projectKey) {
+    final key = projectKey?.trim() ?? '';
+    if (key.isEmpty) return _layoutsKey;
+    return '${_layoutsKey}_$key';
+  }
+
   /// Save layout data to local storage (from project details page with controllers)
   static Future<void> saveLayoutsData(
     List<Map<String, dynamic>> layouts,
@@ -17,6 +23,7 @@ class LayoutStorageService {
     Map<String, TextEditingController> plotAreaControllers,
     Map<String, TextEditingController> plotPurchaseRateControllers, {
     Map<String, List<String>>? plotPartners,
+    String? projectKey,
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -60,24 +67,40 @@ class LayoutStorageService {
         }
 
         layoutsData.add({
+          'id': layout['id'],
           'name': layoutName,
+          'layoutImageName': layout['layoutImageName'],
+          'layoutImagePath': layout['layoutImagePath'],
+          'layoutImageDocId': layout['layoutImageDocId'],
+          'layoutImageExtension': layout['layoutImageExtension'],
           'plots': plotsData,
         });
       }
 
       // Convert to JSON string and save
       final jsonString = jsonEncode(layoutsData);
-      await prefs.setString(_layoutsKey, jsonString);
+      await prefs.setString(
+        _layoutsStorageKeyForProject(projectKey),
+        jsonString,
+      );
     } catch (e) {
       print('Error saving layouts data: $e');
     }
   }
 
   /// Load layout data from local storage
-  static Future<List<Map<String, dynamic>>> loadLayoutsData() async {
+  static Future<List<Map<String, dynamic>>> loadLayoutsData({
+    String? projectKey,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final jsonString = prefs.getString(_layoutsKey);
+      String? jsonString;
+      if (projectKey != null && projectKey.trim().isNotEmpty) {
+        final scopedKey = _layoutsStorageKeyForProject(projectKey);
+        jsonString = prefs.getString(scopedKey);
+      } else {
+        jsonString = prefs.getString(_layoutsKey);
+      }
 
       if (jsonString == null || jsonString.isEmpty) {
         return [];
@@ -154,21 +177,31 @@ class LayoutStorageService {
 
   /// Save layout data directly (from plot status page with status info)
   static Future<void> saveLayoutsDataDirect(
-      List<Map<String, dynamic>> layouts) async {
+    List<Map<String, dynamic>> layouts, {
+    String? projectKey,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = jsonEncode(layouts);
-      await prefs.setString(_layoutsKey, jsonString);
+      await prefs.setString(
+        _layoutsStorageKeyForProject(projectKey),
+        jsonString,
+      );
     } catch (e) {
       print('Error saving layouts data directly: $e');
     }
   }
 
   /// Clear all saved layout data
-  static Future<void> clearLayoutsData() async {
+  static Future<void> clearLayoutsData({String? projectKey}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_layoutsKey);
+      final scopedKey = _layoutsStorageKeyForProject(projectKey);
+      await prefs.remove(scopedKey);
+      // Also clear legacy global key when clearing without an explicit project key.
+      if (projectKey == null || projectKey.trim().isEmpty) {
+        await prefs.remove(_layoutsKey);
+      }
     } catch (e) {
       print('Error clearing layouts data: $e');
     }

@@ -29,9 +29,11 @@ class AccountSettingsScreen extends StatefulWidget {
   State<AccountSettingsScreen> createState() => _AccountSettingsScreenState();
 }
 
-class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
+class _AccountSettingsScreenState extends State<AccountSettingsScreen>
+    with WidgetsBindingObserver {
   NavigationPage _currentPage = NavigationPage.recentProjects;
   NavigationPage? _previousPage;
+  final List<NavigationPage> _pageHistory = <NavigationPage>[];
   String? _projectName;
   String? _projectId;
   ProjectSaveStatusType _saveStatus = ProjectSaveStatusType.saved;
@@ -70,15 +72,68 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _restoreNavState();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  void _recordPageVisit(NavigationPage page) {
+    if (_pageHistory.isEmpty || _pageHistory.last != page) {
+      _pageHistory.add(page);
+    }
+  }
+
+  void _initializeHistory(NavigationPage current) {
+    _pageHistory
+      ..clear()
+      ..add(current);
+  }
+
+  Future<void> _handleBrowserBackNavigation() async {
+    if (_currentPage == NavigationPage.recentProjects) {
+      return;
+    }
+    _setStateSafely(() {
+      _currentPage = NavigationPage.recentProjects;
+      _previousPage = null;
+    });
+    _initializeHistory(NavigationPage.recentProjects);
+    await _persistNavState();
+    _refreshErrorBadgesFromStoredData();
+  }
+
+  @override
+  Future<bool> didPopRoute() async {
+    await _handleBrowserBackNavigation();
+    return true;
   }
 
   Future<void> _restoreNavState() async {
     final prefs = await SharedPreferences.getInstance();
+    final forceRecentOnNextOpen =
+        prefs.getBool('nav_force_recent_on_next_open') ?? false;
     final pageName = prefs.getString('nav_current_page');
     final prevPageName = prefs.getString('nav_previous_page');
     final projectId = prefs.getString('nav_project_id');
     final projectName = prefs.getString('nav_project_name');
+
+    if (forceRecentOnNextOpen) {
+      await prefs.remove('nav_force_recent_on_next_open');
+      setState(() {
+        _currentPage = NavigationPage.recentProjects;
+        _previousPage = null;
+        _projectId = projectId;
+        _projectName = projectName;
+        _isRestoringNavState = false;
+      });
+      _initializeHistory(NavigationPage.recentProjects);
+      return;
+    }
 
     if (pageName != null) {
       final page = NavigationPage.values.firstWhere(
@@ -101,13 +156,20 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           _projectName = projectName;
           _isRestoringNavState = false;
         });
+        _initializeHistory(page);
         _refreshErrorBadgesFromStoredData();
         return;
       }
     }
+
     setState(() {
+      _currentPage = NavigationPage.recentProjects;
+      _previousPage = null;
+      _projectId = projectId;
+      _projectName = projectName;
       _isRestoringNavState = false;
     });
+    _initializeHistory(NavigationPage.recentProjects);
   }
 
   Future<void> _persistNavState() async {
@@ -172,6 +234,9 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       final nonSellableAreas =
           (data['nonSellableAreas'] as List?)?.cast<Map<String, dynamic>>() ??
               const <Map<String, dynamic>>[];
+      final amenityAreas =
+          (data['amenityAreas'] as List?)?.cast<Map<String, dynamic>>() ??
+              const <Map<String, dynamic>>[];
       final partners =
           (data['partners'] as List?)?.cast<Map<String, dynamic>>() ??
               const <Map<String, dynamic>>[];
@@ -206,7 +271,11 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           sellingAreaValue > totalAreaValue ||
           nonSellableAreas.any((a) =>
               (a['name'] ?? '').toString().trim().isEmpty ||
-              _isMissingNumeric(a['area']));
+              _isMissingNumeric(a['area'])) ||
+          amenityAreas.any((a) =>
+              (a['name'] ?? '').toString().trim().isEmpty ||
+              _isMissingNumeric(a['area']) ||
+              _isMissingNumeric(a['all_in_cost']));
 
       final hasPartnerErrors = partners.any((p) =>
           (p['name'] ?? '').toString().trim().isEmpty ||
@@ -339,9 +408,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       final hasProjectManagerHardErrors =
           hasProjectManagerErrors && !hasProjectManagerWarningOnly;
       final hasAgentHardErrors = hasAgentErrors && !hasAgentWarningOnly;
+      final effectiveAreaErrors = hasAreaErrors || _hasAreaErrors;
 
       _setStateSafely(() {
-        _hasAreaErrors = hasAreaErrors;
+        // Keep live data-entry validation (including amenity-tab-only checks)
+        // from being overwritten by backend refresh snapshots.
+        _hasAreaErrors = effectiveAreaErrors;
         _hasPartnerErrors = hasPartnerErrors;
         _hasExpenseErrors = hasExpenseErrors;
         _hasSiteErrors = hasSiteErrors;
@@ -350,7 +422,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         _hasProjectManagerWarningOnly = hasProjectManagerWarningOnly;
         _hasAgentWarningOnly = hasAgentWarningOnly;
         _hasAboutErrors = hasAboutErrors;
-        _hasDataEntryErrors = hasAreaErrors ||
+        _hasDataEntryErrors = effectiveAreaErrors ||
             hasPartnerErrors ||
             hasExpenseErrors ||
             hasSiteErrors ||
@@ -386,6 +458,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _recordPageVisit(_currentPage);
             _persistNavState();
             _refreshErrorBadgesFromStoredData();
           },
@@ -400,6 +473,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _recordPageVisit(_currentPage);
             _persistNavState();
             _refreshErrorBadgesFromStoredData();
           },
@@ -508,6 +582,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _recordPageVisit(_currentPage);
             _persistNavState();
             _refreshErrorBadgesFromStoredData();
           },
@@ -522,6 +597,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
               _previousPage = _currentPage;
               _currentPage = NavigationPage.dataEntry;
             });
+            _recordPageVisit(_currentPage);
             _persistNavState();
             _refreshErrorBadgesFromStoredData();
           },
@@ -637,6 +713,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         _previousPage = _currentPage;
         _currentPage = NavigationPage.dataEntry;
       });
+      _recordPageVisit(_currentPage);
       _persistNavState();
       _refreshErrorBadgesFromStoredData();
     }
@@ -788,6 +865,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
         _currentPage = NavigationPage.recentProjects;
         _previousPage = null;
       });
+      _recordPageVisit(_currentPage);
       _persistNavState();
       _refreshErrorBadgesFromStoredData();
     } else {
@@ -805,16 +883,19 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             _previousPage = _currentPage;
             _currentPage = page;
           });
+          _recordPageVisit(_currentPage);
         } else {
           // Already in project details context, just switch pages
           setState(() {
             _currentPage = page;
           });
+          _recordPageVisit(_currentPage);
         }
       } else {
         setState(() {
           _currentPage = page;
         });
+        _recordPageVisit(_currentPage);
       }
       _persistNavState();
       _refreshErrorBadgesFromStoredData();
@@ -854,82 +935,89 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     final effectiveSavedTimeAgo =
         isContentSkeletonLoading ? null : _savedTimeAgo;
 
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          // Responsive breakpoints
-          if (constraints.maxWidth < 768) {
-            // Mobile: Stack sidebar and content
-            return MobileLayout(
-              currentPage: _currentPage,
-              projectName: _projectName,
-              saveStatus: effectiveSaveStatus,
-              savedTimeAgo: effectiveSavedTimeAgo,
-              hasDataEntryErrors: _hasDataEntryErrors,
-              hasPlotStatusErrors: _hasPlotStatusErrors,
-              hasAreaErrors: _hasAreaErrors,
-              hasPartnerErrors: _hasPartnerErrors,
-              hasExpenseErrors: _hasExpenseErrors,
-              hasSiteErrors: _hasSiteErrors,
-              hasProjectManagerErrors: _hasProjectManagerErrors,
-              hasAgentErrors: _hasAgentErrors,
-              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
-              hasAgentWarningOnly: _hasAgentWarningOnly,
-              hasAboutErrors: _hasAboutErrors,
-              hasAccountErrors: _hasAccountErrors,
-              isSidebarLoading: isSidebarLoading,
-              onPageChanged: _handlePageChange,
-              pageContent: _getPageContent(),
-            );
-          } else if (constraints.maxWidth < 1024) {
-            // Tablet: Sidebar and content side by side
-            return TabletLayout(
-              currentPage: _currentPage,
-              projectName: _projectName,
-              saveStatus: effectiveSaveStatus,
-              savedTimeAgo: effectiveSavedTimeAgo,
-              hasDataEntryErrors: _hasDataEntryErrors,
-              hasPlotStatusErrors: _hasPlotStatusErrors,
-              hasAreaErrors: _hasAreaErrors,
-              hasPartnerErrors: _hasPartnerErrors,
-              hasExpenseErrors: _hasExpenseErrors,
-              hasSiteErrors: _hasSiteErrors,
-              hasProjectManagerErrors: _hasProjectManagerErrors,
-              hasAgentErrors: _hasAgentErrors,
-              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
-              hasAgentWarningOnly: _hasAgentWarningOnly,
-              hasAboutErrors: _hasAboutErrors,
-              hasAccountErrors: _hasAccountErrors,
-              isSidebarLoading: isSidebarLoading,
-              onPageChanged: _handlePageChange,
-              pageContent: _getPageContent(),
-            );
-          } else {
-            // Desktop: Full layout with fixed sidebar
-            return DesktopLayout(
-              currentPage: _currentPage,
-              projectName: _projectName,
-              saveStatus: effectiveSaveStatus,
-              savedTimeAgo: effectiveSavedTimeAgo,
-              hasDataEntryErrors: _hasDataEntryErrors,
-              hasPlotStatusErrors: _hasPlotStatusErrors,
-              hasAreaErrors: _hasAreaErrors,
-              hasPartnerErrors: _hasPartnerErrors,
-              hasExpenseErrors: _hasExpenseErrors,
-              hasSiteErrors: _hasSiteErrors,
-              hasProjectManagerErrors: _hasProjectManagerErrors,
-              hasAgentErrors: _hasAgentErrors,
-              hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
-              hasAgentWarningOnly: _hasAgentWarningOnly,
-              hasAboutErrors: _hasAboutErrors,
-              hasAccountErrors: _hasAccountErrors,
-              isSidebarLoading: isSidebarLoading,
-              onPageChanged: _handlePageChange,
-              pageContent: _getPageContent(),
-            );
-          }
-        },
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _handleBrowserBackNavigation();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        body: LayoutBuilder(
+          builder: (context, constraints) {
+            // Responsive breakpoints
+            if (constraints.maxWidth < 768) {
+              // Mobile: Stack sidebar and content
+              return MobileLayout(
+                currentPage: _currentPage,
+                projectName: _projectName,
+                saveStatus: effectiveSaveStatus,
+                savedTimeAgo: effectiveSavedTimeAgo,
+                hasDataEntryErrors: _hasDataEntryErrors,
+                hasPlotStatusErrors: _hasPlotStatusErrors,
+                hasAreaErrors: _hasAreaErrors,
+                hasPartnerErrors: _hasPartnerErrors,
+                hasExpenseErrors: _hasExpenseErrors,
+                hasSiteErrors: _hasSiteErrors,
+                hasProjectManagerErrors: _hasProjectManagerErrors,
+                hasAgentErrors: _hasAgentErrors,
+                hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+                hasAgentWarningOnly: _hasAgentWarningOnly,
+                hasAboutErrors: _hasAboutErrors,
+                hasAccountErrors: _hasAccountErrors,
+                isSidebarLoading: isSidebarLoading,
+                onPageChanged: _handlePageChange,
+                pageContent: _getPageContent(),
+              );
+            } else if (constraints.maxWidth < 1024) {
+              // Tablet: Sidebar and content side by side
+              return TabletLayout(
+                currentPage: _currentPage,
+                projectName: _projectName,
+                saveStatus: effectiveSaveStatus,
+                savedTimeAgo: effectiveSavedTimeAgo,
+                hasDataEntryErrors: _hasDataEntryErrors,
+                hasPlotStatusErrors: _hasPlotStatusErrors,
+                hasAreaErrors: _hasAreaErrors,
+                hasPartnerErrors: _hasPartnerErrors,
+                hasExpenseErrors: _hasExpenseErrors,
+                hasSiteErrors: _hasSiteErrors,
+                hasProjectManagerErrors: _hasProjectManagerErrors,
+                hasAgentErrors: _hasAgentErrors,
+                hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+                hasAgentWarningOnly: _hasAgentWarningOnly,
+                hasAboutErrors: _hasAboutErrors,
+                hasAccountErrors: _hasAccountErrors,
+                isSidebarLoading: isSidebarLoading,
+                onPageChanged: _handlePageChange,
+                pageContent: _getPageContent(),
+              );
+            } else {
+              // Desktop: Full layout with fixed sidebar
+              return DesktopLayout(
+                currentPage: _currentPage,
+                projectName: _projectName,
+                saveStatus: effectiveSaveStatus,
+                savedTimeAgo: effectiveSavedTimeAgo,
+                hasDataEntryErrors: _hasDataEntryErrors,
+                hasPlotStatusErrors: _hasPlotStatusErrors,
+                hasAreaErrors: _hasAreaErrors,
+                hasPartnerErrors: _hasPartnerErrors,
+                hasExpenseErrors: _hasExpenseErrors,
+                hasSiteErrors: _hasSiteErrors,
+                hasProjectManagerErrors: _hasProjectManagerErrors,
+                hasAgentErrors: _hasAgentErrors,
+                hasProjectManagerWarningOnly: _hasProjectManagerWarningOnly,
+                hasAgentWarningOnly: _hasAgentWarningOnly,
+                hasAboutErrors: _hasAboutErrors,
+                hasAccountErrors: _hasAccountErrors,
+                isSidebarLoading: isSidebarLoading,
+                onPageChanged: _handlePageChange,
+                pageContent: _getPageContent(),
+              );
+            }
+          },
+        ),
       ),
     );
   }

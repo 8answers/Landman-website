@@ -3,6 +3,16 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 class ProjectStorageService {
   static final SupabaseClient _supabase = Supabase.instance.client;
   static bool? _hasBuyerContactNumberColumn;
+  static String? _expenseDateColumnName;
+  static bool _expenseDateColumnChecked = false;
+  static String? _expenseDocColumnName;
+  static bool _expenseDocColumnChecked = false;
+  static String? _expenseDocPathColumnName;
+  static bool _expenseDocPathColumnChecked = false;
+  static String? _expenseDocIdColumnName;
+  static bool _expenseDocIdColumnChecked = false;
+  static String? _expenseDocExtensionColumnName;
+  static bool _expenseDocExtensionColumnChecked = false;
 
   static Future<bool> _supportsBuyerContactNumberColumn() async {
     // Cache only successful detection. If previously false (e.g. column added
@@ -17,6 +27,78 @@ class ProjectStorageService {
       _hasBuyerContactNumberColumn = false;
     }
     return _hasBuyerContactNumberColumn!;
+  }
+
+  static Future<String?> _resolveExistingExpenseColumn(
+      List<String> candidates) async {
+    for (final column in candidates) {
+      try {
+        await _supabase.from('expenses').select(column).limit(1);
+        return column;
+      } catch (_) {
+        // try next candidate
+      }
+    }
+    return null;
+  }
+
+  static Future<String?> _resolveExpenseDateColumnName() async {
+    if (_expenseDateColumnChecked) return _expenseDateColumnName;
+    _expenseDateColumnName = await _resolveExistingExpenseColumn([
+      'expense_date',
+      'date',
+    ]);
+    _expenseDateColumnChecked = true;
+    return _expenseDateColumnName;
+  }
+
+  static Future<String?> _resolveExpenseDocColumnName() async {
+    if (_expenseDocColumnChecked) return _expenseDocColumnName;
+    _expenseDocColumnName = await _resolveExistingExpenseColumn([
+      'doc',
+      'document',
+      'document_no',
+      'doc_no',
+      'invoice_no',
+      'receipt_no',
+    ]);
+    _expenseDocColumnChecked = true;
+    return _expenseDocColumnName;
+  }
+
+  static Future<String?> _resolveExpenseDocPathColumnName() async {
+    if (_expenseDocPathColumnChecked) return _expenseDocPathColumnName;
+    _expenseDocPathColumnName = await _resolveExistingExpenseColumn([
+      'doc_path',
+      'expense_doc_path',
+      'document_path',
+    ]);
+    _expenseDocPathColumnChecked = true;
+    return _expenseDocPathColumnName;
+  }
+
+  static Future<String?> _resolveExpenseDocIdColumnName() async {
+    if (_expenseDocIdColumnChecked) return _expenseDocIdColumnName;
+    _expenseDocIdColumnName = await _resolveExistingExpenseColumn([
+      'doc_id',
+      'document_id',
+      'expense_document_id',
+    ]);
+    _expenseDocIdColumnChecked = true;
+    return _expenseDocIdColumnName;
+  }
+
+  static Future<String?> _resolveExpenseDocExtensionColumnName() async {
+    if (_expenseDocExtensionColumnChecked) {
+      return _expenseDocExtensionColumnName;
+    }
+    _expenseDocExtensionColumnName = await _resolveExistingExpenseColumn([
+      'doc_extension',
+      'expense_doc_extension',
+      'document_extension',
+    ]);
+    _expenseDocExtensionColumnChecked = true;
+    return _expenseDocExtensionColumnName;
   }
 
   static String _normalizePlotStatusForDatabase(dynamic statusValue) {
@@ -80,6 +162,14 @@ class ProjectStorageService {
           .from('non_sellable_areas')
           .select()
           .eq('project_id', projectId);
+
+      final amenityAreas = await _supabase
+          .from('amenity_areas')
+          .select()
+          .eq('project_id', projectId)
+          .order('sort_order', ascending: true)
+          .order('created_at', ascending: true)
+          .order('id', ascending: true);
 
       final layouts =
           await _supabase.from('layouts').select().eq('project_id', projectId);
@@ -211,6 +301,7 @@ class ProjectStorageService {
       return {
         'projectName': project['project_name'],
         'projectStatus': project['project_status'],
+        'projectAreaUnit': project['area_unit'],
         'projectAddress': project['project_address'] ?? project['address'],
         'googleMapsLink': project['google_maps_link'] ??
             project['maps_link'] ??
@@ -237,6 +328,7 @@ class ProjectStorageService {
         'partners': partners,
         'expenses': expenses,
         'nonSellableAreas': nonSellableAreas,
+        'amenityAreas': amenityAreas,
         'plots': plots,
         'layouts': layouts,
         'project_managers': projectManagers,
@@ -254,12 +346,14 @@ class ProjectStorageService {
     required String projectId,
     String? projectName,
     String? projectStatus,
+    String? projectAreaUnit,
     String? projectAddress,
     String? googleMapsLink,
     String? totalArea,
     String? sellingArea,
     String? estimatedDevelopmentCost,
     List<Map<String, String>>? nonSellableAreas,
+    List<Map<String, String>>? amenityAreas,
     List<Map<String, dynamic>>? partners,
     List<Map<String, dynamic>>? expenses,
     List<Map<String, dynamic>>? layouts,
@@ -315,6 +409,9 @@ class ProjectStorageService {
       // Unlike numeric fields, empty string is valid here (user can clear address/link).
       if (projectStatus != null) {
         updateData['project_status'] = projectStatus.trim();
+      }
+      if (projectAreaUnit != null && projectAreaUnit.trim().isNotEmpty) {
+        updateData['area_unit'] = projectAreaUnit.trim();
       }
       if (projectAddress != null) {
         updateData['project_address'] = projectAddress.trim();
@@ -384,6 +481,15 @@ class ProjectStorageService {
         }
       }
 
+      // Save amenity areas - only if explicitly provided.
+      if (amenityAreas != null) {
+        try {
+          await _saveAmenityAreas(projectId, amenityAreas);
+        } catch (e) {
+          sectionErrors.add('amenity_areas: $e');
+        }
+      }
+
       // Save partners - only if explicitly provided (prevents deletion when
       // saving from other pages). If partners is null, do not modify them.
       if (partners != null) {
@@ -450,6 +556,90 @@ class ProjectStorageService {
 
     if (areasToInsert.isNotEmpty) {
       await _supabase.from('non_sellable_areas').insert(areasToInsert);
+    }
+  }
+
+  static Future<void> _saveAmenityAreas(
+    String projectId,
+    List<Map<String, String>> amenityAreas,
+  ) async {
+    // Preserve amenity status/sales details by updating rows in-place when possible.
+    // We match incoming rows by id first, then by normalized name as fallback.
+    final existingRows = await _supabase
+        .from('amenity_areas')
+        .select('id, name')
+        .eq('project_id', projectId)
+        .order('sort_order', ascending: true)
+        .order('created_at', ascending: true)
+        .order('id', ascending: true);
+
+    final existingById = <String, Map<String, dynamic>>{};
+    final existingIdsByName = <String, List<String>>{};
+    for (final row in existingRows) {
+      final id = (row['id'] ?? '').toString().trim();
+      if (!_looksLikeUuid(id)) continue;
+      existingById[id] = row;
+      final normalizedName =
+          _normalizeUniqueName((row['name'] ?? '').toString());
+      existingIdsByName.putIfAbsent(normalizedName, () => <String>[]).add(id);
+    }
+
+    final retainedIds = <String>{};
+    final filtered = amenityAreas
+        .where((area) => (area['name'] ?? '').trim().isNotEmpty)
+        .toList();
+
+    for (int index = 0; index < filtered.length; index++) {
+      final area = filtered[index];
+      final name = area['name']?.trim() ?? '';
+      if (name.isEmpty) continue;
+
+      final payload = <String, dynamic>{
+        'name': name,
+        'area': _parseDecimal(area['area']),
+        'all_in_cost': _parseDecimal(area['allInCost']),
+        'sort_order': index,
+      };
+
+      String? matchedId;
+      final incomingId = (area['id'] ?? '').trim();
+      if (_looksLikeUuid(incomingId) && existingById.containsKey(incomingId)) {
+        matchedId = incomingId;
+      } else {
+        final normalizedName = _normalizeUniqueName(name);
+        final nameMatches =
+            existingIdsByName[normalizedName] ?? const <String>[];
+        for (final candidateId in nameMatches) {
+          if (!retainedIds.contains(candidateId)) {
+            matchedId = candidateId;
+            break;
+          }
+        }
+      }
+
+      if (matchedId != null) {
+        await _supabase
+            .from('amenity_areas')
+            .update(payload)
+            .eq('project_id', projectId)
+            .eq('id', matchedId);
+        retainedIds.add(matchedId);
+      } else {
+        await _supabase.from('amenity_areas').insert({
+          'project_id': projectId,
+          ...payload,
+        });
+      }
+    }
+
+    final existingIds = existingById.keys.toSet();
+    final idsToDelete = existingIds.difference(retainedIds).toList();
+    if (idsToDelete.isNotEmpty) {
+      await _supabase
+          .from('amenity_areas')
+          .delete()
+          .eq('project_id', projectId)
+          .inFilter('id', idsToDelete);
     }
   }
 
@@ -552,6 +742,13 @@ class ProjectStorageService {
     String projectId,
     List<Map<String, dynamic>> expenses,
   ) async {
+    final expenseDateColumn = await _resolveExpenseDateColumnName();
+    final expenseDocColumn = await _resolveExpenseDocColumnName();
+    final expenseDocPathColumn = await _resolveExpenseDocPathColumnName();
+    final expenseDocIdColumn = await _resolveExpenseDocIdColumnName();
+    final expenseDocExtensionColumn =
+        await _resolveExpenseDocExtensionColumnName();
+
     // Safer than delete-all + insert-all:
     // update existing rows by id, best-effort match rows missing id, insert only truly new rows,
     // then delete only rows explicitly removed.
@@ -612,11 +809,67 @@ class ProjectStorageService {
       }
 
       final amountNorm = normAmount(expense['amount']);
-      final payload = {
+      final payload = <String, dynamic>{
         'item': item,
         'amount': _parseDecimal(expense['amount']?.toString()),
         'category': category,
       };
+      if (expenseDateColumn != null) {
+        final expenseDate = (expense['expenseDate'] ??
+                expense['expense_date'] ??
+                expense['date'])
+            ?.toString()
+            .trim();
+        payload[expenseDateColumn] =
+            (expenseDate != null && expenseDate.isNotEmpty)
+                ? expenseDate
+                : null;
+      }
+      if (expenseDocColumn != null) {
+        final doc = (expense['doc'] ??
+                expense['document'] ??
+                expense['document_no'] ??
+                expense['doc_no'] ??
+                expense['invoice_no'] ??
+                expense['receipt_no'])
+            ?.toString()
+            .trim();
+        payload[expenseDocColumn] =
+            (doc != null && doc.isNotEmpty) ? doc : null;
+      }
+      if (expenseDocPathColumn != null) {
+        final docPath = (expense['docPath'] ??
+                expense['doc_path'] ??
+                expense['expense_doc_path'] ??
+                expense['document_path'])
+            ?.toString()
+            .trim();
+        payload[expenseDocPathColumn] =
+            (docPath != null && docPath.isNotEmpty) ? docPath : null;
+      }
+      if (expenseDocIdColumn != null) {
+        final docId = (expense['docId'] ??
+                expense['doc_id'] ??
+                expense['document_id'] ??
+                expense['expense_document_id'])
+            ?.toString()
+            .trim();
+        payload[expenseDocIdColumn] =
+            (docId != null && _looksLikeUuid(docId)) ? docId : null;
+      }
+      if (expenseDocExtensionColumn != null) {
+        final docExtension = (expense['docExtension'] ??
+                expense['doc_extension'] ??
+                expense['expense_doc_extension'] ??
+                expense['document_extension'])
+            ?.toString()
+            .trim()
+            .toLowerCase();
+        payload[expenseDocExtensionColumn] =
+            (docExtension != null && docExtension.isNotEmpty)
+                ? docExtension
+                : null;
+      }
 
       final expenseId = (expense['id'] ?? '').toString().trim();
       final matchedExistingId = expenseId.isNotEmpty
@@ -690,11 +943,34 @@ class ProjectStorageService {
     for (var layoutData in layouts) {
       final layoutName = (layoutData['name'] ?? '').toString().trim();
       if (layoutName.isEmpty) continue;
+      final incomingLayoutId = (layoutData['id'] ?? '').toString().trim();
 
       String layoutId;
-      if (existingLayoutMap.containsKey(layoutName)) {
+      if (incomingLayoutId.isNotEmpty) {
+        final existingById = await _supabase
+            .from('layouts')
+            .select('id')
+            .eq('project_id', projectId)
+            .eq('id', incomingLayoutId)
+            .maybeSingle();
+        if (existingById != null && existingById['id'] != null) {
+          layoutId = (existingById['id'] ?? '').toString();
+          if (layoutName.isNotEmpty) {
+            existingLayoutMap[layoutName] = layoutId;
+          }
+        } else if (existingLayoutMap.containsKey(layoutName)) {
+          layoutId = existingLayoutMap[layoutName]!;
+        } else {
+          // Fallback to create/find by name when incoming id does not exist.
+          layoutId = '';
+        }
+      } else if (existingLayoutMap.containsKey(layoutName)) {
         layoutId = existingLayoutMap[layoutName]!;
       } else {
+        layoutId = '';
+      }
+
+      if (layoutId.isEmpty) {
         // Check if layout already exists (handle race condition)
         try {
           final existingCheck = await _supabase
@@ -745,6 +1021,37 @@ class ProjectStorageService {
             rethrow;
           }
         }
+      }
+
+      try {
+        final layoutImageName =
+            (layoutData['layoutImageName'] ?? '').toString().trim();
+        final layoutImagePath =
+            (layoutData['layoutImagePath'] ?? '').toString().trim();
+        final layoutImageDocId =
+            (layoutData['layoutImageDocId'] ?? '').toString().trim();
+        final layoutImageExtension =
+            (layoutData['layoutImageExtension'] ?? '').toString().trim();
+        final hasLayoutImageMeta = layoutData.containsKey('layoutImageName') ||
+            layoutData.containsKey('layoutImagePath') ||
+            layoutData.containsKey('layoutImageDocId') ||
+            layoutData.containsKey('layoutImageExtension');
+        if (hasLayoutImageMeta) {
+          await _supabase.from('layouts').update({
+            'layout_image_name':
+                layoutImageName.isEmpty ? null : layoutImageName,
+            'layout_image_path':
+                layoutImagePath.isEmpty ? null : layoutImagePath,
+            'layout_image_doc_id':
+                _looksLikeUuid(layoutImageDocId) ? layoutImageDocId : null,
+            'layout_image_extension':
+                layoutImageExtension.isEmpty ? null : layoutImageExtension,
+          }).eq('id', layoutId);
+        }
+      } catch (e) {
+        // This can fail before the DB migration is applied. Continue safely.
+        print(
+            '_saveLayoutsAndPlots: layout image metadata sync skipped for "$layoutName": $e');
       }
 
       // Get plots for this layout
@@ -1504,6 +1811,13 @@ class ProjectStorageService {
     if (value == null || value.trim().isEmpty) return null;
     final cleaned = value.replaceAll(RegExp(r'[^\d]'), '');
     return int.tryParse(cleaned);
+  }
+
+  static bool _looksLikeUuid(String value) {
+    final uuidPattern = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+    );
+    return uuidPattern.hasMatch(value.trim());
   }
 
   static String? _parseDate(String? value) {

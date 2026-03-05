@@ -147,6 +147,11 @@ enum PlotStatus {
   blocked,
 }
 
+enum PlotStatusContentTab {
+  site,
+  amenityArea,
+}
+
 class PlotStatusPage extends StatefulWidget {
   final List<Map<String, dynamic>>? layouts;
   final List<Map<String, dynamic>>? agents;
@@ -192,6 +197,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   // Layouts with plots data - loaded from Site section
   List<Map<String, dynamic>> _layouts = [];
+  List<Map<String, dynamic>> _amenityAreas = [];
 
   // Controllers for editable fields
   final Map<String, TextEditingController> _salePriceControllers = {};
@@ -216,6 +222,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   final ScrollController _plotStatusTableScrollController = ScrollController();
   final Map<int, ScrollController> _layoutTableScrollControllers =
       {}; // Key: layoutIndex
+  final ScrollController _amenityAreaTableScrollController = ScrollController();
   final ScrollController _editDialogScrollController = ScrollController();
   final GlobalKey _paymentMethodFieldKey = GlobalKey();
   final GlobalKey _agentFieldKey = GlobalKey();
@@ -231,9 +238,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   bool _isPaymentMethodDropdownOpen = false;
   bool _isAgentDropdownOpen = false;
   int _currentPaymentIndex = 0;
+  int? _editingAmenityAreaIndex;
+  int? _amenityEditTempLayoutIndex;
 
   // Layout expand/collapse and zoom state
   Set<int> _collapsedLayouts = {}; // Set of collapsed layout indices
+  bool _isAmenityAreaCollapsed = false;
+  PlotStatusContentTab _activeContentTab = PlotStatusContentTab.site;
   double _tableZoomLevel =
       1.0; // Table zoom level (1.0 = 100%, 0.5 = 50%, 1.2 = 120%, etc.)
   String _areaUnit = 'Square Feet (sqft)';
@@ -246,6 +257,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     final nextStep = (currentStep + (increase ? 1 : -1)).clamp(5, 12);
     return nextStep / 10.0;
   }
+
+  bool get _isEditingAmenityArea =>
+      _editingAmenityAreaIndex != null && _amenityEditTempLayoutIndex != null;
 
   Future<bool> _canSaveBuyerContactNumber() async {
     // Cache only successful detection. If this was false earlier and DB
@@ -260,6 +274,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       _supportsBuyerContactNumberColumn = false;
     }
     return _supportsBuyerContactNumberColumn!;
+  }
+
+  bool get _hasAmenityAreaData {
+    if (_amenityAreas.isEmpty) return false;
+    for (final area in _amenityAreas) {
+      final name = (area['name'] ?? '').toString().trim();
+      final areaValue = _parseMoneyLikeValue(area['area']);
+      if (name.isNotEmpty || areaValue > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   String _formatWithFixedDecimals(dynamic value, int decimals) {
@@ -294,6 +320,30 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
     // If already in DD/MM/YYYY format, return as is
     return dateStr;
+  }
+
+  String? _formatDateForDatabase(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final ddmmyyyy = RegExp(r'^(\d{1,2})/(\d{1,2})/(\d{4})$');
+    final match = ddmmyyyy.firstMatch(trimmed);
+    if (match != null) {
+      final day = int.tryParse(match.group(1) ?? '');
+      final month = int.tryParse(match.group(2) ?? '');
+      final year = int.tryParse(match.group(3) ?? '');
+      if (day != null &&
+          month != null &&
+          year != null &&
+          day >= 1 &&
+          day <= 31 &&
+          month >= 1 &&
+          month <= 12) {
+        return '${year.toString().padLeft(4, '0')}-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
+      }
+    }
+    final iso = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+    if (iso.hasMatch(trimmed)) return trimmed;
+    return null;
   }
 
   PlotStatus _parsePlotStatus(dynamic statusData) {
@@ -559,6 +609,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     // Dispose scroll controllers
     _plotStatusTableScrollController.dispose();
+    _amenityAreaTableScrollController.dispose();
     _editDialogScrollController.dispose();
     for (var controller in _layoutTableScrollControllers.values) {
       controller.dispose();
@@ -576,9 +627,265 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     return node;
   }
 
+  Map<String, dynamic> _createDefaultPaymentEntry([String method = '']) {
+    return <String, dynamic>{
+      'paymentMethod': method,
+      'paymentAmount': '0',
+      'chequeDate': '',
+      'chequeNumber': '',
+      'transferDate': '',
+      'transactionId': '',
+      'paymentDate': '',
+      'upiTransactionId': '',
+      'upiApp': '',
+      'ddDate': '',
+      'ddNumber': '',
+      'otherPaymentDate': '',
+      'otherPaymentMethod': '',
+      'referenceNumber': '',
+      'bankName': '',
+    };
+  }
+
+  List<Map<String, dynamic>> _buildAmenityPaymentsFromText(String paymentText) {
+    final methods = paymentText
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (methods.isEmpty) return <Map<String, dynamic>>[];
+    return methods.map((method) => _createDefaultPaymentEntry(method)).toList();
+  }
+
+  void _disposeDialogControllersForLayoutPlot(int layoutIndex, int plotIndex) {
+    final prefix = '${layoutIndex}_${plotIndex}_';
+    final exactKeys = <String>[
+      '${layoutIndex}_${plotIndex}_price',
+      '${layoutIndex}_${plotIndex}_buyer',
+      '${layoutIndex}_${plotIndex}_buyer_contact',
+      '${layoutIndex}_${plotIndex}_date',
+    ];
+
+    for (final key in exactKeys) {
+      _salePriceControllers.remove(key)?.dispose();
+      _buyerNameControllers.remove(key)?.dispose();
+      _buyerContactControllers.remove(key)?.dispose();
+      _saleDateControllers.remove(key)?.dispose();
+
+      _salePriceFocusNodes.remove(key)?.dispose();
+      _buyerNameFocusNodes.remove(key)?.dispose();
+      _buyerContactFocusNodes.remove(key)?.dispose();
+      _saleDateFocusNodes.remove(key)?.dispose();
+    }
+
+    final paymentAmountKeys = _paymentAmountControllers.keys
+        .where((k) => k.startsWith(prefix))
+        .toList();
+    for (final key in paymentAmountKeys) {
+      _paymentAmountControllers.remove(key)?.dispose();
+      _paymentAmountFocusNodes.remove(key)?.dispose();
+    }
+
+    final paymentTextKeys = _paymentTextControllers.keys
+        .where((k) => k.startsWith(prefix))
+        .toList();
+    for (final key in paymentTextKeys) {
+      _paymentTextControllers.remove(key)?.dispose();
+      _paymentTextFocusNodes.remove(key)?.dispose();
+    }
+  }
+
+  void _removeAmenityEditTempLayoutIfNeeded() {
+    if (_amenityEditTempLayoutIndex != null &&
+        _amenityEditTempLayoutIndex! >= 0 &&
+        _amenityEditTempLayoutIndex! < _layouts.length) {
+      _disposeDialogControllersForLayoutPlot(_amenityEditTempLayoutIndex!, 0);
+      _layouts.removeAt(_amenityEditTempLayoutIndex!);
+    }
+    _amenityEditTempLayoutIndex = null;
+    _editingAmenityAreaIndex = null;
+  }
+
+  void _closeCurrentEditDialog() {
+    _removeAmenityEditTempLayoutIfNeeded();
+    _editingLayoutIndex = null;
+    _editingPlotIndex = null;
+    _editingStatus = null;
+    _isStatusDropdownOpen = false;
+    _isPaymentMethodDropdownOpen = false;
+    _isAgentDropdownOpen = false;
+    _currentPaymentIndex = 0;
+  }
+
+  void _openSiteEditDialog(
+    int layoutIndex,
+    int plotIndex, {
+    bool preserveAmenityTemp = false,
+  }) {
+    if (layoutIndex < 0 || layoutIndex >= _layouts.length) return;
+    final plots = _layouts[layoutIndex]['plots'] as List<dynamic>? ?? const [];
+    if (plotIndex < 0 || plotIndex >= plots.length) return;
+    final plot = plots[plotIndex];
+    if (plot is! Map<String, dynamic>) return;
+
+    setState(() {
+      if (!preserveAmenityTemp) {
+        _removeAmenityEditTempLayoutIfNeeded();
+      }
+      _editingLayoutIndex = layoutIndex;
+      _editingPlotIndex = plotIndex;
+      _editingStatus = _parsePlotStatus(plot['status']);
+      _isStatusDropdownOpen = false;
+      _isPaymentMethodDropdownOpen = false;
+      _isAgentDropdownOpen = false;
+      _currentPaymentIndex = 0;
+    });
+  }
+
+  void _openAmenityEditDialog(int amenityIndex) {
+    if (amenityIndex < 0 || amenityIndex >= _amenityAreas.length) return;
+
+    final amenityArea = _amenityAreas[amenityIndex];
+    final name = (amenityArea['name'] ?? '').toString().trim();
+    final areaText = (amenityArea['area'] ?? '0').toString();
+    final status = _parsePlotStatus(amenityArea['status']);
+    final salePrice = (amenityArea['salePrice'] ?? '').toString();
+    final buyerName = (amenityArea['buyerName'] ?? '').toString();
+    final agentName = (amenityArea['agent'] ?? '').toString();
+    final saleDate = (amenityArea['saleDate'] ?? '').toString();
+    final paymentText = (amenityArea['payment'] ?? '').toString();
+    final payments = _buildAmenityPaymentsFromText(paymentText);
+    final tempPayments = payments
+        .map<Map<String, Object>>(
+            (payment) => Map<String, Object>.from(payment))
+        .toList();
+    final tempLayout = <String, Object>{
+      'name': 'Amenity Area',
+      'plots': <Map<String, Object>>[
+        <String, Object>{
+          'plotNumber': name.isEmpty ? 'Amenity Area' : name,
+          'area': areaText.isEmpty ? '0.000' : areaText,
+          'status': status,
+          'salePrice': salePrice,
+          'buyerName': buyerName,
+          'buyerContactNumber': '',
+          'agent': agentName,
+          'saleDate': saleDate,
+          'payments': tempPayments,
+        },
+      ],
+    };
+
+    setState(() {
+      _closeCurrentEditDialog();
+      _layouts.add(tempLayout);
+      _amenityEditTempLayoutIndex = _layouts.length - 1;
+      _editingAmenityAreaIndex = amenityIndex;
+    });
+
+    _openSiteEditDialog(
+      _amenityEditTempLayoutIndex!,
+      0,
+      preserveAmenityTemp: true,
+    );
+  }
+
+  void _handleAmenityEditIconTap(
+    Map<String, dynamic> area,
+    int visibleIndex,
+  ) {
+    int originalIndex = -1;
+    final sourceIndexRaw = area['_sourceIndex'];
+    if (sourceIndexRaw is int) {
+      originalIndex = sourceIndexRaw;
+    } else if (sourceIndexRaw is num) {
+      originalIndex = sourceIndexRaw.toInt();
+    }
+    if (originalIndex < 0 || originalIndex >= _amenityAreas.length) {
+      final id = (area['id'] ?? '').toString().trim();
+      if (id.isNotEmpty) {
+        originalIndex =
+            _amenityAreas.indexWhere((element) => element['id'] == id);
+      }
+    }
+    if (originalIndex < 0 || originalIndex >= _amenityAreas.length) {
+      originalIndex = visibleIndex;
+    }
+    if (originalIndex < 0 || originalIndex >= _amenityAreas.length) return;
+    _openAmenityEditDialog(originalIndex);
+  }
+
+  Future<void> _saveAmenityAreaEditFromDialog() async {
+    if (!_isEditingAmenityArea) return;
+    if (_amenityEditTempLayoutIndex! >= _layouts.length) return;
+    if (_editingAmenityAreaIndex! >= _amenityAreas.length) return;
+
+    final tempLayout = _layouts[_amenityEditTempLayoutIndex!];
+    final tempPlots = tempLayout['plots'] as List<dynamic>? ?? const [];
+    if (tempPlots.isEmpty || tempPlots.first is! Map<String, dynamic>) return;
+    final editedPlot = tempPlots.first as Map<String, dynamic>;
+    final amenityRow = _amenityAreas[_editingAmenityAreaIndex!];
+
+    final status = _parsePlotStatus(editedPlot['status']);
+    final salePriceValue = _parseMoneyLikeValue(editedPlot['salePrice']);
+    final salePriceText =
+        salePriceValue > 0 ? _formatWithFixedDecimals(salePriceValue, 2) : '';
+    final areaSqft = _parseMoneyLikeValue(amenityRow['area']);
+    final saleValue = areaSqft * salePriceValue;
+    final saleValueText =
+        saleValue > 0 ? _formatWithFixedDecimals(saleValue, 2) : '';
+    final buyerName = (editedPlot['buyerName'] ?? '').toString().trim();
+    final agentName = (editedPlot['agent'] ?? '').toString().trim();
+    final saleDate = (editedPlot['saleDate'] ?? '').toString().trim();
+    final payments = editedPlot['payments'] as List<dynamic>? ?? const [];
+    final paymentMethods = <String>[];
+    for (final payment in payments) {
+      if (payment is! Map<String, dynamic>) continue;
+      final method = (payment['paymentMethod'] ?? '').toString().trim();
+      if (method.isNotEmpty && !paymentMethods.contains(method)) {
+        paymentMethods.add(method);
+      }
+    }
+    final paymentText = paymentMethods.join(', ');
+
+    setState(() {
+      amenityRow['status'] = status;
+      amenityRow['salePrice'] = salePriceText;
+      amenityRow['saleValue'] = saleValueText;
+      amenityRow['buyerName'] = buyerName;
+      amenityRow['agent'] = agentName;
+      amenityRow['saleDate'] = saleDate;
+      amenityRow['payment'] = paymentText;
+      _closeCurrentEditDialog();
+    });
+
+    final amenityId = (amenityRow['id'] ?? '').toString().trim();
+    final projectId = widget.projectId?.trim() ?? '';
+    if (amenityId.isEmpty || projectId.isEmpty) return;
+
+    try {
+      final updateData = <String, dynamic>{
+        'status': _plotStatusToDatabaseValue(status),
+        'sale_price': salePriceValue > 0 ? salePriceValue : null,
+        'sale_value': saleValue > 0 ? saleValue : null,
+        'buyer_name': buyerName.isEmpty ? null : buyerName,
+        'payment': paymentText.isEmpty ? null : paymentText,
+        'agent_name': agentName.isEmpty ? null : agentName,
+        'sale_date': _formatDateForDatabase(saleDate),
+      };
+      await _supabase
+          .from('amenity_areas')
+          .update(updateData)
+          .eq('id', amenityId);
+    } catch (e) {
+      print('Error saving amenity area edits: $e');
+    }
+  }
+
   Future<void> _loadPlotData() async {
     _areaUnit = await AreaUnitService.getAreaUnit(widget.projectId);
     List<Map<String, dynamic>> sourceLayouts = widget.layouts ?? [];
+    List<Map<String, dynamic>> sourceAmenityAreas = [];
     List<Map<String, dynamic>> agents = [];
 
     print(
@@ -604,6 +911,19 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         }
 
         final layoutsData = <Map<String, dynamic>>[];
+        try {
+          final amenityAreasData = await _supabase
+              .from('amenity_areas')
+              .select()
+              .eq('project_id', widget.projectId!)
+              .order('sort_order', ascending: true)
+              .order('created_at', ascending: true)
+              .order('id', ascending: true);
+          sourceAmenityAreas = amenityAreasData.cast<Map<String, dynamic>>();
+        } catch (e) {
+          sourceAmenityAreas = [];
+          print('PlotStatusPage: Unable to load amenity_areas: $e');
+        }
 
         if (layouts.isNotEmpty) {
           for (var layout in layouts) {
@@ -714,7 +1034,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     // Fallback to local storage or provided layouts if database load didn't work
     if (sourceLayouts.isEmpty) {
       print('⚠️ sourceLayouts is empty, loading from local storage');
-      sourceLayouts = await LayoutStorageService.loadLayoutsData();
+      sourceLayouts = await LayoutStorageService.loadLayoutsData(
+        projectKey: widget.projectId,
+      );
       print('📥 Loaded from local storage: ${sourceLayouts.length} layouts');
     }
 
@@ -729,7 +1051,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         final remoteSaveMs =
             prefs.getInt('project_${projectId}_last_remote_save_ms') ?? 0;
         if (localEditMs > remoteSaveMs) {
-          final localLayouts = await LayoutStorageService.loadLayoutsData();
+          final localLayouts = await LayoutStorageService.loadLayoutsData(
+            projectKey: widget.projectId,
+          );
           if (localLayouts.isNotEmpty) {
             print(
                 '📥 PlotStatusPage using newer local layouts (local=$localEditMs remote=$remoteSaveMs)');
@@ -756,6 +1080,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     setState(() {
       _storedAgents = agents;
       _layouts = _convertLayoutsData(sourceLayouts);
+      _amenityAreas = _convertAmenityAreasData(sourceAmenityAreas);
       _allPlots = [];
 
       // Populate _allPlots from layouts for filtering/search
@@ -787,6 +1112,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       }
 
       print('PlotStatusPage: Loaded ${_allPlots.length} plots total');
+
+      if (!_hasAmenityAreaData &&
+          _activeContentTab == PlotStatusContentTab.amenityArea) {
+        _activeContentTab = PlotStatusContentTab.site;
+      }
 
       // Initialize controllers for sale price, buyer name, and sale date from loaded data
       _initializeControllersFromData();
@@ -924,6 +1254,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
   Future<void> _saveLayoutsData() async {
+    if (_isEditingAmenityArea) {
+      return;
+    }
     print(
         '🔷 _saveLayoutsData ENTRY: Starting save, _layouts has ${_layouts.length} layouts');
 
@@ -1055,7 +1388,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
 
     // Persist local draft first and mark it as the newest edit.
-    await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
+    await LayoutStorageService.saveLayoutsDataDirect(
+      layoutsToSave,
+      projectKey: widget.projectId,
+    );
     await _markLocalEditTimestamp();
     _markUnsaved();
 
@@ -1091,7 +1427,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       }
     } else {
       // Save to local storage if no projectId
-      await LayoutStorageService.saveLayoutsDataDirect(layoutsToSave);
+      await LayoutStorageService.saveLayoutsDataDirect(
+        layoutsToSave,
+        projectKey: widget.projectId,
+      );
       _hasUnsavedChanges = false;
       _setSaveStatus(ProjectSaveStatusType.saved);
     }
@@ -1100,7 +1439,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   }
 
   Future<void> _saveToStorage(List<Map<String, dynamic>> layouts) async {
-    await LayoutStorageService.saveLayoutsDataDirect(layouts);
+    await LayoutStorageService.saveLayoutsDataDirect(
+      layouts,
+      projectKey: widget.projectId,
+    );
   }
 
   Future<void> _markLocalEditTimestamp() async {
@@ -1208,7 +1550,36 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }).toList();
   }
 
+  List<Map<String, dynamic>> _convertAmenityAreasData(
+    List<Map<String, dynamic>> sourceAmenityAreas,
+  ) {
+    return sourceAmenityAreas.map((row) {
+      final areaSqft = (row['area'] is num)
+          ? (row['area'] as num).toDouble()
+          : double.tryParse((row['area'] ?? '0').toString()) ?? 0.0;
+      final statusRaw = (row['status'] ?? 'available').toString();
+      final salePriceRaw = (row['sale_price'] ?? '').toString();
+      final saleValueRaw = (row['sale_value'] ?? '').toString();
+      return <String, dynamic>{
+        'id': (row['id'] ?? '').toString(),
+        'name': (row['name'] ?? '').toString().trim(),
+        // Store in sqft, convert to display only while rendering.
+        'area': _formatWithFixedDecimals(areaSqft, 3),
+        'status': _parsePlotStatus(statusRaw),
+        'salePrice': salePriceRaw,
+        'saleValue': saleValueRaw,
+        'buyerName': (row['buyer_name'] ?? '').toString(),
+        'payment': (row['payment'] ?? '').toString(),
+        'agent': (row['agent_name'] ?? '').toString(),
+        'saleDate': _formatDateFromDatabase(row['sale_date']),
+      };
+    }).toList();
+  }
+
   Future<void> _savePlotsToDatabase() async {
+    if (_isEditingAmenityArea) {
+      return;
+    }
     // Save plot data (including agent, status, buyer, price, date) to Supabase
     if (widget.projectId == null) return;
 
@@ -1403,6 +1774,35 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     return result;
   }
 
+  List<Map<String, dynamic>> get _filteredAmenityAreas {
+    final filtered = <Map<String, dynamic>>[];
+    for (int i = 0; i < _amenityAreas.length; i++) {
+      final area = _amenityAreas[i];
+      final name = (area['name'] ?? '').toString().trim().toLowerCase();
+      final areaStatus = _parsePlotStatus(area['status']);
+      if (_selectedStatus != 'All Status') {
+        final statusString = _getStatusString(areaStatus);
+        if (statusString != _selectedStatus) {
+          continue;
+        }
+      }
+      if (_searchQuery.isNotEmpty) {
+        final query = _searchQuery.toLowerCase();
+        if (!name.contains(query)) {
+          continue;
+        }
+      }
+      if (name.isEmpty && _parseMoneyLikeValue(area['area']) <= 0) {
+        continue;
+      }
+
+      final row = Map<String, dynamic>.from(area);
+      row['_sourceIndex'] = i;
+      filtered.add(row);
+    }
+    return filtered;
+  }
+
   List<Map<String, dynamic>> get _salesData {
     final salesData = <Map<String, dynamic>>[];
     for (var layout in _layouts) {
@@ -1582,6 +1982,21 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
     final formattedInteger = _formatIntegerWithIndianNumbering(integerPart);
     return '$formattedInteger.$decimalPart';
+  }
+
+  String _formatAreaNoTrailingZeros(String value) {
+    final raw = value
+        .trim()
+        .replaceAll('₹', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '');
+    final parsed = double.tryParse(raw) ?? 0.0;
+    final fixed = parsed.toStringAsFixed(3);
+    final trimmed = fixed.replaceFirst(RegExp(r'\.?0+$'), '');
+    final parts = trimmed.split('.');
+    final formattedInteger = _formatIntegerWithIndianNumbering(parts.first);
+    if (parts.length == 1) return formattedInteger;
+    return '$formattedInteger.${parts[1]}';
   }
 
   // Format amount without trailing zeros (shows "0" instead of "0.00")
@@ -1772,18 +2187,32 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     int soldPlots = 0;
     int pendingPlots = 0;
 
-    for (var layout in _layouts) {
-      final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
-      for (var plot in plots) {
-        final status = _parsePlotStatus(plot['status']);
+    if (_activeContentTab == PlotStatusContentTab.amenityArea) {
+      for (final area in _amenityAreas) {
+        final status = _parsePlotStatus(area['status']);
         totalPlots++;
-
         if (status == PlotStatus.sold) {
           soldPlots++;
         } else if (status == PlotStatus.available) {
           availablePlots++;
         } else if (status == PlotStatus.reserved) {
           pendingPlots++;
+        }
+      }
+    } else {
+      for (var layout in _layouts) {
+        final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
+        for (var plot in plots) {
+          final status = _parsePlotStatus(plot['status']);
+          totalPlots++;
+
+          if (status == PlotStatus.sold) {
+            soldPlots++;
+          } else if (status == PlotStatus.available) {
+            availablePlots++;
+          } else if (status == PlotStatus.reserved) {
+            pendingPlots++;
+          }
         }
       }
     }
@@ -1980,7 +2409,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     print('🔨 BUILD: Widget rebuilding. _allPlots count: ${_allPlots.length}');
     final screenWidth = MediaQuery.of(context).size.width;
     final scaleMetrics = AppScaleMetrics.of(context);
-    final tabLineWidth = scaleMetrics?.designViewportWidth ?? screenWidth;
+    final tabLineWidth = (scaleMetrics?.designViewportWidth ?? screenWidth) +
+        (scaleMetrics?.rightOverflowWidth ?? 0.0);
     final extraTabLineWidth =
         tabLineWidth > screenWidth ? tabLineWidth - screenWidth : 0.0;
     final isMobile = screenWidth < 768;
@@ -2026,10 +2456,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       ],
                     ),
                   ),
-                  AreaUnitSelector(
-                    selectedUnit: _areaUnit,
-                    projectId: widget.projectId,
-                    onUnitChanged: (unit) => setState(() => _areaUnit = unit),
+                  Transform.translate(
+                    offset: Offset(extraTabLineWidth, 0),
+                    child: AreaUnitSelector(
+                      selectedUnit: _areaUnit,
+                      projectId: widget.projectId,
+                      onUnitChanged: (unit) => setState(() => _areaUnit = unit),
+                    ),
                   ),
                 ],
               ),
@@ -2053,51 +2486,111 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   Row(
                     children: [
                       const SizedBox(width: 24),
-                      Stack(
-                        clipBehavior: Clip.none,
-                        alignment: Alignment.topCenter,
-                        children: [
-                          Container(
-                            height: 32,
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
-                            decoration: const BoxDecoration(
-                              border: Border(
-                                bottom: BorderSide(
-                                  color: Color(0xFF0C8CE9),
-                                  width: 2,
+                      GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _activeContentTab = PlotStatusContentTab.site;
+                          });
+                        },
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          alignment: Alignment.topCenter,
+                          children: [
+                            Container(
+                              height: 32,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 4),
+                              decoration:
+                                  _activeContentTab == PlotStatusContentTab.site
+                                      ? const BoxDecoration(
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: Color(0xFF0C8CE9),
+                                              width: 2,
+                                            ),
+                                          ),
+                                        )
+                                      : null,
+                              child: Center(
+                                child: Text(
+                                  "Site",
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: _activeContentTab ==
+                                            PlotStatusContentTab.site
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    color: _activeContentTab ==
+                                            PlotStatusContentTab.site
+                                        ? const Color(0xFF0C8CE9)
+                                        : const Color(0xFF858585),
+                                  ),
                                 ),
                               ),
                             ),
+                            if (_hasValidationErrors())
+                              Positioned(
+                                top: -8,
+                                child: SvgPicture.asset(
+                                  'assets/images/Error_msg.svg',
+                                  width: 17,
+                                  height: 15,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (context, error, stackTrace) {
+                                    print(
+                                        'Error loading Error_msg.svg: $error');
+                                    return const SizedBox(
+                                      width: 17,
+                                      height: 15,
+                                    );
+                                  },
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (_hasAmenityAreaData) ...[
+                        const SizedBox(width: 36),
+                        GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              _activeContentTab =
+                                  PlotStatusContentTab.amenityArea;
+                            });
+                          },
+                          child: Container(
+                            height: 32,
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            decoration: _activeContentTab ==
+                                    PlotStatusContentTab.amenityArea
+                                ? const BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: Color(0xFF0C8CE9),
+                                        width: 2,
+                                      ),
+                                    ),
+                                  )
+                                : null,
                             child: Center(
                               child: Text(
-                                "Site",
+                                'Amenity Area',
                                 style: GoogleFonts.inter(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w500,
-                                  color: const Color(0xFF0C8CE9),
+                                  fontSize: 14,
+                                  fontWeight: _activeContentTab ==
+                                          PlotStatusContentTab.amenityArea
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
+                                  color: _activeContentTab ==
+                                          PlotStatusContentTab.amenityArea
+                                      ? const Color(0xFF0C8CE9)
+                                      : const Color(0xFF858585),
                                 ),
                               ),
                             ),
                           ),
-                          if (_hasValidationErrors())
-                            Positioned(
-                              top: -8,
-                              child: SvgPicture.asset(
-                                'assets/images/Error_msg.svg',
-                                width: 17,
-                                height: 15,
-                                fit: BoxFit.contain,
-                                errorBuilder: (context, error, stackTrace) {
-                                  print('Error loading Error_msg.svg: $error');
-                                  return const SizedBox(
-                                    width: 17,
-                                    height: 15,
-                                  );
-                                },
-                              ),
-                            ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ],
                   ),
                 ],
@@ -2205,7 +2698,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     GestureDetector(
                                       onTap: () {
                                         setState(() {
-                                          _collapsedLayouts.clear();
+                                          if (_activeContentTab ==
+                                              PlotStatusContentTab
+                                                  .amenityArea) {
+                                            _isAmenityAreaCollapsed = false;
+                                          } else {
+                                            _collapsedLayouts.clear();
+                                          }
                                         });
                                       },
                                       child: Container(
@@ -2269,12 +2768,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     GestureDetector(
                                       onTap: () {
                                         setState(() {
-                                          _collapsedLayouts.clear();
-                                          // Add all layout indices to collapsed set
-                                          for (int i = 0;
-                                              i < _layouts.length;
-                                              i++) {
-                                            _collapsedLayouts.add(i);
+                                          if (_activeContentTab ==
+                                              PlotStatusContentTab
+                                                  .amenityArea) {
+                                            _isAmenityAreaCollapsed = true;
+                                          } else {
+                                            _collapsedLayouts.clear();
+                                            // Add all layout indices to collapsed set
+                                            for (int i = 0;
+                                                i < _layouts.length;
+                                                i++) {
+                                              _collapsedLayouts.add(i);
+                                            }
                                           }
                                         });
                                       },
@@ -2445,47 +2950,77 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                           ],
                         ),
                         const SizedBox(height: 24),
-                        if (_isLoading && _layouts.isEmpty)
-                          _buildLayoutsLoadingSkeleton()
-                        else if (_layouts.isEmpty)
-                          Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  Icons.inbox_outlined,
-                                  size: 64,
-                                  color: Colors.black.withOpacity(0.3),
-                                ),
-                                const SizedBox(height: 16),
-                                Text(
-                                  'No layouts found',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.5),
+                        if (_activeContentTab == PlotStatusContentTab.site) ...[
+                          if (_isLoading && _layouts.isEmpty)
+                            _buildLayoutsLoadingSkeleton()
+                          else if (_layouts.isEmpty)
+                            Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.inbox_outlined,
+                                    size: 64,
+                                    color: Colors.black.withOpacity(0.3),
                                   ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Add layouts and plots in the Site tab to view their status here',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.4),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'No layouts found',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black.withOpacity(0.5),
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
-                          )
-                        else
-                          ...List.generate(_layouts.length, (layoutIndex) {
-                            return Container(
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Add layouts and plots in the Site tab to view their status here',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black.withOpacity(0.4),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          else
+                            ...List.generate(_layouts.length, (layoutIndex) {
+                              return Container(
+                                margin: const EdgeInsets.only(bottom: 24),
+                                child: _buildLayoutCard(
+                                    layoutIndex, _layouts[layoutIndex]),
+                              );
+                            }),
+                        ] else ...[
+                          if (!_hasAmenityAreaData)
+                            Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.inbox_outlined,
+                                    size: 64,
+                                    color: Colors.black.withOpacity(0.3),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'No amenity area found',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black.withOpacity(0.5),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          else
+                            Container(
                               margin: const EdgeInsets.only(bottom: 24),
-                              child: _buildLayoutCard(
-                                  layoutIndex, _layouts[layoutIndex]),
-                            );
-                          }),
+                              child: _buildAmenityAreaCard(),
+                            ),
+                        ],
                       ],
                     ),
                   ),
@@ -2513,9 +3048,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       child: GestureDetector(
                         onTap: () {
                           setState(() {
-                            _editingLayoutIndex = null;
-                            _editingPlotIndex = null;
-                            _editingStatus = null;
+                            _closeCurrentEditDialog();
                           });
                         },
                         child: Container(),
@@ -2564,10 +3097,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       ),
       child: Row(
         children: [
-          Icon(
-            Icons.calendar_today,
-            size: 16,
-            color: const Color(0xFFC1C1C1),
+          SvgPicture.asset(
+            'assets/images/Date.svg',
+            width: 16,
+            height: 16,
+            fit: BoxFit.contain,
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -3627,10 +4161,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             ),
             child: Row(
               children: [
-                Icon(
-                  Icons.calendar_today,
-                  size: 16,
-                  color: Colors.black.withOpacity(0.5),
+                SvgPicture.asset(
+                  'assets/images/Date.svg',
+                  width: 16,
+                  height: 16,
+                  fit: BoxFit.contain,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -4306,14 +4841,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
 
     final layout = _layouts[_editingLayoutIndex!];
-    final plots = layout['plots'] as List<Map<String, dynamic>>? ?? [];
-    if (_editingPlotIndex! >= plots.length) {
+    final plotsRaw = layout['plots'] as List<dynamic>? ?? const [];
+    if (_editingPlotIndex! < 0 || _editingPlotIndex! >= plotsRaw.length) {
+      return const SizedBox.shrink();
+    }
+    final plotRaw = plotsRaw[_editingPlotIndex!];
+    if (plotRaw is! Map<String, dynamic>) {
       return const SizedBox.shrink();
     }
 
     // Get fresh plot data to ensure we have the latest status
-    final plot = _layouts[_editingLayoutIndex!]['plots'][_editingPlotIndex!]
-        as Map<String, dynamic>;
+    final plot = plotRaw;
     final layoutName =
         layout['name'] as String? ?? 'Layout ${_editingLayoutIndex! + 1}';
     final plotNumber = plot['plotNumber'] as String? ?? '';
@@ -4390,11 +4928,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       GestureDetector(
                         onTap: () {
                           setState(() {
-                            _editingLayoutIndex = null;
-                            _editingPlotIndex = null;
-                            _editingStatus = null;
-                            _isStatusDropdownOpen = false;
-                            _isPaymentMethodDropdownOpen = false;
+                            _closeCurrentEditDialog();
                           });
                         },
                         child: Container(
@@ -4430,15 +4964,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                       GestureDetector(
                         onTap: () async {
                           print('💾 UPDATE BUTTON: Clicked');
+                          if (_isEditingAmenityArea) {
+                            await _saveAmenityAreaEditFromDialog();
+                            print('💾 UPDATE BUTTON: Amenity update complete');
+                            return;
+                          }
                           // Close dialog immediately on Update click.
                           setState(() {
                             _syncEditingPlotToAllPlots();
                             _rebuildAllPlotsFromLayouts();
-                            _editingLayoutIndex = null;
-                            _editingPlotIndex = null;
-                            _editingStatus = null;
-                            _isStatusDropdownOpen = false;
-                            _isPaymentMethodDropdownOpen = false;
+                            _closeCurrentEditDialog();
                           });
                           // Save all changes in background after closing dialog.
                           await _saveLayoutsData();
@@ -4690,8 +5225,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                         children: [
                                           Container(
                                             width: 152,
-                                            height: 32,
-                                            padding: const EdgeInsets.all(8),
+                                            height: 28,
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8),
                                             decoration: BoxDecoration(
                                               color:
                                                   currentStatusBackgroundColor,
@@ -4715,6 +5251,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                   decoration: BoxDecoration(
                                                     color: currentStatusColor,
                                                     shape: BoxShape.circle,
+                                                    border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 1,
+                                                    ),
                                                   ),
                                                 ),
                                                 const SizedBox(width: 8),
@@ -4725,6 +5265,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                     fontWeight:
                                                         FontWeight.normal,
                                                     color: Colors.black,
+                                                    height: 1.2,
                                                   ),
                                                 ),
                                               ],
@@ -4791,15 +5332,20 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                         PlotStatus.available,
                                         PlotStatus.sold,
                                       ];
+                                      final dropdownOptions = optionsList
+                                          .where((status) =>
+                                              status !=
+                                              effectiveStatusForDropdown)
+                                          .toList();
                                       print(
                                           '📋 DROPDOWN OPTIONS: Creating ${optionsList.length} options: $optionsList');
 
                                       return Column(
                                         mainAxisSize: MainAxisSize.min,
                                         children: List.generate(
-                                            optionsList.length, (index) {
+                                            dropdownOptions.length, (index) {
                                           final statusOption =
-                                              optionsList[index];
+                                              dropdownOptions[index];
                                           print(
                                               '📋 DROPDOWN OPTIONS: Rendering option $statusOption');
                                           final optionColor =
@@ -4808,159 +5354,175 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                           final optionText =
                                               _getStatusDropdownLabel(
                                                   statusOption);
+                                          final isLastOption =
+                                              index == dropdownOptions.length - 1;
 
-                                          return Material(
-                                            color: Colors.transparent,
-                                            child: InkWell(
-                                              onTap: () async {
-                                                print(
-                                                    '📝 STATUS CHANGE: ✅✅✅ INKWELL TAPPED! User selected $statusOption');
-                                                // Get fresh references to ensure we're updating the right data
-                                                final currentLayout = _layouts[
-                                                    _editingLayoutIndex!];
-                                                final currentPlot =
-                                                    currentLayout['plots']
-                                                            [_editingPlotIndex!]
-                                                        as Map<String, dynamic>;
-                                                final plotNumber =
-                                                    currentPlot['plotNumber']
-                                                            as String? ??
-                                                        '';
-                                                final layoutName =
-                                                    currentLayout['name']
-                                                            as String? ??
-                                                        '';
-                                                print(
-                                                    '📝 STATUS CHANGE: Updating layout=$layoutName, plot=$plotNumber to $statusOption');
+                                          return Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Material(
+                                                color: Colors.transparent,
+                                                child: InkWell(
+                                                  onTap: () async {
+                                                    print(
+                                                        '📝 STATUS CHANGE: ✅✅✅ INKWELL TAPPED! User selected $statusOption');
+                                                    // Get fresh references to ensure we're updating the right data
+                                                    final currentLayout = _layouts[
+                                                        _editingLayoutIndex!];
+                                                    final currentPlot =
+                                                        currentLayout['plots']
+                                                                [_editingPlotIndex!]
+                                                            as Map<String, dynamic>;
+                                                    final plotNumber =
+                                                        currentPlot['plotNumber']
+                                                                as String? ??
+                                                            '';
+                                                    final layoutName =
+                                                        currentLayout['name']
+                                                                as String? ??
+                                                            '';
+                                                    print(
+                                                        '📝 STATUS CHANGE: Updating layout=$layoutName, plot=$plotNumber to $statusOption');
 
-                                                // Use the same update pattern as _updatePlotStatus
-                                                setState(() {
-                                                  print(
-                                                      '📝 STATUS CHANGE: Inside setState');
-                                                  _editingStatus = statusOption;
-                                                  // Directly update the plot we're editing (fastest way)
-                                                  _layouts[_editingLayoutIndex!]
-                                                              ['plots']
-                                                          [_editingPlotIndex!]
-                                                      ['status'] = statusOption;
+                                                    // Use the same update pattern as _updatePlotStatus
+                                                    setState(() {
+                                                      print(
+                                                          '📝 STATUS CHANGE: Inside setState');
+                                                      _editingStatus = statusOption;
+                                                      // Directly update the plot we're editing (fastest way)
+                                                      _layouts[_editingLayoutIndex!]
+                                                                  ['plots']
+                                                              [_editingPlotIndex!]
+                                                          ['status'] = statusOption;
 
-                                                  // First update _allPlots (same as table update)
-                                                  for (var plotData
-                                                      in _allPlots) {
-                                                    if ((plotData['plotNumber']
-                                                                    as String? ??
-                                                                '') ==
-                                                            plotNumber &&
-                                                        (plotData['layout']
+                                                      // First update _allPlots (same as table update)
+                                                      for (var plotData
+                                                          in _allPlots) {
+                                                        if ((plotData['plotNumber']
+                                                                        as String? ??
+                                                                    '') ==
+                                                                plotNumber &&
+                                                            (plotData['layout']
+                                                                        as String? ??
+                                                                    '') ==
+                                                                layoutName) {
+                                                          plotData['status'] =
+                                                              statusOption;
+                                                          print(
+                                                              '📝 STATUS CHANGE: Updated _allPlots entry');
+                                                          break;
+                                                        }
+                                                      }
+
+                                                      // Then update the corresponding plot in _layouts (same as table update) - this ensures all copies are updated
+                                                      for (var layout in _layouts) {
+                                                        if ((layout['name']
                                                                     as String? ??
                                                                 '') ==
                                                             layoutName) {
-                                                      plotData['status'] =
-                                                          statusOption;
-                                                      print(
-                                                          '📝 STATUS CHANGE: Updated _allPlots entry');
-                                                      break;
-                                                    }
-                                                  }
-
-                                                  // Then update the corresponding plot in _layouts (same as table update) - this ensures all copies are updated
-                                                  for (var layout in _layouts) {
-                                                    if ((layout['name']
-                                                                as String? ??
-                                                            '') ==
-                                                        layoutName) {
-                                                      final plots = layout[
-                                                                  'plots']
-                                                              as List<
-                                                                  dynamic>? ??
-                                                          [];
-                                                      for (var plotData
-                                                          in plots) {
-                                                        if (plotData is Map<
-                                                            String, dynamic>) {
-                                                          final pn = plotData[
-                                                                      'plotNumber']
-                                                                  as String? ??
-                                                              '';
-                                                          if (pn ==
-                                                              plotNumber) {
-                                                            plotData['status'] =
-                                                                statusOption;
-                                                            break;
+                                                          final plots = layout[
+                                                                      'plots']
+                                                                  as List<
+                                                                      dynamic>? ??
+                                                              [];
+                                                          for (var plotData
+                                                              in plots) {
+                                                            if (plotData is Map<
+                                                                String, dynamic>) {
+                                                              final pn = plotData[
+                                                                          'plotNumber']
+                                                                      as String? ??
+                                                                  '';
+                                                              if (pn ==
+                                                                  plotNumber) {
+                                                                plotData['status'] =
+                                                                    statusOption;
+                                                                break;
+                                                              }
+                                                            }
                                                           }
+                                                          break;
                                                         }
                                                       }
-                                                      break;
-                                                    }
-                                                  }
 
-                                                  _isStatusDropdownOpen = false;
-                                                  print(
-                                                      '📝 STATUS CHANGE: Calling sync functions');
-                                                  _syncEditingPlotToAllPlots();
-                                                  _rebuildAllPlotsFromLayouts();
-                                                  print(
-                                                      '📝 STATUS CHANGE: setState complete');
-                                                });
-                                              },
-                                              child: Container(
-                                                width: double.infinity,
-                                                height: 40,
-                                                alignment: Alignment.centerLeft,
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 8),
-                                                child: Container(
-                                                  width: 152,
-                                                  height: 32,
-                                                  padding:
-                                                      const EdgeInsets.all(8),
-                                                  decoration: BoxDecoration(
-                                                    color:
-                                                        _getStatusDropdownChipBackgroundColor(
-                                                            statusOption),
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                            8),
-                                                    boxShadow: [
-                                                      BoxShadow(
-                                                        color: Colors.black
-                                                            .withOpacity(0.25),
-                                                        blurRadius: 2,
-                                                        offset:
-                                                            const Offset(0, 0),
-                                                        spreadRadius: 0,
+                                                      _isStatusDropdownOpen = false;
+                                                      print(
+                                                          '📝 STATUS CHANGE: Calling sync functions');
+                                                      _syncEditingPlotToAllPlots();
+                                                      _rebuildAllPlotsFromLayouts();
+                                                      print(
+                                                          '📝 STATUS CHANGE: setState complete');
+                                                    });
+                                                  },
+                                                  child: Container(
+                                                    width: double.infinity,
+                                                    height: 40,
+                                                    alignment: Alignment.centerLeft,
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                            horizontal: 8),
+                                                    child: Container(
+                                                      width: 152,
+                                                      height: 32,
+                                                      padding: const EdgeInsets
+                                                          .symmetric(horizontal: 8),
+                                                      decoration: BoxDecoration(
+                                                        color:
+                                                            _getStatusDropdownChipBackgroundColor(
+                                                                statusOption),
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                                8),
+                                                        boxShadow: [
+                                                          BoxShadow(
+                                                            color: Colors.black
+                                                                .withOpacity(0.25),
+                                                            blurRadius: 2,
+                                                            offset:
+                                                                const Offset(0, 0),
+                                                            spreadRadius: 0,
+                                                          ),
+                                                        ],
                                                       ),
-                                                    ],
-                                                  ),
-                                                  child: Row(
-                                                    children: [
-                                                      Container(
-                                                        width: 16,
-                                                        height: 16,
-                                                        decoration:
-                                                            BoxDecoration(
-                                                          color: optionColor,
-                                                          shape:
-                                                              BoxShape.circle,
-                                                        ),
+                                                      child: Row(
+                                                        children: [
+                                                          Container(
+                                                            width: 16,
+                                                            height: 16,
+                                                            decoration:
+                                                                BoxDecoration(
+                                                              color: optionColor,
+                                                              shape:
+                                                                  BoxShape.circle,
+                                                              border: Border.all(
+                                                                color:
+                                                                    Colors.white,
+                                                                width: 1,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                          const SizedBox(width: 8),
+                                                          Text(
+                                                            optionText,
+                                                            style:
+                                                                GoogleFonts.inter(
+                                                              fontSize: 14,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .normal,
+                                                              color: Colors.black,
+                                                              height: 1.2,
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ),
-                                                      const SizedBox(width: 8),
-                                                      Text(
-                                                        optionText,
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.black,
-                                                        ),
-                                                      ),
-                                                    ],
+                                                    ),
                                                   ),
                                                 ),
                                               ),
-                                            ),
+                                              if (!isLastOption)
+                                                const SizedBox(height: 8),
+                                            ],
                                           );
                                         }),
                                       );
@@ -5888,15 +6450,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     int availablePlots = 0;
     int soldPlots = 0;
     int pendingPlots = 0;
-
-    for (final layout in _layouts) {
-      final plots = layout['plots'] as List<dynamic>? ?? const [];
-      for (final plotData in plots) {
-        if (plotData is! Map<String, dynamic>) continue;
-        final plot = plotData;
+    if (_activeContentTab == PlotStatusContentTab.amenityArea) {
+      for (final areaData in _amenityAreas) {
         totalPlots++;
+        final status = _parsePlotStatus(areaData['status']);
 
-        final status = _parsePlotStatus(plot['status']);
         if (status == PlotStatus.available) {
           availablePlots++;
         } else if (status == PlotStatus.sold) {
@@ -5906,36 +6464,72 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         }
 
         if (_isSoldLikeStatus(status)) {
-          final area = double.tryParse(
-                  (plot['area'] as String? ?? '0.00').replaceAll(',', '')) ??
-              0.0;
-          final salePriceStr = (plot['salePrice'] as String? ?? '0.00')
-              .replaceAll(',', '')
-              .replaceAll('₹', '')
-              .replaceAll(' ', '')
-              .trim();
-          final salePrice = double.tryParse(salePriceStr) ?? 0.0;
-          final saleValue = salePrice * area;
+          final areaSqft = _parseMoneyLikeValue(areaData['area']);
+          final salePrice = _parseMoneyLikeValue(areaData['salePrice']);
+          final explicitSaleValue = _parseMoneyLikeValue(areaData['saleValue']);
+          final saleValue = explicitSaleValue > 0
+              ? explicitSaleValue
+              : (areaSqft * salePrice);
+          final paidAmount = _parseMoneyLikeValue(areaData['payment']);
 
-          totalAreaSold += area;
+          totalAreaSold += areaSqft;
           totalSaleValue += saleValue;
-
-          final payments = plot['payments'] as List<dynamic>? ?? const [];
-          double paidAmount = 0.0;
-          for (final payment in payments) {
-            final paymentMap = payment as Map<String, dynamic>;
-            final amountStr = (paymentMap['paymentAmount'] ?? '0').toString();
-            final cleaned = amountStr
-                .replaceAll(',', '')
-                .replaceAll('₹', '')
-                .replaceAll(' ', '')
-                .trim();
-            paidAmount += double.tryParse(cleaned) ?? 0.0;
-          }
 
           final pendingAmount = saleValue - paidAmount;
           if (pendingAmount > 0) {
             totalPendingAmount += pendingAmount;
+          }
+        }
+      }
+    } else {
+      for (final layout in _layouts) {
+        final plots = layout['plots'] as List<dynamic>? ?? const [];
+        for (final plotData in plots) {
+          if (plotData is! Map<String, dynamic>) continue;
+          final plot = plotData;
+          totalPlots++;
+
+          final status = _parsePlotStatus(plot['status']);
+          if (status == PlotStatus.available) {
+            availablePlots++;
+          } else if (status == PlotStatus.sold) {
+            soldPlots++;
+          } else if (status == PlotStatus.reserved) {
+            pendingPlots++;
+          }
+
+          if (_isSoldLikeStatus(status)) {
+            final area = double.tryParse(
+                    (plot['area'] as String? ?? '0.00').replaceAll(',', '')) ??
+                0.0;
+            final salePriceStr = (plot['salePrice'] as String? ?? '0.00')
+                .replaceAll(',', '')
+                .replaceAll('₹', '')
+                .replaceAll(' ', '')
+                .trim();
+            final salePrice = double.tryParse(salePriceStr) ?? 0.0;
+            final saleValue = salePrice * area;
+
+            totalAreaSold += area;
+            totalSaleValue += saleValue;
+
+            final payments = plot['payments'] as List<dynamic>? ?? const [];
+            double paidAmount = 0.0;
+            for (final payment in payments) {
+              final paymentMap = payment as Map<String, dynamic>;
+              final amountStr = (paymentMap['paymentAmount'] ?? '0').toString();
+              final cleaned = amountStr
+                  .replaceAll(',', '')
+                  .replaceAll('₹', '')
+                  .replaceAll(' ', '')
+                  .trim();
+              paidAmount += double.tryParse(cleaned) ?? 0.0;
+            }
+
+            final pendingAmount = saleValue - paidAmount;
+            if (pendingAmount > 0) {
+              totalPendingAmount += pendingAmount;
+            }
           }
         }
       }
@@ -5945,6 +6539,14 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         totalAreaSold > 0 ? (totalSaleValue / totalAreaSold) : 0.0;
     final avgSalePriceDisplay =
         AreaUnitUtils.rateFromSqftToDisplay(avgSalePriceSqft, _isSqm);
+    final statusCardTitle =
+        _activeContentTab == PlotStatusContentTab.amenityArea
+            ? 'Amenity Area Status'
+            : 'Site Status';
+    final totalLabel = _activeContentTab == PlotStatusContentTab.amenityArea
+        ? 'Total Amenity Areas:'
+        : 'Total Plots:';
+    final showPendingUi = pendingPlots > 0;
 
     Widget buildStatusDot(Color dotColor) {
       return Container(
@@ -5960,6 +6562,309 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               offset: const Offset(0, 0),
             ),
           ],
+        ),
+      );
+    }
+
+    if (!showPendingUi) {
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(
+          width: 1142,
+          child: Container(
+            width: 1142,
+            height: 144,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Overall Sales',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: const Color(0xFF5C5C5C),
+                    height: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: 281,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Total Sale Value:',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '₹',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w400,
+                                    color: const Color(0xFF5C5C5C),
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _formatAmountNoTrailingZeros(
+                                        totalSaleValue.toString()),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: Colors.black.withOpacity(0.75),
+                                      height: 1.0,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Total Area Sold:',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Row(
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          _formatAmountNoTrailingZeros(
+                                            AreaUnitUtils.areaFromSqftToDisplay(
+                                                    totalAreaSold, _isSqm)
+                                                .toString(),
+                                          ),
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w400,
+                                            color: Colors.black,
+                                            height: 1.0,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        _areaUnitSuffix,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: const Color(0xFF5C5C5C),
+                                          height: 1.0,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 24),
+                    SizedBox(
+                      width: 301,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Avg Sale Price:',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '₹/$_areaUnitSuffix',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w400,
+                                    color: const Color(0xFF5C5C5C),
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _formatAmountNoTrailingZeros(
+                                        avgSalePriceDisplay.toString()),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: Colors.black.withOpacity(0.75),
+                                      height: 1.0,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                Text(
+                                  totalLabel,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _formatIntegerWithIndianNumbering(
+                                        totalPlots.toString()),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: const Color(0xFF323232),
+                                      height: 1.0,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 24),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                buildStatusDot(const Color(0xFF53D10C)),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Available:',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _formatIntegerWithIndianNumbering(
+                                        availablePlots.toString()),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: const Color(0xFF323232),
+                                      height: 1.0,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 36,
+                            child: Row(
+                              children: [
+                                buildStatusDot(const Color(0xFFFF0000)),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Sold:',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _formatIntegerWithIndianNumbering(
+                                        soldPlots.toString()),
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w400,
+                                      color: const Color(0xFF323232),
+                                      height: 1.0,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       );
     }
@@ -6166,48 +7071,50 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                 ],
                               ),
                             ),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              height: 36,
-                              child: Row(
-                                children: [
-                                  Text(
-                                    'Pending Amount:',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w500,
-                                      color: Colors.black,
-                                      height: 1.0,
+                            if (showPendingUi) ...[
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      'Pending Amount:',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        color: Colors.black,
+                                        height: 1.0,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    '₹',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w400,
-                                      color: const Color(0xFF5C5C5C),
-                                      height: 1.0,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      _formatAmountNoTrailingZeros(
-                                          totalPendingAmount.toString()),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      '₹',
                                       style: GoogleFonts.inter(
                                         fontSize: 14,
                                         fontWeight: FontWeight.w400,
-                                        color: Colors.black.withOpacity(0.75),
+                                        color: const Color(0xFF5C5C5C),
                                         height: 1.0,
                                       ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _formatAmountNoTrailingZeros(
+                                            totalPendingAmount.toString()),
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w400,
+                                          color: Colors.black.withOpacity(0.75),
+                                          height: 1.0,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
+                            ],
                           ],
                         ),
                       ),
@@ -6237,7 +7144,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Site Status',
+                    statusCardTitle,
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
@@ -6271,7 +7178,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                           const SizedBox(width: 8),
                                           Expanded(
                                             child: Text(
-                                              'Total Plots:',
+                                              totalLabel,
                                               style: GoogleFonts.inter(
                                                 fontSize: 14,
                                                 fontWeight: FontWeight.w500,
@@ -6375,40 +7282,42 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                   ],
                                 ),
                               ),
-                              const SizedBox(height: 8),
-                              SizedBox(
-                                height: 36,
-                                child: Row(
-                                  children: [
-                                    buildStatusDot(const Color(0xFFFEB12A)),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Pending:',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w500,
-                                        color: Colors.black,
-                                        height: 1.0,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        _formatIntegerWithIndianNumbering(
-                                            pendingPlots.toString()),
+                              if (showPendingUi) ...[
+                                const SizedBox(height: 8),
+                                SizedBox(
+                                  height: 36,
+                                  child: Row(
+                                    children: [
+                                      buildStatusDot(const Color(0xFFFEB12A)),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        'Pending:',
                                         style: GoogleFonts.inter(
                                           fontSize: 14,
-                                          fontWeight: FontWeight.w400,
-                                          color: const Color(0xFF323232),
+                                          fontWeight: FontWeight.w500,
+                                          color: Colors.black,
                                           height: 1.0,
                                         ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
                                       ),
-                                    ),
-                                  ],
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          _formatIntegerWithIndianNumbering(
+                                              pendingPlots.toString()),
+                                          style: GoogleFonts.inter(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w400,
+                                            color: const Color(0xFF323232),
+                                            height: 1.0,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ),
+                              ],
                             ],
                           ),
                         ),
@@ -6879,6 +7788,716 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     );
   }
 
+  Widget _buildAmenityAreaCard() {
+    final filteredAreas = _filteredAmenityAreas;
+    int availableCount = 0;
+    int soldCount = 0;
+    int pendingCount = 0;
+    double totalAreaSoldSqft = 0.0;
+    double totalSaleValue = 0.0;
+
+    for (final area in filteredAreas) {
+      final status = _parsePlotStatus(area['status']);
+      if (status == PlotStatus.available) {
+        availableCount++;
+      } else if (status == PlotStatus.sold) {
+        soldCount++;
+      } else if (status == PlotStatus.reserved) {
+        pendingCount++;
+      }
+
+      if (_isSoldLikeStatus(status)) {
+        final areaSqft = _parseMoneyLikeValue(area['area']);
+        final salePrice = _parseMoneyLikeValue(area['salePrice']);
+        totalAreaSoldSqft += areaSqft;
+        totalSaleValue += areaSqft * salePrice;
+      }
+    }
+
+    Widget separatorDot = Container(
+      width: 4,
+      height: 4,
+      decoration: const BoxDecoration(
+        color: Colors.black,
+        shape: BoxShape.circle,
+      ),
+    );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F9FA),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                'Amenity Area',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                ),
+              ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _isAmenityAreaCollapsed = !_isAmenityAreaCollapsed;
+                    });
+                  },
+                  child: SvgPicture.asset(
+                    _isAmenityAreaCollapsed
+                        ? 'assets/images/Indi_expand.svg'
+                        : 'assets/images/Indi_collapse.svg',
+                    width: 12,
+                    height: 12,
+                    fit: BoxFit.contain,
+                    placeholderBuilder: (context) => const SizedBox(
+                      width: 12,
+                      height: 12,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Text(
+                  '${filteredAreas.length} ${filteredAreas.length == 1 ? 'Amenity Area' : 'Amenity Areas'}',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF53D10C),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$availableCount Available',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFF0000),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$soldCount Sold',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Text(
+                      'Total Area Sold:',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _formatAreaNoTrailingZeros(
+                        AreaUnitUtils.areaFromSqftToDisplay(
+                                totalAreaSoldSqft, _isSqm)
+                            .toString(),
+                      ),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black.withOpacity(0.75),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _areaUnitSuffix,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 16),
+                separatorDot,
+                const SizedBox(width: 16),
+                Row(
+                  children: [
+                    Text(
+                      'Total Sale Value:',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '₹',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _formatAmountNoTrailingZeros(totalSaleValue.toString()),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black.withOpacity(0.75),
+                      ),
+                    ),
+                  ],
+                ),
+                if (pendingCount > 0) ...[
+                  const SizedBox(width: 16),
+                  separatorDot,
+                  const SizedBox(width: 16),
+                  Row(
+                    children: [
+                      Container(
+                        width: 16,
+                        height: 16,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFFEB12A),
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '$pendingCount Pending',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (!_isAmenityAreaCollapsed) ...[
+            const SizedBox(height: 16),
+            Builder(
+              builder: (context) {
+                final int visibleRows =
+                    filteredAreas.isEmpty ? 1 : filteredAreas.length;
+                const double baseHeaderHeight = 48.0;
+                const double baseRowHeight = 48.0;
+                double baseHeight =
+                    baseHeaderHeight + (visibleRows * baseRowHeight);
+                double scaledHeight = _tableZoomLevel >= 1.0
+                    ? baseHeight * _tableZoomLevel
+                    : baseHeight;
+                final minHeight =
+                    (baseHeaderHeight + baseRowHeight) * _tableZoomLevel;
+                if (scaledHeight < minHeight) {
+                  scaledHeight = minHeight;
+                }
+                final borderBuffer = _tableZoomLevel > 1.0 ? 10.0 : 0.0;
+                scaledHeight = scaledHeight + borderBuffer;
+
+                return Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.25),
+                        blurRadius: 2,
+                        offset: const Offset(0, 0),
+                        spreadRadius: 0,
+                      ),
+                    ],
+                  ),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: scaledHeight,
+                    child: Scrollbar(
+                      controller: _amenityAreaTableScrollController,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _amenityAreaTableScrollController,
+                        scrollDirection: Axis.horizontal,
+                        physics: const BouncingScrollPhysics(),
+                        clipBehavior: Clip.hardEdge,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: ((_tableZoomLevel - 1.0) * 10.0)
+                                .clamp(0.0, 10.0),
+                            right: ((_tableZoomLevel - 1.0) * 10.0)
+                                    .clamp(0.0, 10.0) +
+                                ((_tableZoomLevel - 1.0) * 1350.0)
+                                    .clamp(0.0, 1350.0),
+                            top: ((_tableZoomLevel - 1.0) * 10.0)
+                                .clamp(0.0, 10.0),
+                            bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                    .clamp(0.0, 10.0) +
+                                ((_tableZoomLevel - 1.0) * 100.0)
+                                    .clamp(0.0, 100.0),
+                          ),
+                          child: Transform.scale(
+                            scale: _tableZoomLevel,
+                            alignment: Alignment.topLeft,
+                            child: SizedBox(
+                              height: baseHeight,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: _buildAmenityAreaTable(filteredAreas),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAmenityAreaTable(List<Map<String, dynamic>> areas) {
+    if (areas.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            Container(
+              width: 42,
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF707070).withOpacity(0.2),
+                border: Border(
+                  left: const BorderSide(color: Colors.black, width: 1.0),
+                  top: const BorderSide(color: Colors.black, width: 1.0),
+                  bottom: const BorderSide(color: Colors.black, width: 1.0),
+                  right: BorderSide.none,
+                ),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(8),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  'Edit',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.black,
+                  ),
+                ),
+              ),
+            ),
+            ...List.generate(areas.length, (index) {
+              final isLast = index == areas.length - 1;
+              final area = areas[index];
+              return Container(
+                width: 42,
+                height: 48,
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: const BorderSide(color: Colors.black, width: 1.0),
+                    bottom: const BorderSide(color: Colors.black, width: 1.0),
+                    top: BorderSide.none,
+                    right: BorderSide.none,
+                  ),
+                  borderRadius: isLast
+                      ? const BorderRadius.only(
+                          bottomLeft: Radius.circular(8),
+                        )
+                      : null,
+                ),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTapDown: (_) => _handleAmenityEditIconTap(area, index),
+                  child: Center(
+                    child: SvgPicture.asset(
+                      'assets/images/Eddit.svg',
+                      width: 16,
+                      height: 15,
+                      colorFilter: const ColorFilter.mode(
+                        Color(0xFF0C8CE9),
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+        Column(
+          children: [
+            Container(
+              width: 60,
+              height: 48,
+              decoration: BoxDecoration(
+                color: const Color(0xFF707070).withOpacity(0.2),
+                border: Border.all(color: Colors.black, width: 1.0),
+              ),
+              child: Center(
+                child: Text(
+                  'Sl. No.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.black,
+                  ),
+                ),
+              ),
+            ),
+            ...List.generate(areas.length, (index) {
+              return Container(
+                width: 60,
+                height: 48,
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: const BorderSide(color: Colors.black, width: 1.0),
+                    right: const BorderSide(color: Colors.black, width: 1.0),
+                    bottom: const BorderSide(color: Colors.black, width: 1.0),
+                    top: BorderSide.none,
+                  ),
+                ),
+                child: Center(
+                  child: Text(
+                    '${index + 1}',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      color: Colors.black,
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+        _buildTableColumn(
+          header: 'Amenity Area *',
+          width: 266,
+          plots: areas,
+          builder: (area, index) {
+            final amenityName = (area['name'] ?? '').toString().trim();
+            return Container(
+              width: 250,
+              height: 40,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.95),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
+              ),
+              alignment: Alignment.centerLeft,
+              child: Text(
+                amenityName.isEmpty ? '-' : amenityName,
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: Colors.black,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Area ($_areaUnitSuffix)',
+          width: 215,
+          plots: areas,
+          builder: (area, index) {
+            final areaSqft = _parseMoneyLikeValue(area['area']);
+            final areaDisplay =
+                AreaUnitUtils.areaFromSqftToDisplay(areaSqft, _isSqm);
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _formatAreaNoTrailingZeros(areaDisplay.toString()),
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _areaUnitSuffix,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: const Color(0xFF5C5C5C),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Status *',
+          width: 145,
+          plots: areas,
+          builder: (area, index) {
+            final status = _parsePlotStatus(area['status']);
+            final statusText = _getStatusString(status);
+            final statusBackgroundColor = _getStatusBackgroundColor(status);
+            final statusColor = _getStatusColor(status);
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: statusBackgroundColor,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 2,
+                    offset: const Offset(0, 0),
+                    spreadRadius: 0,
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: statusColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    statusText,
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.normal,
+                      color: Colors.black,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Sale Price (₹/$_areaUnitSuffix) *',
+          width: 209,
+          plots: areas,
+          builder: (area, index) {
+            final salePrice = _parseMoneyLikeValue(area['salePrice']);
+            if (salePrice <= 0) {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: const Color(0xFF5C5C5C),
+                ),
+              );
+            }
+            return Text(
+              '₹ ${_formatAmount(salePrice.toStringAsFixed(2))}',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color: Colors.black,
+              ),
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Sale Value (₹)',
+          width: 178,
+          plots: areas,
+          builder: (area, index) {
+            final saleValue =
+                _parseMoneyLikeValue(area['saleValue']).toStringAsFixed(2);
+            if (_parseMoneyLikeValue(saleValue) <= 0) {
+              return Text(
+                '-',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.normal,
+                  color: const Color(0xFF5C5C5C),
+                ),
+              );
+            }
+            return Text(
+              '₹ ${_formatAmount(saleValue)}',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color: Colors.black,
+              ),
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Buyer / Organization Name *',
+          width: 320,
+          plots: areas,
+          builder: (area, index) {
+            final buyerName = (area['buyerName'] ?? '').toString().trim();
+            return Text(
+              buyerName.isEmpty ? '-' : buyerName,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color:
+                    buyerName.isEmpty ? const Color(0xFF5C5C5C) : Colors.black,
+              ),
+              overflow: TextOverflow.ellipsis,
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Payment *',
+          width: 339,
+          plots: areas,
+          builder: (area, index) {
+            final payment = (area['payment'] ?? '').toString().trim();
+            return Text(
+              payment.isEmpty ? '-' : payment,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color: payment.isEmpty ? const Color(0xFF5C5C5C) : Colors.black,
+              ),
+              overflow: TextOverflow.ellipsis,
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Agent *',
+          width: 265,
+          plots: areas,
+          builder: (area, index) {
+            final agent = (area['agent'] ?? '').toString().trim();
+            return Text(
+              agent.isEmpty ? '-' : agent,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color: agent.isEmpty ? const Color(0xFF5C5C5C) : Colors.black,
+              ),
+              overflow: TextOverflow.ellipsis,
+            );
+          },
+        ),
+        _buildTableColumn(
+          header: 'Sale date *',
+          width: 167,
+          isLast: true,
+          plots: areas,
+          builder: (area, index) {
+            final saleDate = (area['saleDate'] ?? '').toString().trim();
+            return Text(
+              saleDate.isEmpty ? '-' : saleDate,
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.normal,
+                color:
+                    saleDate.isEmpty ? const Color(0xFF5C5C5C) : Colors.black,
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
   Widget _buildLayoutTable(int layoutIndex, List<Map<String, dynamic>> plots) {
     // Apply filter based on selected status
     List<Map<String, dynamic>> filteredPlots = plots;
@@ -6994,14 +8613,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   onTap: () {
                     final originalIndex = plots.indexOf(rowPlot);
                     if (originalIndex < 0) return;
-                    setState(() {
-                      _editingLayoutIndex = layoutIndex;
-                      _editingPlotIndex = originalIndex;
-                      final plot = _layouts[layoutIndex]['plots'][originalIndex]
-                          as Map<String, dynamic>;
-                      final statusData = plot['status'];
-                      _editingStatus = _parsePlotStatus(statusData);
-                    });
+                    _openSiteEditDialog(layoutIndex, originalIndex);
                   },
                   child: Center(
                     child: SvgPicture.asset(
