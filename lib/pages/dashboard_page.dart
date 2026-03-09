@@ -9190,12 +9190,8 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                   const SizedBox(width: 12),
                   _buildAmenityMetricCard(
-                    width: 156,
+                    width: 200,
                     title: 'Available Amenity Plot',
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 5,
-                    ),
                     valueWidget: Text(
                       availablePlots.toString(),
                       style: GoogleFonts.inter(

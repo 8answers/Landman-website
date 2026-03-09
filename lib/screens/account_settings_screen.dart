@@ -145,6 +145,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         _isRestoringNavState = false;
       });
       _initializeHistory(NavigationPage.recentProjects);
+      _refreshErrorBadgesFromStoredData();
       return;
     }
 
@@ -183,6 +184,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       _isRestoringNavState = false;
     });
     _initializeHistory(NavigationPage.recentProjects);
+    _refreshErrorBadgesFromStoredData();
   }
 
   Future<void> _persistNavState() async {
@@ -232,6 +234,8 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
   }
 
   Future<void> _refreshErrorBadgesFromStoredData() async {
+    await _refreshAccountWarningBadge();
+
     final projectId = _projectId;
     if (projectId == null || projectId.trim().isEmpty) return;
     final generation = ++_errorBadgeRefreshGeneration;
@@ -446,6 +450,47 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       });
     } catch (e) {
       print('Error refreshing sidebar error badges: $e');
+    }
+  }
+
+  Future<void> _refreshAccountWarningBadge() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null || userId.trim().isEmpty) {
+      _setStateSafely(() {
+        _hasAccountErrors = false;
+      });
+      return;
+    }
+
+    try {
+      final row = await Supabase.instance.client
+          .from('account_report_identity_settings')
+          .select(
+              'full_name, organization, role, logo_storage_path, logo_svg, logo_base64')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      final fullName = (row?['full_name'] ?? '').toString().trim();
+      final organization = (row?['organization'] ?? '').toString().trim();
+      final role = (row?['role'] ?? '').toString().trim();
+      final logoStoragePath =
+          (row?['logo_storage_path'] ?? '').toString().trim();
+      final logoSvg = (row?['logo_svg'] ?? '').toString().trim();
+      final logoBase64 = (row?['logo_base64'] ?? '').toString().trim();
+
+      final hasUploadedLogo = logoStoragePath.isNotEmpty ||
+          logoSvg.isNotEmpty ||
+          logoBase64.isNotEmpty;
+      final hasWarnings = fullName.isEmpty ||
+          organization.isEmpty ||
+          role.isEmpty ||
+          !hasUploadedLogo;
+
+      _setStateSafely(() {
+        _hasAccountErrors = hasWarnings;
+      });
+    } catch (e) {
+      print('Error refreshing account warning badge: $e');
     }
   }
 

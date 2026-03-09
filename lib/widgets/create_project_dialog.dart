@@ -17,15 +17,7 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
   final FocusNode _focusNode = FocusNode();
   final SupabaseClient _supabase = Supabase.instance.client;
   bool _isCreating = false;
-  static const List<String> _allAreaUnitOptions = [
-    'Square Feet (sqft)',
-    'Square Meter (sqm)',
-  ];
   String _selectedAreaUnit = AreaUnitService.defaultUnit;
-
-  List<String> get _areaUnitOptions => _allAreaUnitOptions
-      .where((option) => option == AreaUnitUtils.sqmUnitLabel)
-      .toList();
 
   @override
   void initState() {
@@ -188,36 +180,15 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
                       ),
                     ],
                   ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: _selectedAreaUnit,
-                      isExpanded: true,
-                      icon: const Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        color: Color(0xFF5D5D5D),
-                      ),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _selectedAreaUnit,
                       style: GoogleFonts.inter(
                         fontSize: 16,
                         fontWeight: FontWeight.normal,
                         color: Colors.black,
                       ),
-                      dropdownColor: Colors.white,
-                      items: _areaUnitOptions
-                          .map(
-                            (unit) => DropdownMenuItem<String>(
-                              value: unit,
-                              child: Text(unit),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: _isCreating
-                          ? null
-                          : (value) {
-                              if (value == null) return;
-                              setState(() {
-                                _selectedAreaUnit = value;
-                              });
-                            },
                     ),
                   ),
                 ),
