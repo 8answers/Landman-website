@@ -15421,52 +15421,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                             color: Colors.black,
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Builder(builder: (context) {
-                          final canUndo = _expenseUndoSnapshot != null &&
-                              _hasUnsavedChanges;
-                          return GestureDetector(
-                            onTap: canUndo
-                                ? () {
-                                    unawaited(_undoLastExpenseChange());
-                                  }
-                                : null,
-                            child: Opacity(
-                              opacity: canUndo ? 1.0 : 0.45,
-                              child: Container(
-                                height: 30,
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: const Color(0xFF0C8CE9),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.undo_rounded,
-                                      size: 14,
-                                      color: Color(0xFF0C8CE9),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      'Undo',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
-                                        color: const Color(0xFF0C8CE9),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        }),
                       ],
                     ),
                     const SizedBox(height: 8),
