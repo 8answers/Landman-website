@@ -24,6 +24,7 @@ class _CreateProjectDialogState extends State<CreateProjectDialog> {
     super.initState();
     // Auto-focus the text field when dialog opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _focusNode.requestFocus();
     });
   }

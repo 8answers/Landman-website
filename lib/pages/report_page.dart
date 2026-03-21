@@ -1908,13 +1908,174 @@ class _ReportPageState extends State<ReportPage> {
           const SizedBox(height: 4),
           if (layoutBlocks.isEmpty)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text(
-                '-',
-                style: GoogleFonts.inriaSerif(
-                  fontSize: 10,
-                  color: const Color(0xFF404040),
-                ),
+              padding: const EdgeInsets.only(left: 16, right: 16, top: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        '1.',
+                        style: GoogleFonts.inriaSerif(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF404040),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Layout:',
+                        style: GoogleFonts.inriaSerif(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF404040),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '-',
+                        style: GoogleFonts.inriaSerif(
+                          fontSize: 10,
+                          color: const Color(0xFF404040),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: const Color(0xFF404040),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        Container(
+                          color: const Color(0xFF404040),
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 33,
+                                child: Text('Sl. No.',
+                                    textAlign: TextAlign.center,
+                                    style: GoogleFonts.inriaSerif(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    )),
+                              ),
+                              SizedBox(
+                                width: 68,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 12),
+                                  child: Text('Plot Number',
+                                      style: GoogleFonts.inriaSerif(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                      maxLines: 1,
+                                      softWrap: false,
+                                      overflow: TextOverflow.visible),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 110,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 30),
+                                  child: Text('Sale Value (₹)',
+                                      style: GoogleFonts.inriaSerif(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      )),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 143,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 24),
+                                  child: Text('Agent',
+                                      style: GoogleFonts.inriaSerif(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      )),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 110,
+                                child: Text('Earnings (₹)',
+                                    style: GoogleFonts.inriaSerif(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    )),
+                              ),
+                              SizedBox(
+                                width: 63,
+                                child: Text('Sale Date',
+                                    style: GoogleFonts.inriaSerif(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    )),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          color: const Color(0xFFCFCFCF),
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 33,
+                                child: Text(
+                                  'Total',
+                                  textAlign: TextAlign.center,
+                                  style: GoogleFonts.inriaSerif(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: const Color(0xFF404040),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 68),
+                              SizedBox(
+                                width: 110,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(left: 30),
+                                  child: Text(
+                                    '₹ 0.00',
+                                    style: GoogleFonts.inriaSerif(
+                                      fontSize: 10,
+                                      color: const Color(0xFF404040),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 143),
+                              SizedBox(
+                                width: 110,
+                                child: Text(
+                                  '₹ 0.00',
+                                  style: GoogleFonts.inriaSerif(
+                                    fontSize: 10,
+                                    color: const Color(0xFF404040),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 63),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
           ...layoutBlocks.asMap().entries.map((entry) {
@@ -11991,7 +12152,8 @@ class _ReportPageState extends State<ReportPage> {
             .skip(startPartnerIndex)
             .take(partnerLimit)
             .toList(growable: false);
-    final showDistributionSection = visiblePartners.isNotEmpty;
+    final showDistributionSection =
+        visiblePartners.isNotEmpty || (showSummarySection && partners.isEmpty);
 
     double parseNum(dynamic v) {
       if (v == null) return 0.0;
@@ -12114,215 +12276,202 @@ class _ReportPageState extends State<ReportPage> {
                     fontSize: 10, color: const Color(0xFF404040)),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.only(left: 4, bottom: 8),
-              child: Wrap(
-                spacing: 12,
-                runSpacing: 4,
-                children: [
-                  Text(
-                    'Total Agent Compensation: ${_formatCurrencyWithSignReport(totalAgentCompensation)}',
-                    style: GoogleFonts.inriaSerif(
-                      fontSize: 10,
-                      color: const Color(0xFF404040),
-                    ),
-                  ),
-                  Text(
-                    'Total Project Manager Compensation: ${_formatCurrencyWithSignReport(totalProjectManagerCompensation)}',
-                    style: GoogleFonts.inriaSerif(
-                      fontSize: 10,
-                      color: const Color(0xFF404040),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
 
           if (showSummarySection) ...[
             // Profit table (shown only on first page)
             Padding(
               padding: const EdgeInsets.only(left: 0, right: 8),
-              child: Column(
-                children: [
-                  Container(
-                    color: const Color(0xFF404040),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildTableCell('Partner Name', 143,
-                            isHeader: true, keepOriginalWidth: true),
-                        _buildTableCell('Capital Contribution (₹)', 148,
-                            isHeader: true),
-                        _buildTableCell('Allocated Profit (₹)', 148,
-                            isHeader: true),
-                        _buildTableCell('Profit Share (%)', 110,
-                            isHeader: true),
-                      ],
-                    ),
-                  ),
-                  // rows
-                  ...(() {
-                    final totalCapitalContributions = partners.fold<double>(
-                      0.0,
-                      (sum, p) {
-                        final partner = Map<String, dynamic>.from(p);
-                        return sum +
-                            _plotFieldDouble(
-                              partner,
-                              [
-                                'capitalContribution',
-                                'capital_contribution',
-                                'capital',
-                                'amount',
-                              ],
-                            );
-                      },
-                    );
-
-                    double parsePercent(dynamic value) {
-                      if (value == null) return 0.0;
-                      if (value is num) {
-                        final numVal = value.toDouble();
-                        return (numVal > 0 && numVal <= 1)
-                            ? numVal * 100
-                            : numVal;
-                      }
-                      final raw = value.toString().trim();
-                      if (raw.isEmpty) return 0.0;
-                      final cleaned = raw.replaceAll(RegExp(r'[^0-9.\-]'), '');
-                      final parsed = double.tryParse(cleaned) ?? 0.0;
-                      return (parsed > 0 && parsed <= 1)
-                          ? parsed * 100
-                          : parsed;
-                    }
-
-                    final rowWidgets = <Widget>[];
-                    for (final p in partners) {
-                      final partner = Map<String, dynamic>.from(p);
-                      final name = (partner['name'] ??
-                              partner['partnerName'] ??
-                              partner['partner_name'] ??
-                              '-')
-                          .toString();
-                      final capitalVal = _plotFieldDouble(partner, [
-                        'capitalContribution',
-                        'capital_contribution',
-                        'capital',
-                        'amount'
-                      ]);
-                      final explicitShareVal = parsePercent(
-                        partner['profitShare'] ??
-                            partner['profit_share'] ??
-                            partner['share'] ??
-                            partner['percentage'],
-                      );
-                      final profitShareVal = explicitShareVal > 0
-                          ? explicitShareVal
-                          : (totalCapitalContributions > 0
-                              ? (capitalVal / totalCapitalContributions) * 100
-                              : 0.0);
-
-                      final explicitAllocatedVal = _plotFieldDouble(
-                        partner,
-                        [
-                          'allocatedProfit',
-                          'allocated_profit',
-                          'allocatedAmount',
-                          'allocated_amount',
-                          'profitAmount',
-                          'profit_amount',
+              child: Container(
+                decoration: BoxDecoration(
+                  border:
+                      Border.all(color: const Color(0xFF404040), width: 0.5),
+                ),
+                child: Column(
+                  children: [
+                    Container(
+                      color: const Color(0xFF404040),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _buildTableCell('Partner Name', 143,
+                              isHeader: true, keepOriginalWidth: true),
+                          _buildTableCell('Capital Contribution (₹)', 148,
+                              isHeader: true),
+                          _buildTableCell('Allocated Profit (₹)', 148,
+                              isHeader: true),
+                          _buildTableCell('Profit Share (%)', 110,
+                              isHeader: true),
                         ],
+                      ),
+                    ),
+                    // rows
+                    ...(() {
+                      final totalCapitalContributions = partners.fold<double>(
+                        0.0,
+                        (sum, p) {
+                          final partner = Map<String, dynamic>.from(p);
+                          return sum +
+                              _plotFieldDouble(
+                                partner,
+                                [
+                                  'capitalContribution',
+                                  'capital_contribution',
+                                  'capital',
+                                  'amount',
+                                ],
+                              );
+                        },
                       );
-                      final allocatedVal = explicitAllocatedVal != 0
-                          ? explicitAllocatedVal
-                          : (partnersProfitPool * profitShareVal) / 100.0;
 
+                      double parsePercent(dynamic value) {
+                        if (value == null) return 0.0;
+                        if (value is num) {
+                          final numVal = value.toDouble();
+                          return (numVal > 0 && numVal <= 1)
+                              ? numVal * 100
+                              : numVal;
+                        }
+                        final raw = value.toString().trim();
+                        if (raw.isEmpty) return 0.0;
+                        final cleaned =
+                            raw.replaceAll(RegExp(r'[^0-9.\-]'), '');
+                        final parsed = double.tryParse(cleaned) ?? 0.0;
+                        return (parsed > 0 && parsed <= 1)
+                            ? parsed * 100
+                            : parsed;
+                      }
+
+                      final rowWidgets = <Widget>[];
+                      for (final p in partners) {
+                        final partner = Map<String, dynamic>.from(p);
+                        final name = (partner['name'] ??
+                                partner['partnerName'] ??
+                                partner['partner_name'] ??
+                                '-')
+                            .toString();
+                        final capitalVal = _plotFieldDouble(partner, [
+                          'capitalContribution',
+                          'capital_contribution',
+                          'capital',
+                          'amount'
+                        ]);
+                        final explicitShareVal = parsePercent(
+                          partner['profitShare'] ??
+                              partner['profit_share'] ??
+                              partner['share'] ??
+                              partner['percentage'],
+                        );
+                        final profitShareVal = explicitShareVal > 0
+                            ? explicitShareVal
+                            : (totalCapitalContributions > 0
+                                ? (capitalVal / totalCapitalContributions) * 100
+                                : 0.0);
+
+                        final explicitAllocatedVal = _plotFieldDouble(
+                          partner,
+                          [
+                            'allocatedProfit',
+                            'allocated_profit',
+                            'allocatedAmount',
+                            'allocated_amount',
+                            'profitAmount',
+                            'profit_amount',
+                          ],
+                        );
+                        final allocatedVal = explicitAllocatedVal != 0
+                            ? explicitAllocatedVal
+                            : (partnersProfitPool * profitShareVal) / 100.0;
+
+                        rowWidgets.add(Container(
+                          decoration: BoxDecoration(
+                              border: Border(
+                                  bottom: BorderSide(
+                                      color: Colors.black.withOpacity(0.2),
+                                      width: 0.25))),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildTableCell(name, 143,
+                                  keepOriginalWidth: true),
+                              _buildTableCell(
+                                  _formatCurrencyWithSignReport(capitalVal),
+                                  148),
+                              _buildTableCell(
+                                  _formatCurrencyWithSignReport(allocatedVal),
+                                  148),
+                              _buildTableCell(
+                                  '${profitShareVal.toStringAsFixed(profitShareVal % 1 == 0 ? 0 : 2)}%',
+                                  110),
+                            ],
+                          ),
+                        ));
+                      }
+
+                      double grandCapital = 0.0;
+                      double grandAllocated = 0.0;
+                      double grandProfitShare = 0.0;
+                      for (final p in partners) {
+                        final partner = Map<String, dynamic>.from(p);
+                        final capitalVal = _plotFieldDouble(partner, [
+                          'capitalContribution',
+                          'capital_contribution',
+                          'capital',
+                          'amount'
+                        ]);
+                        final explicitShareVal = parsePercent(
+                          partner['profitShare'] ??
+                              partner['profit_share'] ??
+                              partner['share'] ??
+                              partner['percentage'],
+                        );
+                        final profitShareVal = explicitShareVal > 0
+                            ? explicitShareVal
+                            : (totalCapitalContributions > 0
+                                ? (capitalVal / totalCapitalContributions) * 100
+                                : 0.0);
+                        final explicitAllocatedVal = _plotFieldDouble(
+                          partner,
+                          [
+                            'allocatedProfit',
+                            'allocated_profit',
+                            'allocatedAmount',
+                            'allocated_amount',
+                            'profitAmount',
+                            'profit_amount',
+                          ],
+                        );
+                        final allocatedVal = explicitAllocatedVal != 0
+                            ? explicitAllocatedVal
+                            : (partnersProfitPool * profitShareVal) / 100.0;
+                        grandCapital += capitalVal;
+                        grandAllocated += allocatedVal;
+                        grandProfitShare += profitShareVal;
+                      }
                       rowWidgets.add(Container(
-                        decoration: BoxDecoration(
-                            border: Border(
-                                bottom: BorderSide(
-                                    color: Colors.black.withOpacity(0.2),
-                                    width: 0.25))),
+                        color: Colors.grey.withOpacity(0.25),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _buildTableCell(name, 143, keepOriginalWidth: true),
+                            _buildTableCell('Total', 143,
+                                keepOriginalWidth: true),
                             _buildTableCell(
-                                _formatCurrencyWithSignReport(capitalVal), 148),
-                            _buildTableCell(
-                                _formatCurrencyWithSignReport(allocatedVal),
+                                _formatCurrencyWithSignReport(grandCapital),
                                 148),
                             _buildTableCell(
-                                '${profitShareVal.toStringAsFixed(profitShareVal % 1 == 0 ? 0 : 2)}%',
+                                _formatCurrencyWithSignReport(grandAllocated),
+                                148),
+                            _buildTableCell(
+                                '${grandProfitShare.toStringAsFixed(grandProfitShare % 1 == 0 ? 0 : 2)}%',
                                 110),
                           ],
                         ),
                       ));
-                    }
 
-                    double grandCapital = 0.0;
-                    double grandAllocated = 0.0;
-                    double grandProfitShare = 0.0;
-                    for (final p in partners) {
-                      final partner = Map<String, dynamic>.from(p);
-                      final capitalVal = _plotFieldDouble(partner, [
-                        'capitalContribution',
-                        'capital_contribution',
-                        'capital',
-                        'amount'
-                      ]);
-                      final explicitShareVal = parsePercent(
-                        partner['profitShare'] ??
-                            partner['profit_share'] ??
-                            partner['share'] ??
-                            partner['percentage'],
-                      );
-                      final profitShareVal = explicitShareVal > 0
-                          ? explicitShareVal
-                          : (totalCapitalContributions > 0
-                              ? (capitalVal / totalCapitalContributions) * 100
-                              : 0.0);
-                      final explicitAllocatedVal = _plotFieldDouble(
-                        partner,
-                        [
-                          'allocatedProfit',
-                          'allocated_profit',
-                          'allocatedAmount',
-                          'allocated_amount',
-                          'profitAmount',
-                          'profit_amount',
-                        ],
-                      );
-                      final allocatedVal = explicitAllocatedVal != 0
-                          ? explicitAllocatedVal
-                          : (partnersProfitPool * profitShareVal) / 100.0;
-                      grandCapital += capitalVal;
-                      grandAllocated += allocatedVal;
-                      grandProfitShare += profitShareVal;
-                    }
-                    rowWidgets.add(Container(
-                      color: Colors.grey.withOpacity(0.25),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _buildTableCell('Total', 143,
-                              keepOriginalWidth: true),
-                          _buildTableCell(
-                              _formatCurrencyWithSignReport(grandCapital), 148),
-                          _buildTableCell(
-                              _formatCurrencyWithSignReport(grandAllocated),
-                              148),
-                          _buildTableCell(
-                              '${grandProfitShare.toStringAsFixed(grandProfitShare % 1 == 0 ? 0 : 2)}%',
-                              110),
-                        ],
-                      ),
-                    ));
-
-                    return rowWidgets;
-                  }()),
-                ],
+                      return rowWidgets;
+                    }()),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 12),

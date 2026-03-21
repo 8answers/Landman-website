@@ -477,15 +477,13 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
     return const SizedBox.shrink();
   }
 
-  Color? _warningShadowColorForField({
-    required TextEditingController controller,
-    required FocusNode focusNode,
-  }) {
-    final hasValue = controller.text.trim().isNotEmpty;
-    if (!hasValue) return const Color(0xFFFFFB00);
-    if (focusNode.hasFocus) return const Color(0xFF0C8CE9);
-    return null;
-  }
+  List<BoxShadow> get _primaryControlShadow => [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.25),
+          blurRadius: 2,
+          offset: const Offset(0, 0),
+        ),
+      ];
 
   Future<void> _handleLogout() async {
     try {
@@ -696,11 +694,6 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
     required TextEditingController controller,
     required FocusNode focusNode,
   }) {
-    final shadowColor = _warningShadowColorForField(
-      controller: controller,
-      focusNode: focusNode,
-    );
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -718,13 +711,7 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              BoxShadow(
-                color: shadowColor ?? Colors.black.withValues(alpha: 0.25),
-                blurRadius: 2,
-                offset: const Offset(0, 0),
-              ),
-            ],
+            boxShadow: _primaryControlShadow,
           ),
           child: TextField(
             controller: controller,
@@ -793,13 +780,7 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      blurRadius: 2,
-                      offset: const Offset(0, 0),
-                    ),
-                  ],
+                  boxShadow: _primaryControlShadow,
                 ),
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -818,13 +799,7 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.25),
-                        blurRadius: 2,
-                        offset: const Offset(0, 0),
-                      ),
-                    ],
+                    boxShadow: _primaryControlShadow,
                   ),
                   child: TextButton(
                     onPressed: _handleLogout,
@@ -1068,25 +1043,35 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
           ] else ...[
             SizedBox(
               height: 36,
-              child: TextButton(
-                onPressed: _removeOrganizationLogo,
-                style: TextButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  minimumSize: const Size(0, 36),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  shadowColor: Colors.black.withValues(alpha: 0.25),
-                  elevation: 1,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: _primaryControlShadow,
                 ),
-                child: Text(
-                  'Remove',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w400,
-                    color: const Color(0xFFFF0000),
+                child: TextButton(
+                  onPressed: _removeOrganizationLogo,
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFFF0000),
+                    backgroundColor: Colors.transparent,
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 4,
+                    ),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  child: Text(
+                    'Remove',
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w400,
+                      color: const Color(0xFFFF0000),
+                    ),
                   ),
                 ),
               ),

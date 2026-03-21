@@ -4,12 +4,16 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/app_scale_metrics.dart';
+import '../widgets/search_highlight_text.dart';
 import '../services/projects_list_cache_service.dart';
+import '../services/project_access_service.dart';
 
 class RecentProjectsPage extends StatefulWidget {
   final VoidCallback? onCreateProject;
-  final Function(String projectId, String projectName)? onProjectSelected;
+  final Future<void> Function(String projectId, String projectName)?
+      onProjectSelected;
 
   const RecentProjectsPage({
     super.key,
@@ -23,6 +27,7 @@ class RecentProjectsPage extends StatefulWidget {
 
 class _RecentProjectsPageState extends State<RecentProjectsPage> {
   static const Duration _cacheFreshFor = Duration(seconds: 45);
+  static const Color _projectNameTextColor = Color(0xFF5C5C5C);
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _projectsScrollController = ScrollController();
   final SupabaseClient _supabase = Supabase.instance.client;
@@ -32,6 +37,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
   bool _isLoading = true;
   bool _isFetchingProjects = false;
   String _searchQuery = '';
+  String? _openingProjectId;
   int? _hoveredIndex; // Track which project row is being hovered
 
   @override
@@ -87,6 +93,28 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
     }
   }
 
+  Future<void> _openProjectFromRow(
+    String projectId,
+    String projectName,
+  ) async {
+    if (_openingProjectId != null) return;
+    if (widget.onProjectSelected == null) return;
+
+    setState(() {
+      _openingProjectId = projectId;
+    });
+
+    try {
+      await widget.onProjectSelected!(projectId, projectName);
+    } finally {
+      if (mounted && _openingProjectId == projectId) {
+        setState(() {
+          _openingProjectId = null;
+        });
+      }
+    }
+  }
+
   Future<void> _loadProjects({bool forceRefresh = false}) async {
     if (_isFetchingProjects) return;
     _isFetchingProjects = true;
@@ -123,7 +151,29 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
         });
       }
 
-      if (hasFreshCache) return;
+      // If cache is fresh but empty, still hit backend once to avoid hiding
+      // newly granted invite-access projects until cache expiry.
+      if (hasFreshCache && (cachedProjects?.isNotEmpty ?? false)) return;
+
+      // Ensure invite acceptance/membership upsert is applied for all roles
+      // (agent / project_manager / partner) before loading project list.
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final inviteProjectId =
+            (prefs.getString('nav_project_id') ?? '').trim();
+        final inviteRole =
+            (prefs.getString('nav_invited_project_role') ?? '').trim();
+        final hasInviteContext =
+            prefs.getBool('nav_has_invite_context') ?? false;
+        if (hasInviteContext && inviteProjectId.isNotEmpty) {
+          await ProjectAccessService.acceptPendingInviteForCurrentUser(
+            projectId: inviteProjectId,
+            roleHint: inviteRole.isEmpty ? null : inviteRole,
+          );
+        }
+      } catch (_) {
+        // Best-effort repair; continue with normal list loading.
+      }
 
       final memberRows = await _supabase
           .from('project_members')
@@ -892,104 +942,118 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
               child: _isLoading
                   ? _buildRecentProjectsLoadingSkeleton()
                   : _filteredProjects.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.only(left: 24, right: 24),
-                          child: Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                // Empty state icon
-                                SvgPicture.asset(
-                                  'assets/images/Rcent_projects_folder.svg',
-                                  width: 108,
-                                  height: 80,
-                                  fit: BoxFit.contain,
-                                  placeholderBuilder: (context) =>
-                                      const SizedBox(
-                                    width: 108,
-                                    height: 80,
+                      ? LayoutBuilder(
+                          builder: (context, emptyConstraints) {
+                            return SizedBox(
+                              width: emptyConstraints.maxWidth,
+                              height: emptyConstraints.maxHeight,
+                              child: Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 24,
                                   ),
-                                ),
-                                const SizedBox(height: 24),
-                                Text(
-                                  _searchQuery.isNotEmpty
-                                      ? 'No projects found'
-                                      : 'No recent projects yet',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _searchQuery.isNotEmpty
-                                      ? 'Try a different search term.'
-                                      : 'Projects you open will appear here.',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.normal,
-                                    color: const Color(0xFF5C5C5C),
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                if (_searchQuery.isEmpty) ...[
-                                  const SizedBox(height: 24),
-                                  // Create new project button (empty state)
-                                  GestureDetector(
-                                    onTap: widget.onCreateProject,
-                                    child: Container(
-                                      height: 44,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                        vertical: 4,
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      // Empty state icon
+                                      SvgPicture.asset(
+                                        'assets/images/Rcent_projects_folder.svg',
+                                        width: 108,
+                                        height: 80,
+                                        fit: BoxFit.contain,
+                                        placeholderBuilder: (context) =>
+                                            const SizedBox(
+                                          width: 108,
+                                          height: 80,
+                                        ),
                                       ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        borderRadius: BorderRadius.circular(8),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color:
-                                                Colors.black.withOpacity(0.25),
-                                            blurRadius: 2,
-                                            offset: const Offset(0, 0),
-                                            spreadRadius: 0,
-                                          ),
-                                        ],
+                                      const SizedBox(height: 24),
+                                      Text(
+                                        _searchQuery.isNotEmpty
+                                            ? 'No projects found'
+                                            : 'No recent projects yet',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.normal,
+                                          color: Colors.black,
+                                        ),
+                                        textAlign: TextAlign.center,
                                       ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            'Create new project',
-                                            style: GoogleFonts.inter(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.normal,
-                                              color: const Color(0xFF0C8CE9),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _searchQuery.isNotEmpty
+                                            ? 'Try a different search term.'
+                                            : 'Projects you open will appear here.',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.normal,
+                                          color: const Color(0xFF5C5C5C),
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                      if (_searchQuery.isEmpty) ...[
+                                        const SizedBox(height: 24),
+                                        // Create new project button (empty state)
+                                        GestureDetector(
+                                          onTap: widget.onCreateProject,
+                                          child: Container(
+                                            height: 44,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white,
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.25),
+                                                  blurRadius: 2,
+                                                  offset: const Offset(0, 0),
+                                                  spreadRadius: 0,
+                                                ),
+                                              ],
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'Create new project',
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 16,
+                                                    fontWeight:
+                                                        FontWeight.normal,
+                                                    color:
+                                                        const Color(0xFF0C8CE9),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                // Plus icon
+                                                SvgPicture.asset(
+                                                  'assets/images/Create_new_project_blue.svg',
+                                                  width: 13,
+                                                  height: 13,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 13,
+                                                    height: 13,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                          const SizedBox(width: 8),
-                                          // Plus icon
-                                          SvgPicture.asset(
-                                            'assets/images/Create_new_project_blue.svg',
-                                            width: 13,
-                                            height: 13,
-                                            fit: BoxFit.contain,
-                                            placeholderBuilder: (context) =>
-                                                const SizedBox(
-                                              width: 13,
-                                              height: 13,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
-                                ],
-                              ],
-                            ),
-                          ),
+                                ),
+                              ),
+                            );
+                          },
                         )
                       : Padding(
                           padding: const EdgeInsets.only(left: 24),
@@ -1131,6 +1195,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                         ? DateTime.parse(project['created_at'])
                         : null;
                     final projectId = project['id']?.toString() ?? '';
+                    final isOpeningProject = _openingProjectId == projectId;
                     final isHovered = _hoveredIndex == index;
 
                     return MouseRegion(
@@ -1145,10 +1210,8 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                         });
                       },
                       child: GestureDetector(
-                        onTap: () {
-                          if (widget.onProjectSelected != null) {
-                            widget.onProjectSelected!(projectId, projectName);
-                          }
+                        onTap: () async {
+                          await _openProjectFromRow(projectId, projectName);
                         },
                         child: Container(
                           height: 56,
@@ -1163,13 +1226,15 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                             children: [
                               SizedBox(
                                 width: nameColumnWidth,
-                                child: Text(
-                                  projectName,
+                                child: SearchHighlightText(
+                                  text: projectName,
+                                  query: _searchQuery,
                                   style: GoogleFonts.inter(
                                     fontSize: 16,
                                     fontWeight: FontWeight.w600,
-                                    color: const Color(0xFF5C5C5C),
+                                    color: _projectNameTextColor,
                                   ),
+                                  maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
@@ -1222,6 +1287,8 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                                               ),
                                             ),
                                             PopupMenuButton<String>(
+                                              enabled: !isOpeningProject &&
+                                                  _openingProjectId == null,
                                               tooltip: '',
                                               color: Colors.transparent,
                                               constraints:
@@ -1267,34 +1334,41 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                                                         ),
                                                       ],
                                                     ),
-                                                    child: Container(
-                                                      alignment:
-                                                          Alignment.center,
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.white,
-                                                        borderRadius:
-                                                            BorderRadius
-                                                                .circular(8),
-                                                        boxShadow: [
-                                                          BoxShadow(
-                                                            color: Colors.black
-                                                                .withOpacity(
-                                                                    0.5),
-                                                            blurRadius: 1,
-                                                            offset:
-                                                                const Offset(
-                                                                    0, 0),
+                                                    child: SizedBox(
+                                                      width: 149,
+                                                      height: 36,
+                                                      child: Container(
+                                                        alignment:
+                                                            Alignment.center,
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: Colors.white,
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(8),
+                                                          boxShadow: [
+                                                            BoxShadow(
+                                                              color: Colors
+                                                                  .black
+                                                                  .withOpacity(
+                                                                      0.5),
+                                                              blurRadius: 1,
+                                                              offset:
+                                                                  const Offset(
+                                                                      0, 0),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                        child: Text(
+                                                          'Delete Project',
+                                                          style:
+                                                              GoogleFonts.inter(
+                                                            fontSize: 14,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .normal,
+                                                            color: Colors.red,
                                                           ),
-                                                        ],
-                                                      ),
-                                                      child: Text(
-                                                        'Delete Project',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.red,
                                                         ),
                                                       ),
                                                     ),
@@ -1325,11 +1399,26 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                                                   horizontal: 16,
                                                   vertical: 4,
                                                 ),
-                                                child: const Icon(
-                                                  Icons.more_horiz,
-                                                  size: 20,
-                                                  color: Color(0xFF5C5C5C),
-                                                ),
+                                                child: isOpeningProject
+                                                    ? const SizedBox(
+                                                        width: 16,
+                                                        height: 16,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                          valueColor:
+                                                              AlwaysStoppedAnimation<
+                                                                  Color>(
+                                                            Color(0xFF5C5C5C),
+                                                          ),
+                                                        ),
+                                                      )
+                                                    : const Icon(
+                                                        Icons.more_horiz,
+                                                        size: 20,
+                                                        color:
+                                                            Color(0xFF5C5C5C),
+                                                      ),
                                               ),
                                             ),
                                           ],

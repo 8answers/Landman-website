@@ -5423,8 +5423,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     borderRadius: BorderRadius.circular(8),
                     boxShadow: const [
                       BoxShadow(
-                        color: Color(0x80000000),
-                        blurRadius: 2,
+                        color: Color(0x33000000),
+                        blurRadius: 1,
                         offset: Offset(0, 0),
                       ),
                     ],
@@ -5541,14 +5541,22 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                     : const Color(0xFFEFF5F9))
         : Colors.white;
 
-    final List<BoxShadow> optionShadow = isSelected
-        ? [
+    final List<BoxShadow> optionShadow = (isSelected && isAll)
+        ? const [
             BoxShadow(
-              color: isAll ? const Color(0xFF0C8CE9) : const Color(0x40000000),
+              color: Color(0x40000000),
               blurRadius: 2,
-              offset: const Offset(0, 0),
+              offset: Offset(0, 0),
             ),
           ]
+        : isSelected
+            ? [
+                const BoxShadow(
+                  color: Color(0x40000000),
+                  blurRadius: 2,
+                  offset: Offset(0, 0),
+                ),
+              ]
         : const [
             BoxShadow(
               color: Color(0x40000000),
@@ -5855,9 +5863,24 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                               color: Colors.black,
                                             ),
                                           ),
-                                          // Expand all layouts button
-                                          Row(
-                                            children: [
+                                          // Layout controls
+                                          Builder(
+                                            builder: (context) {
+                                              final hasLayoutsForActiveTab =
+                                                  _activeContentTab ==
+                                                          PlotStatusContentTab
+                                                              .site
+                                                      ? _layouts.isNotEmpty
+                                                      : _hasAmenityAreaData;
+                                              return Opacity(
+                                                opacity: hasLayoutsForActiveTab
+                                                    ? 1.0
+                                                    : 0.5,
+                                                child: IgnorePointer(
+                                                  ignoring:
+                                                      !hasLayoutsForActiveTab,
+                                                  child: Row(
+                                                    children: [
                                               // Filter button
                                               GestureDetector(
                                                 onTap: () {
@@ -5934,7 +5957,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                   });
                                                 },
                                                 child: Container(
-                                                  width: 188,
                                                   height: 36,
                                                   padding: const EdgeInsets
                                                       .symmetric(
@@ -5957,23 +5979,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                     ],
                                                   ),
                                                   child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
                                                     children: [
-                                                      Expanded(
-                                                        child: Text(
-                                                          'Expand all layouts',
-                                                          maxLines: 1,
-                                                          overflow: TextOverflow
-                                                              .ellipsis,
-                                                          style:
-                                                              GoogleFonts.inter(
-                                                            fontSize: 14,
-                                                            fontWeight:
-                                                                FontWeight.w400,
-                                                            color: Colors.black,
-                                                          ),
+                                                      Text(
+                                                        'Expand all layouts',
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.w400,
+                                                          color: Colors.black,
                                                         ),
                                                       ),
-                                                      const SizedBox(width: 16),
+                                                      const SizedBox(width: 8),
                                                       SizedBox(
                                                         width: 14,
                                                         height: 7,
@@ -6020,7 +6042,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                   });
                                                 },
                                                 child: Container(
-                                                  width: 210,
                                                   height: 36,
                                                   padding: const EdgeInsets
                                                       .symmetric(
@@ -6043,23 +6064,23 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                     ],
                                                   ),
                                                   child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
                                                     children: [
-                                                      Expanded(
-                                                        child: Text(
-                                                          'Collapse all layouts',
-                                                          maxLines: 1,
-                                                          overflow: TextOverflow
-                                                              .ellipsis,
-                                                          style:
-                                                              GoogleFonts.inter(
-                                                            fontSize: 14,
-                                                            fontWeight:
-                                                                FontWeight.w400,
-                                                            color: Colors.black,
-                                                          ),
+                                                      Text(
+                                                        'Collapse all layouts',
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.w400,
+                                                          color: Colors.black,
                                                         ),
                                                       ),
-                                                      const SizedBox(width: 16),
+                                                      const SizedBox(width: 8),
                                                       SizedBox(
                                                         width: 14,
                                                         height: 7,
@@ -6196,6 +6217,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                 ),
                                               ),
                                             ],
+                                                  ),
+                                                ),
+                                              );
+                                            },
                                           ),
                                         ],
                                       ),
@@ -6207,43 +6232,95 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     if (_isLoading && _layouts.isEmpty)
                                       _buildLayoutsLoadingSkeleton()
                                     else if (_layouts.isEmpty)
-                                      Container(
+                                      SizedBox(
                                         width: double.infinity,
-                                        constraints: const BoxConstraints(
-                                            minHeight: 320),
-                                        alignment: Alignment.center,
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              Icons.inbox_outlined,
-                                              size: 64,
-                                              color:
-                                                  Colors.black.withOpacity(0.3),
-                                            ),
-                                            const SizedBox(height: 16),
-                                            Text(
-                                              'No layouts found',
-                                              textAlign: TextAlign.center,
-                                              style: GoogleFonts.inter(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.normal,
+                                        height: math.max(
+                                          320,
+                                          viewportHeight - 272,
+                                        ),
+                                        child: Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.all(16),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF8F9FA),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: [
+                                              BoxShadow(
                                                 color: Colors.black
-                                                    .withOpacity(0.5),
+                                                    .withOpacity(0.25),
+                                                blurRadius: 2,
+                                                offset: const Offset(0, 0),
                                               ),
+                                            ],
+                                          ),
+                                          child: Center(
+                                            child: Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'No Layouts Added',
+                                                  textAlign: TextAlign.center,
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 24,
+                                                    fontWeight: FontWeight.w500,
+                                                    color: Colors.black,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 16),
+                                                Text(
+                                                  'Add layouts and plots in Site tab to view theri status here',
+                                                  textAlign: TextAlign.center,
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.w400,
+                                                    color: Colors.black
+                                                        .withOpacity(0.8),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 16),
+                                                Container(
+                                                  width: 149,
+                                                  height: 36,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            8),
+                                                    boxShadow: [
+                                                      BoxShadow(
+                                                        color: Colors.black
+                                                            .withOpacity(0.25),
+                                                        blurRadius: 2,
+                                                        offset: const Offset(
+                                                            0, 0),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  alignment: Alignment.center,
+                                                  child: FittedBox(
+                                                    fit: BoxFit.scaleDown,
+                                                    child: Text(
+                                                      'Data Entry \u2192 Site',
+                                                      maxLines: 1,
+                                                      softWrap: false,
+                                                      style: GoogleFonts.inter(
+                                                        fontSize: 14,
+                                                        fontWeight:
+                                                            FontWeight.w400,
+                                                        color: const Color(
+                                                            0xFF0C8CE9),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
                                             ),
-                                            const SizedBox(height: 8),
-                                            Text(
-                                              'Add layouts and plots in the Site tab to view their status here',
-                                              textAlign: TextAlign.center,
-                                              style: GoogleFonts.inter(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.normal,
-                                                color: Colors.black
-                                                    .withOpacity(0.4),
-                                              ),
-                                            ),
-                                          ],
+                                          ),
                                         ),
                                       )
                                     else

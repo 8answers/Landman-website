@@ -4,12 +4,16 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/app_scale_metrics.dart';
+import '../widgets/search_highlight_text.dart';
 import '../services/projects_list_cache_service.dart';
+import '../services/project_access_service.dart';
 
 class AllProjectsPage extends StatefulWidget {
   final VoidCallback? onCreateProject;
-  final Function(String projectId, String projectName)? onProjectSelected;
+  final Future<void> Function(String projectId, String projectName)?
+      onProjectSelected;
 
   const AllProjectsPage({
     super.key,
@@ -23,6 +27,7 @@ class AllProjectsPage extends StatefulWidget {
 
 class _AllProjectsPageState extends State<AllProjectsPage> {
   static const Duration _cacheFreshFor = Duration(seconds: 45);
+  static const Color _projectNameTextColor = Color(0xFF5C5C5C);
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _projectsScrollController = ScrollController();
   final SupabaseClient _supabase = Supabase.instance.client;
@@ -35,6 +40,10 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
   int? _hoveredIndex; // Track which project row is being hovered
   String _selectedSort = 'Alphabetical order';
   bool _isFilterMenuOpen = false;
+  String? _openingProjectId;
+  final GlobalKey _filterButtonKey = GlobalKey();
+  OverlayEntry? _filterMenuOverlayEntry;
+  OverlayEntry? _filterMenuBackdropEntry;
 
   @override
   void initState() {
@@ -65,6 +74,7 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
 
   @override
   void dispose() {
+    _removeFilterMenuOverlay(updateState: false);
     _authStateSubscription?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
@@ -129,6 +139,28 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
     });
   }
 
+  Future<void> _openProjectFromRow(
+    String projectId,
+    String projectName,
+  ) async {
+    if (_openingProjectId != null) return;
+    if (widget.onProjectSelected == null) return;
+
+    setState(() {
+      _openingProjectId = projectId;
+    });
+
+    try {
+      await widget.onProjectSelected!(projectId, projectName);
+    } finally {
+      if (mounted && _openingProjectId == projectId) {
+        setState(() {
+          _openingProjectId = null;
+        });
+      }
+    }
+  }
+
   Future<void> _loadProjects({bool forceRefresh = false}) async {
     if (_isFetchingProjects) return;
     _isFetchingProjects = true;
@@ -166,7 +198,29 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
         });
       }
 
-      if (hasFreshCache) return;
+      // If cache is fresh but empty, still hit backend once to avoid hiding
+      // newly granted invite-access projects until cache expiry.
+      if (hasFreshCache && (cachedProjects?.isNotEmpty ?? false)) return;
+
+      // Ensure invite acceptance/membership upsert is applied for all roles
+      // (agent / project_manager / partner) before loading project list.
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final inviteProjectId =
+            (prefs.getString('nav_project_id') ?? '').trim();
+        final inviteRole =
+            (prefs.getString('nav_invited_project_role') ?? '').trim();
+        final hasInviteContext =
+            prefs.getBool('nav_has_invite_context') ?? false;
+        if (hasInviteContext && inviteProjectId.isNotEmpty) {
+          await ProjectAccessService.acceptPendingInviteForCurrentUser(
+            projectId: inviteProjectId,
+            roleHint: inviteRole.isEmpty ? null : inviteRole,
+          );
+        }
+      } catch (_) {
+        // Best-effort repair; continue with normal list loading.
+      }
 
       final memberRows = await _supabase
           .from('project_members')
@@ -588,15 +642,9 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
       builder: (context, constraints) {
         final screenWidth = constraints.maxWidth;
         final scaleMetrics = AppScaleMetrics.of(context);
-        final designViewportWidth =
-            scaleMetrics?.designViewportWidth ?? screenWidth;
-        final viewportExtraRight = designViewportWidth > screenWidth
-            ? (designViewportWidth - screenWidth)
-            : 0.0;
-        final scaledExtraRight = scaleMetrics?.rightOverflowWidth ?? 0.0;
-        final extraRightWidth = scaledExtraRight > viewportExtraRight
-            ? scaledExtraRight
-            : viewportExtraRight;
+        // Match Recent Projects behavior so the right-side menu stays visible
+        // across responsive widths in sidebar layouts.
+        final extraRightWidth = scaleMetrics?.rightOverflowWidth ?? 0.0;
         final isMobile = screenWidth < 768;
 
         return Column(
@@ -707,47 +755,12 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                                 ),
                               ),
                               const SizedBox(height: 16),
-                              Theme(
-                                data: Theme.of(context).copyWith(
-                                  hoverColor: const Color(0xFFF1F1F1),
-                                  highlightColor: const Color(0xFFF1F1F1),
-                                  splashColor: Colors.transparent,
-                                ),
-                                child: PopupMenuButton<String>(
-                                  tooltip: '',
-                                  color: const Color(0xFFF8F9FA),
-                                  surfaceTintColor: Colors.transparent,
-                                  constraints: const BoxConstraints.tightFor(
-                                      width: 164, height: 144),
-                                  menuPadding:
-                                      const EdgeInsets.symmetric(vertical: 8),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  shadowColor:
-                                      const Color.fromRGBO(0, 0, 0, 0.25),
-                                  elevation: 2,
-                                  offset: const Offset(0, 44),
-                                  onOpened: () =>
-                                      setState(() => _isFilterMenuOpen = true),
-                                  onCanceled: () =>
-                                      setState(() => _isFilterMenuOpen = false),
-                                  onSelected: (value) {
-                                    setState(() {
-                                      _selectedSort = value;
-                                      _isFilterMenuOpen = false;
-                                      _filterProjects();
-                                    });
-                                  },
-                                  itemBuilder: (context) => [
-                                    _buildFilterMenuItem('Alphabetical order',
-                                        addBottomGap: true),
-                                    _buildFilterMenuItem('Last modified',
-                                        addBottomGap: true),
-                                    _buildFilterMenuItem('Date created'),
-                                  ],
-                                  child: _buildFilterButton(
-                                      isActive: _isFilterHighlighted),
+                              GestureDetector(
+                                key: _filterButtonKey,
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _showFilterMenuOverlay(context),
+                                child: _buildFilterButton(
+                                  isActive: _isFilterHighlighted,
                                 ),
                               ),
                               const SizedBox(height: 16),
@@ -817,190 +830,167 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                           )
                         : SizedBox(
                             height: 36,
-                            child: OverflowBox(
-                              alignment: Alignment.centerLeft,
-                              minWidth: screenWidth - 24 + extraRightWidth,
-                              maxWidth: screenWidth - 24 + extraRightWidth,
-                              minHeight: 36,
-                              maxHeight: 36,
-                              child: SizedBox(
-                                width: screenWidth - 24 + extraRightWidth,
-                                height: 36,
-                                child: Row(
-                                  children: [
-                                    // Create new project button
-                                    GestureDetector(
-                                      onTap: widget.onCreateProject,
-                                      child: Container(
-                                        height: 36,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 16,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF0C8CE9),
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.25),
-                                              blurRadius: 2,
-                                              offset: const Offset(0, 0),
-                                              spreadRadius: 0,
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                final actionRowWidth =
+                                    constraints.maxWidth + extraRightWidth;
+                                const actionRowHeight = 36.0;
+                                return OverflowBox(
+                                  alignment: Alignment.centerLeft,
+                                  minWidth: actionRowWidth,
+                                  maxWidth: actionRowWidth,
+                                  minHeight: actionRowHeight,
+                                  maxHeight: actionRowHeight,
+                                  child: SizedBox(
+                                    width: actionRowWidth,
+                                    height: actionRowHeight,
+                                    child: Row(
+                                      children: [
+                                        // Create new project button
+                                        GestureDetector(
+                                          onTap: widget.onCreateProject,
+                                          child: Container(
+                                            height: 36,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 4,
                                             ),
-                                          ],
-                                        ),
-                                        clipBehavior: Clip.antiAlias,
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Text(
-                                              'Create new project',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 14,
-                                                fontWeight: FontWeight.normal,
-                                                color: Colors.white,
-                                              ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF0C8CE9),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.25),
+                                                  blurRadius: 2,
+                                                  offset: const Offset(0, 0),
+                                                  spreadRadius: 0,
+                                                ),
+                                              ],
                                             ),
-                                            const SizedBox(width: 8),
-                                            SvgPicture.asset(
-                                              'assets/images/Cretae_new_projet_white.svg',
-                                              width: 13,
-                                              height: 13,
-                                              fit: BoxFit.contain,
-                                              placeholderBuilder: (context) =>
-                                                  const SizedBox(
-                                                width: 13,
-                                                height: 13,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 16),
-                                    Theme(
-                                      data: Theme.of(context).copyWith(
-                                        hoverColor: const Color(0xFFF1F1F1),
-                                        highlightColor: const Color(0xFFF1F1F1),
-                                        splashColor: Colors.transparent,
-                                      ),
-                                      child: PopupMenuButton<String>(
-                                        tooltip: '',
-                                        color: const Color(0xFFF8F9FA),
-                                        surfaceTintColor: Colors.transparent,
-                                        constraints:
-                                            const BoxConstraints.tightFor(
-                                                width: 164, height: 144),
-                                        menuPadding: const EdgeInsets.symmetric(
-                                            vertical: 8),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
-                                        shadowColor:
-                                            const Color.fromRGBO(0, 0, 0, 0.25),
-                                        elevation: 2,
-                                        offset: const Offset(0, 44),
-                                        onOpened: () => setState(
-                                            () => _isFilterMenuOpen = true),
-                                        onCanceled: () => setState(
-                                            () => _isFilterMenuOpen = false),
-                                        onSelected: (value) {
-                                          setState(() {
-                                            _selectedSort = value;
-                                            _isFilterMenuOpen = false;
-                                            _filterProjects();
-                                          });
-                                        },
-                                        itemBuilder: (context) => [
-                                          _buildFilterMenuItem(
-                                              'Alphabetical order',
-                                              addBottomGap: true),
-                                          _buildFilterMenuItem('Last modified',
-                                              addBottomGap: true),
-                                          _buildFilterMenuItem('Date created'),
-                                        ],
-                                        child: _buildFilterButton(
-                                            isActive: _isFilterHighlighted),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 16),
-                                    // Search bar
-                                    Expanded(
-                                      child: Container(
-                                        height: 36,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(32),
-                                          border: Border.all(
-                                            color: const Color(0xFF5C5C5C),
-                                            width: 0.5,
-                                          ),
-                                        ),
-                                        clipBehavior: Clip.antiAlias,
-                                        child: Row(
-                                          children: [
-                                            SvgPicture.asset(
-                                              'assets/images/Search_projects.svg',
-                                              width: 16,
-                                              height: 16,
-                                              fit: BoxFit.contain,
-                                              placeholderBuilder: (context) =>
-                                                  const SizedBox(
-                                                width: 16,
-                                                height: 16,
-                                              ),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: SizedBox(
-                                                height: 20,
-                                                child: TextField(
-                                                  controller: _searchController,
-                                                  textAlignVertical:
-                                                      TextAlignVertical.center,
+                                            clipBehavior: Clip.antiAlias,
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'Create new project',
                                                   style: GoogleFonts.inter(
                                                     fontSize: 14,
                                                     fontWeight:
                                                         FontWeight.normal,
-                                                    color: Colors.black
-                                                        .withOpacity(0.8),
-                                                    height: 1.0,
-                                                  ),
-                                                  decoration: InputDecoration(
-                                                    hintText:
-                                                        'Search Documents',
-                                                    hintStyle:
-                                                        GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black
-                                                          .withOpacity(0.5),
-                                                      height: 1.0,
-                                                    ),
-                                                    border: InputBorder.none,
-                                                    isDense: true,
-                                                    isCollapsed: true,
-                                                    contentPadding:
-                                                        EdgeInsets.zero,
+                                                    color: Colors.white,
                                                   ),
                                                 ),
+                                                const SizedBox(width: 8),
+                                                SvgPicture.asset(
+                                                  'assets/images/Cretae_new_projet_white.svg',
+                                                  width: 13,
+                                                  height: 13,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 13,
+                                                    height: 13,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 16),
+                                        GestureDetector(
+                                          key: _filterButtonKey,
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () =>
+                                              _showFilterMenuOverlay(context),
+                                          child: _buildFilterButton(
+                                            isActive: _isFilterHighlighted,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 16),
+                                        // Search bar
+                                        Expanded(
+                                          child: Container(
+                                            height: 36,
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 10),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white,
+                                              borderRadius:
+                                                  BorderRadius.circular(32),
+                                              border: Border.all(
+                                                color: const Color(0xFF5C5C5C),
+                                                width: 0.5,
                                               ),
                                             ),
-                                          ],
+                                            clipBehavior: Clip.antiAlias,
+                                            child: Row(
+                                              children: [
+                                                SvgPicture.asset(
+                                                  'assets/images/Search_projects.svg',
+                                                  width: 16,
+                                                  height: 16,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 16,
+                                                    height: 16,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Expanded(
+                                                  child: SizedBox(
+                                                    height: 20,
+                                                    child: TextField(
+                                                      controller:
+                                                          _searchController,
+                                                      textAlignVertical:
+                                                          TextAlignVertical
+                                                              .center,
+                                                      style: GoogleFonts.inter(
+                                                        fontSize: 14,
+                                                        fontWeight:
+                                                            FontWeight.normal,
+                                                        color: Colors.black
+                                                            .withOpacity(0.8),
+                                                        height: 1.0,
+                                                      ),
+                                                      decoration:
+                                                          InputDecoration(
+                                                        hintText:
+                                                            'Search Documents',
+                                                        hintStyle:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black
+                                                              .withOpacity(0.5),
+                                                          height: 1.0,
+                                                        ),
+                                                        border:
+                                                            InputBorder.none,
+                                                        isDense: true,
+                                                        isCollapsed: true,
+                                                        contentPadding:
+                                                            EdgeInsets.zero,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
                                         ),
-                                      ),
+                                        const SizedBox(width: 4),
+                                      ],
                                     ),
-                                    SizedBox(width: extraRightWidth + 8),
-                                  ],
-                                ),
-                              ),
+                                  ),
+                                );
+                              },
                             ),
                           ),
                   ),
@@ -1013,108 +1003,140 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
               child: _isLoading
                   ? _buildAllProjectsLoadingSkeleton()
                   : _filteredProjects.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.only(left: 24, right: 24),
-                          child: Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                // Empty state icon
-                                SvgPicture.asset(
-                                  'assets/images/Rcent_projects_folder.svg',
-                                  width: 108,
-                                  height: 80,
-                                  fit: BoxFit.contain,
-                                  placeholderBuilder: (context) =>
-                                      const SizedBox(
-                                    width: 108,
-                                    height: 80,
+                      ? LayoutBuilder(
+                          builder: (context, emptyConstraints) {
+                            return SizedBox(
+                              width: emptyConstraints.maxWidth,
+                              height: emptyConstraints.maxHeight,
+                              child: Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 24,
                                   ),
-                                ),
-                                const SizedBox(height: 24),
-                                Text(
-                                  _searchQuery.isNotEmpty
-                                      ? 'No projects found'
-                                      : 'No projects yet',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _searchQuery.isNotEmpty
-                                      ? 'Try a different search term.'
-                                      : 'Create your first project to get started.',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.normal,
-                                    color: const Color(0xFF5C5C5C),
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                if (_searchQuery.isEmpty) ...[
-                                  const SizedBox(height: 24),
-                                  // Create new project button (empty state)
-                                  GestureDetector(
-                                    onTap: widget.onCreateProject,
-                                    child: Container(
-                                      height: 44,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                        vertical: 4,
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      // Empty state icon
+                                      SvgPicture.asset(
+                                        'assets/images/Rcent_projects_folder.svg',
+                                        width: 108,
+                                        height: 80,
+                                        fit: BoxFit.contain,
+                                        placeholderBuilder: (context) =>
+                                            const SizedBox(
+                                          width: 108,
+                                          height: 80,
+                                        ),
                                       ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        borderRadius: BorderRadius.circular(8),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color:
-                                                Colors.black.withOpacity(0.25),
-                                            blurRadius: 2,
-                                            offset: const Offset(0, 0),
-                                            spreadRadius: 0,
-                                          ),
-                                        ],
+                                      const SizedBox(height: 24),
+                                      Text(
+                                        _searchQuery.isNotEmpty
+                                            ? 'No projects found'
+                                            : 'No projects yet',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.normal,
+                                          color: Colors.black,
+                                        ),
+                                        textAlign: TextAlign.center,
                                       ),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            'Create new project',
-                                            style: GoogleFonts.inter(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.normal,
-                                              color: const Color(0xFF0C8CE9),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _searchQuery.isNotEmpty
+                                            ? 'Try a different search term.'
+                                            : 'Create your first project to get started.',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.normal,
+                                          color: const Color(0xFF5C5C5C),
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                      if (_searchQuery.isEmpty) ...[
+                                        const SizedBox(height: 24),
+                                        // Create new project button (empty state)
+                                        GestureDetector(
+                                          onTap: widget.onCreateProject,
+                                          child: Container(
+                                            height: 44,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white,
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.25),
+                                                  blurRadius: 2,
+                                                  offset: const Offset(0, 0),
+                                                  spreadRadius: 0,
+                                                ),
+                                              ],
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'Create new project',
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 16,
+                                                    fontWeight:
+                                                        FontWeight.normal,
+                                                    color:
+                                                        const Color(0xFF0C8CE9),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                // Plus icon
+                                                SvgPicture.asset(
+                                                  'assets/images/Create_new_project_blue.svg',
+                                                  width: 13,
+                                                  height: 13,
+                                                  fit: BoxFit.contain,
+                                                  placeholderBuilder:
+                                                      (context) =>
+                                                          const SizedBox(
+                                                    width: 13,
+                                                    height: 13,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                          const SizedBox(width: 8),
-                                          // Plus icon
-                                          SvgPicture.asset(
-                                            'assets/images/Create_new_project_blue.svg',
-                                            width: 13,
-                                            height: 13,
-                                            fit: BoxFit.contain,
-                                            placeholderBuilder: (context) =>
-                                                const SizedBox(
-                                              width: 13,
-                                              height: 13,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
-                                ],
-                              ],
-                            ),
-                          ),
+                                ),
+                              ),
+                            );
+                          },
                         )
                       : Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: _buildProjectsTable(extraRightWidth),
+                          padding: const EdgeInsets.only(left: 24),
+                          child: LayoutBuilder(
+                            builder: (context, tableConstraints) {
+                              final tableWidth =
+                                  tableConstraints.maxWidth + extraRightWidth;
+                              final tableHeight = tableConstraints.maxHeight;
+                              return OverflowBox(
+                                alignment: Alignment.topLeft,
+                                minWidth: tableWidth,
+                                maxWidth: tableWidth,
+                                minHeight: tableHeight,
+                                maxHeight: tableHeight,
+                                child: SizedBox(
+                                  width: tableWidth,
+                                  height: tableHeight,
+                                  child: _buildProjectsTable(0),
+                                ),
+                              );
+                            },
+                          ),
                         ),
             ),
           ],
@@ -1123,56 +1145,172 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
     );
   }
 
-  PopupMenuItem<String> _buildFilterMenuItem(String value,
-      {bool addBottomGap = false}) {
-    final isSelected = _selectedSort == value;
-    const horizontalPadding = 16.0;
-    const optionWidth = 149.0;
-    const optionHeight = 36.0;
-
-    Widget menuPill() {
-      return Container(
-        width: optionWidth,
-        height: optionHeight,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFECF6FD) : Colors.white,
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.25),
-              blurRadius: 2,
-              offset: const Offset(0, 0),
-            ),
-          ],
-        ),
-        padding:
-            EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 4),
-        child: Text(
-          value,
-          style: GoogleFonts.inter(
-            fontSize: 14,
-            fontWeight: FontWeight.w400,
-            fontStyle: FontStyle.normal,
-            color: Colors.black,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.visible,
-          softWrap: false,
-        ),
-      );
+  void _removeFilterMenuOverlay({bool updateState = true}) {
+    _filterMenuOverlayEntry?.remove();
+    _filterMenuBackdropEntry?.remove();
+    _filterMenuOverlayEntry = null;
+    _filterMenuBackdropEntry = null;
+    if (updateState && mounted && _isFilterMenuOpen) {
+      setState(() => _isFilterMenuOpen = false);
     }
+  }
 
-    return PopupMenuItem<String>(
-      value: value,
-      padding: EdgeInsets.zero,
-      height: addBottomGap ? 46 : 36,
-      child: Container(
-        color: Colors.transparent,
-        alignment: Alignment.topCenter,
-        child: menuPill(),
+  double _measureTextWidth(
+    BuildContext context,
+    String text,
+    TextStyle style,
+  ) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+    )..layout();
+    return painter.width;
+  }
+
+  Widget _buildFilterOverlayOption(
+    String value, {
+    required bool isSelected,
+    required double width,
+  }) {
+    return Container(
+      width: width,
+      height: 32,
+      alignment: Alignment.centerLeft,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: isSelected ? const Color(0xFFECF6FD) : Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+      child: Text(
+        value,
+        textAlign: TextAlign.left,
+        style: GoogleFonts.inter(
+          fontSize: 11,
+          fontWeight: FontWeight.w400,
+          color: Colors.black,
+        ),
       ),
     );
+  }
+
+  void _showFilterMenuOverlay(BuildContext context) {
+    final triggerContext = _filterButtonKey.currentContext;
+    if (triggerContext == null) return;
+    final triggerRenderBox = triggerContext.findRenderObject() as RenderBox?;
+    if (triggerRenderBox == null) return;
+
+    if (_filterMenuOverlayEntry != null) {
+      _removeFilterMenuOverlay();
+      return;
+    }
+
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final overlayBox = overlay.context.findRenderObject() as RenderBox;
+    final offset =
+        triggerRenderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
+
+    const options = <String>[
+      'Alphabetical order',
+      'Last modified',
+      'Date created',
+    ];
+    const optionGap = 8.0;
+    const listPadding = EdgeInsets.symmetric(vertical: 8, horizontal: 8);
+    const optionHorizontalPadding = 8.0;
+    final optionTextStyle = GoogleFonts.inter(
+      fontSize: 11,
+      fontWeight: FontWeight.w400,
+      color: Colors.black,
+    );
+    final optionWidth = _measureTextWidth(
+          context,
+          options.first,
+          optionTextStyle,
+        ) +
+        (optionHorizontalPadding * 2) +
+        5;
+    final menuWidth = optionWidth + listPadding.horizontal;
+    final menuHeight = listPadding.vertical +
+        (options.length * 32) +
+        ((options.length - 1) * optionGap);
+
+    _filterMenuBackdropEntry = OverlayEntry(
+      builder: (_) => Positioned.fill(
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _removeFilterMenuOverlay,
+          child: const SizedBox.expand(),
+        ),
+      ),
+    );
+
+    _filterMenuOverlayEntry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: offset.dx,
+        top: offset.dy + 44,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            width: menuWidth,
+            height: menuHeight,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: listPadding,
+              child: Column(
+                children: [
+                  for (int i = 0; i < options.length; i++) ...[
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        if (_selectedSort != options[i]) {
+                          setState(() {
+                            _selectedSort = options[i];
+                            _filterProjects();
+                          });
+                        }
+                        _removeFilterMenuOverlay();
+                      },
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: _buildFilterOverlayOption(
+                          options[i],
+                          isSelected: _selectedSort == options[i],
+                          width: optionWidth,
+                        ),
+                      ),
+                    ),
+                    if (i != options.length - 1)
+                      const SizedBox(height: optionGap),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    overlay.insert(_filterMenuBackdropEntry!);
+    overlay.insert(_filterMenuOverlayEntry!);
+    if (mounted) setState(() => _isFilterMenuOpen = true);
   }
 
   Widget _buildFilterButton({required bool isActive}) {
@@ -1215,6 +1353,112 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
 
   bool get _isFilterHighlighted =>
       _isFilterMenuOpen || _selectedSort != 'Alphabetical order';
+
+  Widget _buildProjectRowMenu(String projectId, {required bool isOpening}) {
+    return PopupMenuButton<String>(
+      enabled: !isOpening && _openingProjectId == null,
+      tooltip: '',
+      color: Colors.transparent,
+      constraints: const BoxConstraints.tightFor(width: 165),
+      menuPadding: EdgeInsets.zero,
+      elevation: 0,
+      shadowColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+      ),
+      offset: const Offset(0, 40),
+      onSelected: (value) {
+        if (value == 'delete') {
+          _showDeleteProjectDialog(projectId);
+        }
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem<String>(
+          value: 'delete',
+          height: 52,
+          padding: EdgeInsets.zero,
+          child: Container(
+            width: 165,
+            height: 52,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.5),
+                  blurRadius: 1,
+                  offset: const Offset(0, 0),
+                ),
+              ],
+            ),
+            child: SizedBox(
+              width: 149,
+              height: 36,
+              child: Container(
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 1,
+                      offset: const Offset(0, 0),
+                    ),
+                  ],
+                ),
+                child: Text(
+                  'Delete Project',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.red,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+      child: Container(
+        width: 52,
+        height: 36,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 1,
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 4,
+        ),
+        child: isOpening
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    Color(0xFF5C5C5C),
+                  ),
+                ),
+              )
+            : const Icon(
+                Icons.more_horiz,
+                size: 20,
+                color: Color(0xFF5C5C5C),
+              ),
+      ),
+    );
+  }
 
   Widget _buildProjectsTable(double extraRightWidth) {
     const nameColumnWidth = 562.0;
@@ -1296,7 +1540,7 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                 ScrollConfiguration.of(context).copyWith(scrollbars: false),
             child: ScrollbarTheme(
               data: ScrollbarThemeData(
-                crossAxisMargin: 8,
+                crossAxisMargin: 0,
                 thumbColor: WidgetStateProperty.resolveWith((states) {
                   if (states.contains(WidgetState.hovered) ||
                       states.contains(WidgetState.dragged)) {
@@ -1325,10 +1569,10 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                     final createdAtStr = project['created_at'] as String?;
                     final updatedAtStr = project['updated_at'] as String?;
                     final isHovered = _hoveredIndex == index;
+                    final isOpeningProject = _openingProjectId == projectId;
 
                     DateTime? createdAt;
                     DateTime? updatedAt;
-
                     try {
                       if (createdAtStr != null) {
                         createdAt = DateTime.parse(createdAtStr);
@@ -1352,9 +1596,8 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                         });
                       },
                       child: GestureDetector(
-                        onTap: () {
-                          widget.onProjectSelected
-                              ?.call(projectId, projectName);
+                        onTap: () async {
+                          await _openProjectFromRow(projectId, projectName);
                         },
                         child: Container(
                           height: 56,
@@ -1369,13 +1612,15 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                             children: [
                               SizedBox(
                                 width: nameColumnWidth,
-                                child: Text(
-                                  projectName,
+                                child: SearchHighlightText(
+                                  text: projectName,
+                                  query: _searchQuery,
                                   style: GoogleFonts.inter(
                                     fontSize: 16,
                                     fontWeight: FontWeight.w600,
-                                    color: Colors.black,
+                                    color: _projectNameTextColor,
                                   ),
+                                  maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
@@ -1427,116 +1672,9 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
                                                 textAlign: TextAlign.center,
                                               ),
                                             ),
-                                            PopupMenuButton<String>(
-                                              tooltip: '',
-                                              color: Colors.transparent,
-                                              constraints:
-                                                  const BoxConstraints.tightFor(
-                                                      width: 165),
-                                              menuPadding: EdgeInsets.zero,
-                                              elevation: 0,
-                                              shadowColor: Colors.transparent,
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                              ),
-                                              offset: const Offset(0, 40),
-                                              onSelected: (value) {
-                                                if (value == 'delete') {
-                                                  _showDeleteProjectDialog(
-                                                      projectId);
-                                                }
-                                              },
-                                              itemBuilder: (context) => [
-                                                PopupMenuItem<String>(
-                                                  value: 'delete',
-                                                  height: 52,
-                                                  padding: EdgeInsets.zero,
-                                                  child: Container(
-                                                    width: 165,
-                                                    height: 52,
-                                                    padding:
-                                                        const EdgeInsets.all(8),
-                                                    decoration: BoxDecoration(
-                                                      color: const Color(
-                                                          0xFFF8F9FA),
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                              8),
-                                                      boxShadow: [
-                                                        BoxShadow(
-                                                          color: Colors.black
-                                                              .withOpacity(0.5),
-                                                          blurRadius: 2,
-                                                          offset: const Offset(
-                                                              0, 0),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                    child: Container(
-                                                      alignment:
-                                                          Alignment.center,
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.white,
-                                                        borderRadius:
-                                                            BorderRadius
-                                                                .circular(8),
-                                                        boxShadow: [
-                                                          BoxShadow(
-                                                            color: Colors.black
-                                                                .withOpacity(
-                                                                    0.5),
-                                                            blurRadius: 2,
-                                                            offset:
-                                                                const Offset(
-                                                                    0, 0),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                      child: Text(
-                                                        'Delete Project',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 14,
-                                                          fontWeight:
-                                                              FontWeight.normal,
-                                                          color: Colors.red,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                              child: Container(
-                                                width: 52,
-                                                height: 36,
-                                                decoration: BoxDecoration(
-                                                  color: Colors.white,
-                                                  borderRadius:
-                                                      BorderRadius.circular(8),
-                                                  boxShadow: [
-                                                    BoxShadow(
-                                                      color: Colors.black
-                                                          .withOpacity(0.25),
-                                                      blurRadius: 1,
-                                                      offset:
-                                                          const Offset(0, 0),
-                                                    ),
-                                                  ],
-                                                ),
-                                                alignment:
-                                                    Alignment.centerRight,
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                  horizontal: 16,
-                                                  vertical: 4,
-                                                ),
-                                                child: const Icon(
-                                                  Icons.more_horiz,
-                                                  size: 20,
-                                                  color: Color(0xFF5C5C5C),
-                                                ),
-                                              ),
+                                            _buildProjectRowMenu(
+                                              projectId,
+                                              isOpening: isOpeningProject,
                                             ),
                                           ],
                                         ),

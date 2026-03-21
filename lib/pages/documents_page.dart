@@ -14,7 +14,7 @@ import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../widgets/app_scale_metrics.dart';
+import '../widgets/search_highlight_text.dart';
 
 class DocumentsPage extends StatefulWidget {
   final String? projectId;
@@ -201,14 +201,15 @@ class _DocumentsPageState extends State<DocumentsPage> {
 
   Widget _buildDocumentsActionRow(
     List<Map<String, dynamic>> documents,
-    double extraTabLineWidth, {
+    {
     bool isReadOnly = false,
+    bool hasUploadedDocuments = false,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final actionRowWidth = constraints.maxWidth + extraTabLineWidth;
+          final actionRowWidth = constraints.maxWidth;
           const actionRowHeight = 36.0;
           return SizedBox(
             height: actionRowHeight,
@@ -238,9 +239,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
                       const SizedBox(width: 24),
                     ],
                     Opacity(
-                      opacity: documents.isEmpty ? 0.5 : 1.0,
+                      opacity: hasUploadedDocuments ? 1.0 : 0.5,
                       child: IgnorePointer(
-                        ignoring: documents.isEmpty,
+                        ignoring: !hasUploadedDocuments,
                         child: _SecondaryActionButton(
                           key: _filterButtonKey,
                           label: 'Filter',
@@ -259,9 +260,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
                     ),
                     const SizedBox(width: 24),
                     Opacity(
-                      opacity: documents.isEmpty ? 0.5 : 1.0,
+                      opacity: hasUploadedDocuments ? 1.0 : 0.5,
                       child: IgnorePointer(
-                        ignoring: documents.isEmpty,
+                        ignoring: !hasUploadedDocuments,
                         child: _SecondaryActionButton(
                           label: 'Download All',
                           trailing: SvgPicture.asset(
@@ -280,9 +281,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
                     if (!isReadOnly) ...[
                       const SizedBox(width: 24),
                       Opacity(
-                        opacity: documents.isEmpty ? 0.5 : 1.0,
+                        opacity: hasUploadedDocuments ? 1.0 : 0.5,
                         child: IgnorePointer(
-                          ignoring: documents.isEmpty,
+                          ignoring: !hasUploadedDocuments,
                           child: _isSelectMode
                               ? _SecondaryActionButton(
                                   label: 'Cancel',
@@ -428,7 +429,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
     );
   }
 
-  Widget _buildDocumentsTabLine(double extraTabLineWidth) {
+  Widget _buildDocumentsTabLine() {
     return SizedBox(
       height: 16,
       child: Stack(
@@ -436,7 +437,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
         children: [
           Positioned(
             left: 0,
-            right: -extraTabLineWidth,
+            right: 0,
             bottom: 0,
             child: Container(
               height: 0.5,
@@ -444,6 +445,67 @@ class _DocumentsPageState extends State<DocumentsPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildUploadedDocumentsEmptySection({
+    bool expandToViewport = true,
+    double? minHeight,
+  }) {
+    final centerContent = Center(
+      child: Transform.translate(
+        // Move the whole middle empty-state block upward.
+        offset: const Offset(0, 0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            widget.isAgentView
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Text(
+                      'No site/amenity documents found.',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w400,
+                        color: const Color(0xFF5C5C5C),
+                      ),
+                    ),
+                  )
+                : _DocumentsEmptyState(
+                    onUpload: _uploadDocuments,
+                    onAddFolder: _createFolder,
+                  ),
+          ],
+        ),
+      ),
+    );
+
+    if (!expandToViewport) {
+      if (minHeight == null) {
+        return SizedBox(width: double.infinity, child: centerContent);
+      }
+      return SizedBox(
+        width: double.infinity,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: minHeight),
+          child: centerContent,
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: double.infinity,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          minHeight: max(260.0, MediaQuery.of(context).size.height - 430),
+        ),
+        child: centerContent,
       ),
     );
   }
@@ -3235,18 +3297,23 @@ class _DocumentsPageState extends State<DocumentsPage> {
         .toList();
     final leadingPinnedRootFolderCount =
         _leadingPinnedRootFolderCount(documents);
+    final hasUploadedDocuments = _documents.any((doc) {
+      final isFile = (doc['type'] ?? '').toString().toLowerCase() == 'file';
+      if (!isFile) return false;
+      if (widget.isAgentView && !_isDocumentVisibleToAgent(doc)) return false;
+      return true;
+    });
     final showSiteImagesHeading =
         _currentFolderId == null && leadingPinnedRootFolderCount > 0;
     final forcePinnedFoldersToFirstRow = _currentFolderId == null &&
         leadingPinnedRootFolderCount > 0 &&
         documents.length > leadingPinnedRootFolderCount;
+    final showUploadedDocsEmptySection = _currentFolderId == null &&
+        !hasUploadedDocuments &&
+        documents.isNotEmpty &&
+        !_showAddFolderDialog;
     final folderPath = _getFolderPath(_currentFolderId);
-    final screenWidth = MediaQuery.of(context).size.width;
-    final scaleMetrics = AppScaleMetrics.of(context);
-    final tabLineWidth = (scaleMetrics?.designViewportWidth ?? screenWidth) +
-        (scaleMetrics?.rightOverflowWidth ?? 0.0);
-    final extraTabLineWidth =
-        tabLineWidth > screenWidth ? tabLineWidth - screenWidth : 0.0;
+    final showBreadcrumbRow = _isSelectMode || folderPath.isNotEmpty;
     final sectionHeadingStyle = GoogleFonts.inter(
       fontSize: 20,
       fontStyle: FontStyle.normal,
@@ -3301,13 +3368,10 @@ class _DocumentsPageState extends State<DocumentsPage> {
                     ),
                   ),
                   const SizedBox(width: 24),
-                  Transform.translate(
-                    offset: Offset(extraTabLineWidth, 0),
-                    child: _StorageIndicator(
-                      usedStorage: usedStorage,
-                      totalStorage: totalStorage,
-                      percentage: storagePercentage,
-                    ),
+                  _StorageIndicator(
+                    usedStorage: usedStorage,
+                    totalStorage: totalStorage,
+                    percentage: storagePercentage,
                   ),
                 ],
               ),
@@ -3316,552 +3380,624 @@ class _DocumentsPageState extends State<DocumentsPage> {
             if (!_isLoading) ...[
               _buildDocumentsActionRow(
                 documents,
-                extraTabLineWidth,
                 isReadOnly: widget.isAgentView,
+                hasUploadedDocuments: hasUploadedDocuments,
               ),
-              _buildDocumentsTabLine(extraTabLineWidth),
+              _buildDocumentsTabLine(),
             ],
             Expanded(
               child: _isLoading
                   ? _buildDocumentsLoadingSkeleton()
-                  : SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const SizedBox(height: 24),
-                          if (_currentFolderId != null) ...[
+                  : Builder(
+                      builder: (context) {
+                        final showStaticCenteredState =
+                            !_showAddFolderDialog && documents.isEmpty;
+                        final content = Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const SizedBox(height: 24),
+                            if (_currentFolderId != null) ...[
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 24),
+                                child: Row(
+                                  children: [
+                                    InkWell(
+                                      onTap: _goBack,
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.arrow_back,
+                                            size: 16,
+                                            color: Color(0xFF0C8CE9),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            'Back',
+                                            style: GoogleFonts.inter(
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.normal,
+                                              color: Colors.black,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                            ],
                             Padding(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 24),
-                              child: Row(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  InkWell(
-                                    onTap: _goBack,
-                                    child: Row(
+                                  if (showBreadcrumbRow) ...[
+                                    Row(
                                       children: [
-                                        const Icon(
-                                          Icons.arrow_back,
-                                          size: 16,
-                                          color: Colors.black,
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          'Back',
-                                          style: GoogleFonts.inter(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.normal,
-                                            color: Colors.black,
+                                        if (_isSelectMode)
+                                          InkWell(
+                                            onTap: () =>
+                                                _openBreadcrumbFolder(null),
+                                            child: Text(
+                                              'Selected(${_selectedDocumentIds.length})',
+                                              style: sectionHeadingStyle,
+                                            ),
                                           ),
-                                        ),
+                                        for (int i = 0;
+                                            i < folderPath.length;
+                                            i++) ...[
+                                          if (_isSelectMode || i > 0)
+                                            Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 4),
+                                              child: Icon(
+                                                Icons.chevron_right,
+                                                size: 14,
+                                                color: Colors.black
+                                                    .withOpacity(0.5),
+                                              ),
+                                            ),
+                                          InkWell(
+                                            onTap: () => _openBreadcrumbFolder(
+                                                folderPath[i]['id']
+                                                    ?.toString()),
+                                            child: ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                  maxWidth: 120),
+                                              child: Text(
+                                                (folderPath[i]['name'] ?? '')
+                                                    .toString(),
+                                                overflow: TextOverflow.ellipsis,
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.normal,
+                                                  color:
+                                                      i == folderPath.length - 1
+                                                          ? Colors.black
+                                                          : Colors.black
+                                                              .withOpacity(0.5),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                        if (_isSelectMode) ...[
+                                          const Spacer(),
+                                          Opacity(
+                                            opacity: hasUploadedDocuments
+                                                ? 1.0
+                                                : 0.5,
+                                            child: IgnorePointer(
+                                              ignoring: !hasUploadedDocuments,
+                                              child: _SecondaryActionButton(
+                                                label: _selectedDocumentIds
+                                                                .length ==
+                                                            selectableDocuments
+                                                                .length &&
+                                                        selectableDocuments
+                                                            .isNotEmpty
+                                                    ? 'Selected All'
+                                                    : 'Select All',
+                                                trailing: SvgPicture.asset(
+                                                  'assets/images/select.svg',
+                                                  width: 16,
+                                                  height: 16,
+                                                  colorFilter: ColorFilter.mode(
+                                                    _selectedDocumentIds
+                                                                    .length ==
+                                                                selectableDocuments
+                                                                    .length &&
+                                                            selectableDocuments
+                                                                .isNotEmpty
+                                                        ? const Color(
+                                                            0xFF000000)
+                                                        : const Color(
+                                                            0xFF0C8CE9),
+                                                    BlendMode.srcIn,
+                                                  ),
+                                                ),
+                                                onTap: () {
+                                                  setState(() {
+                                                    if (_selectedDocumentIds
+                                                            .length ==
+                                                        selectableDocuments
+                                                            .length) {
+                                                      _selectedDocumentIds
+                                                          .clear();
+                                                    } else {
+                                                      _selectedDocumentIds
+                                                          .clear();
+                                                      for (var doc
+                                                          in selectableDocuments) {
+                                                        _selectedDocumentIds
+                                                            .add((doc['id'] ??
+                                                                    '')
+                                                                .toString());
+                                                      }
+                                                    }
+                                                  });
+                                                },
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Opacity(
+                                            opacity:
+                                                _selectedDocumentIds.isEmpty
+                                                    ? 0.5
+                                                    : 1.0,
+                                            child: IgnorePointer(
+                                              ignoring:
+                                                  _selectedDocumentIds.isEmpty,
+                                              child: _SecondaryActionButton(
+                                                label: 'Delete',
+                                                trailing: SvgPicture.asset(
+                                                  'assets/images/Delete_layout.svg',
+                                                  width: 16,
+                                                  height: 16,
+                                                  colorFilter:
+                                                      const ColorFilter.mode(
+                                                          Color(0xFFFF0000),
+                                                          BlendMode.srcIn),
+                                                ),
+                                                onTap: _deleteSelectedFiles,
+                                                textColor:
+                                                    const Color(0xFFFF0000),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ],
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                          ],
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    InkWell(
-                                      onTap: () => _openBreadcrumbFolder(null),
-                                      child: Text(
-                                        _isSelectMode
-                                            ? 'Selected(${_selectedDocumentIds.length})'
-                                            : 'All Documents',
-                                        style: sectionHeadingStyle,
-                                      ),
-                                    ),
-                                    for (int i = 0;
-                                        i < folderPath.length;
-                                        i++) ...[
-                                      Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 4),
-                                        child: Icon(
-                                          Icons.chevron_right,
-                                          size: 14,
-                                          color: Colors.black.withOpacity(0.5),
-                                        ),
-                                      ),
-                                      InkWell(
-                                        onTap: () => _openBreadcrumbFolder(
-                                            folderPath[i]['id']?.toString()),
-                                        child: ConstrainedBox(
-                                          constraints: const BoxConstraints(
-                                              maxWidth: 120),
-                                          child: Text(
-                                            (folderPath[i]['name'] ?? '')
-                                                .toString(),
-                                            overflow: TextOverflow.ellipsis,
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.normal,
-                                              color: i == folderPath.length - 1
-                                                  ? Colors.black
-                                                  : Colors.black
-                                                      .withOpacity(0.5),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                    if (_isSelectMode) ...[
-                                      const Spacer(),
-                                      _SecondaryActionButton(
-                                        label: _selectedDocumentIds.length ==
-                                                    selectableDocuments
-                                                        .length &&
-                                                selectableDocuments.isNotEmpty
-                                            ? 'Selected All'
-                                            : 'Select All',
-                                        trailing: SvgPicture.asset(
-                                          'assets/images/select.svg',
-                                          width: 16,
-                                          height: 16,
-                                          colorFilter: ColorFilter.mode(
-                                            _selectedDocumentIds.length ==
-                                                        selectableDocuments
-                                                            .length &&
-                                                    selectableDocuments
-                                                        .isNotEmpty
-                                                ? const Color(0xFF000000)
-                                                : const Color(0xFF0C8CE9),
-                                            BlendMode.srcIn,
-                                          ),
-                                        ),
-                                        // Removed backgroundColor to inherit hover effect
-                                        onTap: () {
-                                          setState(() {
-                                            if (_selectedDocumentIds.length ==
-                                                selectableDocuments.length) {
-                                              _selectedDocumentIds.clear();
-                                            } else {
-                                              _selectedDocumentIds.clear();
-                                              for (var doc
-                                                  in selectableDocuments) {
-                                                _selectedDocumentIds.add(
-                                                    (doc['id'] ?? '')
-                                                        .toString());
-                                              }
-                                            }
-                                          });
-                                        },
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Opacity(
-                                        opacity: _selectedDocumentIds.isEmpty
-                                            ? 0.5
-                                            : 1.0,
-                                        child: IgnorePointer(
-                                          ignoring:
-                                              _selectedDocumentIds.isEmpty,
-                                          child: _SecondaryActionButton(
-                                            label: 'Delete',
-                                            trailing: SvgPicture.asset(
-                                              'assets/images/Delete_layout.svg',
-                                              width: 16,
-                                              height: 16,
-                                              colorFilter:
-                                                  const ColorFilter.mode(
-                                                      Color(0xFFFF0000),
-                                                      BlendMode.srcIn),
-                                            ),
-                                            onTap: _deleteSelectedFiles,
-                                            textColor: const Color(
-                                                0xFFFF0000), // Keep Delete text red
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                    const SizedBox(height: 24),
                                   ],
-                                ),
-                                const SizedBox(height: 24),
-                                if (documents.isEmpty) ...[
-                                  if (_showAddFolderDialog)
+                                  if (documents.isEmpty) ...[
+                                    if (_showAddFolderDialog)
+                                      Wrap(
+                                        spacing: 24,
+                                        runSpacing: 24,
+                                        children: [
+                                          AddFolderDialog(
+                                            onClose: () => setState(() =>
+                                                _showAddFolderDialog = false),
+                                            onCreate: _addFolder,
+                                          ),
+                                        ],
+                                      )
+                                    else
+                                      Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          if (_currentFolderId == null) ...[
+                                            Text(
+                                              'Uploaded Documents',
+                                              style: sectionHeadingStyle,
+                                            ),
+                                            const SizedBox(height: 16),
+                                          ],
+                                          _buildUploadedDocumentsEmptySection(),
+                                        ],
+                                      ),
+                                  ] else ...[
                                     Wrap(
                                       spacing: 24,
                                       runSpacing: 24,
                                       children: [
-                                        AddFolderDialog(
-                                          onClose: () => setState(() =>
-                                              _showAddFolderDialog = false),
-                                          onCreate: _addFolder,
-                                        ),
-                                      ],
-                                    )
-                                  else
-                                    widget.isAgentView
-                                        ? Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 8,
-                                              vertical: 4,
-                                            ),
-                                            child: Text(
-                                              'No site/amenity documents found.',
-                                              style: GoogleFonts.inter(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w400,
-                                                color: const Color(0xFF5C5C5C),
+                                        for (int index = 0;
+                                            index < documents.length;
+                                            index++) ...[
+                                          if (showSiteImagesHeading &&
+                                              index == 0)
+                                            SizedBox(
+                                              width: double.infinity,
+                                              child: Text(
+                                                'Site images',
+                                                style: sectionHeadingStyle,
                                               ),
                                             ),
-                                          )
-                                        : _DocumentsEmptyState(
-                                            onUpload: _uploadDocuments,
-                                            onAddFolder: _createFolder,
-                                          ),
-                                ] else ...[
-                                  Wrap(
-                                    spacing: 24,
-                                    runSpacing: 24,
-                                    children: [
-                                      for (int index = 0;
-                                          index < documents.length;
-                                          index++) ...[
-                                        if (showSiteImagesHeading && index == 0)
-                                          SizedBox(
-                                            width: double.infinity,
-                                            child: Text(
-                                              'Site images',
-                                              style: sectionHeadingStyle,
-                                            ),
-                                          ),
-                                        () {
-                                          final doc = documents[index];
-                                          final docExtension =
-                                              _resolveDocumentExtension(
-                                            Map<String, dynamic>.from(doc),
-                                          );
-                                          final isUploadingDoc =
-                                              doc['isUploading'] == true;
-                                          final isProtectedRootFolder =
-                                              _currentFolderId == null &&
-                                                  _isPinnedRootFolder(doc);
-                                          final docId =
-                                              (doc['id'] ?? '').toString();
-                                          final isSelected =
-                                              _selectedDocumentIds
-                                                  .contains(docId);
-                                          final backgroundColor = isSelected
-                                              ? const Color(0xFFFF0000)
-                                                  .withOpacity(0.1)
-                                              : Colors.transparent;
-                                          final folderFileCount =
-                                              (doc['type'] ?? 'folder')
-                                                          .toString() ==
-                                                      'folder'
-                                                  ? _documents
-                                                      .where((item) =>
-                                                          item['parentId'] ==
-                                                          docId)
-                                                      .length
-                                                  : 0;
+                                          () {
+                                            final doc = documents[index];
+                                            final docExtension =
+                                                _resolveDocumentExtension(
+                                              Map<String, dynamic>.from(doc),
+                                            );
+                                            final isUploadingDoc =
+                                                doc['isUploading'] == true;
+                                            final isProtectedRootFolder =
+                                                _currentFolderId == null &&
+                                                    _isPinnedRootFolder(doc);
+                                            final docId =
+                                                (doc['id'] ?? '').toString();
+                                            final isSelected =
+                                                _selectedDocumentIds
+                                                    .contains(docId);
+                                            final backgroundColor = isSelected
+                                                ? const Color(0xFFFF0000)
+                                                    .withOpacity(0.1)
+                                                : Colors.transparent;
+                                            final folderFileCount =
+                                                (doc['type'] ?? 'folder')
+                                                            .toString() ==
+                                                        'folder'
+                                                    ? _documents
+                                                        .where((item) =>
+                                                            item['parentId'] ==
+                                                            docId)
+                                                        .length
+                                                    : 0;
 
-                                          // Unified tap logic for both folder and file
-                                          return GestureDetector(
-                                            behavior:
-                                                HitTestBehavior.deferToChild,
-                                            onTap: () {
-                                              if (isUploadingDoc) return;
-                                              if (_isSelectMode &&
-                                                  isProtectedRootFolder) {
-                                                return;
-                                              }
-                                              if (_isSelectMode) {
-                                                setState(() {
-                                                  if (isSelected) {
-                                                    _selectedDocumentIds
-                                                        .remove(docId);
-                                                  } else {
-                                                    _selectedDocumentIds
-                                                        .add(docId);
-                                                  }
-                                                });
-                                              } else {
-                                                // Not in select mode: open folder or file
-                                                if ((doc['type'] ?? 'folder')
-                                                        .toString() ==
-                                                    'folder') {
-                                                  _openFolder(docId);
-                                                } else {
-                                                  _openDocumentFile(
-                                                    Map<String, dynamic>.from(
-                                                        doc),
-                                                  );
+                                            // Unified tap logic for both folder and file
+                                            return GestureDetector(
+                                              behavior:
+                                                  HitTestBehavior.deferToChild,
+                                              onTap: () {
+                                                if (isUploadingDoc) return;
+                                                if (_isSelectMode &&
+                                                    isProtectedRootFolder) {
+                                                  return;
                                                 }
-                                              }
-                                            },
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                color: backgroundColor,
-                                              ),
-                                              child: Stack(
-                                                children: [
-                                                  IgnorePointer(
-                                                    ignoring: _isSelectMode ||
-                                                        isUploadingDoc,
-                                                    child: (doc['type'] ??
-                                                                    'folder')
-                                                                .toString() ==
-                                                            'folder'
-                                                        ? DocumentCard(
-                                                            key: ValueKey(
-                                                                'doc-$docId'),
-                                                            isSelected:
-                                                                isSelected,
-                                                            isSelectMode:
-                                                                _isSelectMode,
-                                                            name:
-                                                                (doc['name'] ??
-                                                                        '')
-                                                                    .toString(),
-                                                            type: (doc['type'] ??
-                                                                    'folder')
-                                                                .toString(),
-                                                            fileCount:
-                                                                folderFileCount,
-                                                            uploadedLabel: _sortOrder ==
-                                                                    'created'
-                                                                ? (doc['uploadedLabel'] ??
-                                                                        '')
-                                                                    .toString()
-                                                                : '',
-                                                            updatedLabel: _sortOrder ==
-                                                                    'updated'
-                                                                ? (doc['updatedLabel'] ??
-                                                                        '')
-                                                                    .toString()
-                                                                : '',
-                                                            folderId: docId,
-                                                            autoRename:
-                                                                _newlyCreatedFolderId ==
-                                                                    docId,
-                                                            onRename:
-                                                                (newName) async {
-                                                              try {
-                                                                await _supabase
-                                                                    .from(
-                                                                        'documents')
-                                                                    .update({
-                                                                  'name':
-                                                                      newName
-                                                                }).eq('id',
-                                                                        docId);
-                                                                setState(() {
-                                                                  final docIndex =
-                                                                      _documents.indexWhere((item) =>
-                                                                          item[
-                                                                              'id'] ==
+                                                if (_isSelectMode) {
+                                                  setState(() {
+                                                    if (isSelected) {
+                                                      _selectedDocumentIds
+                                                          .remove(docId);
+                                                    } else {
+                                                      _selectedDocumentIds
+                                                          .add(docId);
+                                                    }
+                                                  });
+                                                } else {
+                                                  // Not in select mode: open folder or file
+                                                  if ((doc['type'] ?? 'folder')
+                                                          .toString() ==
+                                                      'folder') {
+                                                    _openFolder(docId);
+                                                  } else {
+                                                    _openDocumentFile(
+                                                      Map<String, dynamic>.from(
+                                                          doc),
+                                                    );
+                                                  }
+                                                }
+                                              },
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  color: backgroundColor,
+                                                ),
+                                                child: Stack(
+                                                  children: [
+                                                    IgnorePointer(
+                                                      ignoring: _isSelectMode ||
+                                                          isUploadingDoc,
+                                                      child: (doc['type'] ??
+                                                                      'folder')
+                                                                  .toString() ==
+                                                              'folder'
+                                                          ? DocumentCard(
+                                                              key: ValueKey(
+                                                                  'doc-$docId'),
+                                                              isSelected:
+                                                                  isSelected,
+                                                              isSelectMode:
+                                                                  _isSelectMode,
+                                                              name: (doc['name'] ??
+                                                                      '')
+                                                                  .toString(),
+                                                              searchQuery:
+                                                                  _searchQuery,
+                                                              type: (doc['type'] ??
+                                                                      'folder')
+                                                                  .toString(),
+                                                              fileCount:
+                                                                  folderFileCount,
+                                                              uploadedLabel: _sortOrder ==
+                                                                      'created'
+                                                                  ? (doc['uploadedLabel'] ??
+                                                                          '')
+                                                                      .toString()
+                                                                  : '',
+                                                              updatedLabel: _sortOrder ==
+                                                                      'updated'
+                                                                  ? (doc['updatedLabel'] ??
+                                                                          '')
+                                                                      .toString()
+                                                                  : '',
+                                                              folderId: docId,
+                                                              autoRename:
+                                                                  _newlyCreatedFolderId ==
+                                                                      docId,
+                                                              onRename:
+                                                                  (newName) async {
+                                                                try {
+                                                                  await _supabase
+                                                                      .from(
+                                                                          'documents')
+                                                                      .update({
+                                                                    'name':
+                                                                        newName
+                                                                  }).eq('id',
                                                                           docId);
-                                                                  if (docIndex !=
-                                                                      -1) {
-                                                                    _documents[docIndex]
-                                                                            [
-                                                                            'name'] =
-                                                                        newName;
-                                                                    _documents[docIndex]
-                                                                            [
-                                                                            'updatedLabel'] =
-                                                                        'Updated: ${_formatDate(DateTime.now())}';
-                                                                  }
-                                                                });
-                                                              } catch (e) {
-                                                                debugPrint(
-                                                                    'Error renaming folder: $e');
-                                                              }
-                                                            },
-                                                            onDelete: () async {
-                                                              if (isProtectedRootFolder) {
-                                                                return;
-                                                              }
-                                                              try {
-                                                                await _supabase
-                                                                    .from(
-                                                                        'documents')
-                                                                    .delete()
-                                                                    .eq('id',
-                                                                        docId);
-                                                                setState(() {
-                                                                  _documents.removeWhere(
-                                                                      (item) =>
-                                                                          item[
-                                                                              'id'] ==
+                                                                  setState(() {
+                                                                    final docIndex =
+                                                                        _documents.indexWhere((item) =>
+                                                                            item['id'] ==
+                                                                            docId);
+                                                                    if (docIndex !=
+                                                                        -1) {
+                                                                      _documents[docIndex]
+                                                                              [
+                                                                              'name'] =
+                                                                          newName;
+                                                                      _documents[docIndex]
+                                                                              [
+                                                                              'updatedLabel'] =
+                                                                          'Updated: ${_formatDate(DateTime.now())}';
+                                                                    }
+                                                                  });
+                                                                } catch (e) {
+                                                                  debugPrint(
+                                                                      'Error renaming folder: $e');
+                                                                }
+                                                              },
+                                                              onDelete:
+                                                                  () async {
+                                                                if (isProtectedRootFolder) {
+                                                                  return;
+                                                                }
+                                                                try {
+                                                                  await _supabase
+                                                                      .from(
+                                                                          'documents')
+                                                                      .delete()
+                                                                      .eq('id',
                                                                           docId);
-                                                                  _documents.removeWhere(
-                                                                      (item) =>
-                                                                          item[
-                                                                              'parentId'] ==
-                                                                          docId);
-                                                                });
-                                                              } catch (e) {
+                                                                  setState(() {
+                                                                    _documents.removeWhere(
+                                                                        (item) =>
+                                                                            item['id'] ==
+                                                                            docId);
+                                                                    _documents.removeWhere(
+                                                                        (item) =>
+                                                                            item['parentId'] ==
+                                                                            docId);
+                                                                  });
+                                                                } catch (e) {
+                                                                  debugPrint(
+                                                                      'Error deleting folder: $e');
+                                                                }
+                                                              },
+                                                              onDownload:
+                                                                  () async {
+                                                                final folderName =
+                                                                    doc['name'] ??
+                                                                        'folder';
+                                                                final folderId =
+                                                                    doc['id'];
                                                                 debugPrint(
-                                                                    'Error deleting folder: $e');
-                                                              }
-                                                            },
-                                                            onDownload:
-                                                                () async {
-                                                              final folderName =
-                                                                  doc['name'] ??
-                                                                      'folder';
-                                                              final folderId =
-                                                                  doc['id'];
-                                                              debugPrint(
-                                                                  'Download folder: $folderName');
-                                                              final files = _documents
-                                                                  .where((item) =>
-                                                                      item['parentId'] ==
-                                                                          folderId &&
-                                                                      item['type'] ==
-                                                                          'file')
-                                                                  .toList();
-                                                              if (files
-                                                                  .isEmpty) {
-                                                                debugPrint(
-                                                                    'No files found in folder $folderName');
-                                                                return;
-                                                              }
-                                                              final archive =
-                                                                  Archive();
-                                                              for (final file
-                                                                  in files) {
-                                                                final fileUrl =
-                                                                    file['url']
-                                                                        as String?;
-                                                                final fileName =
-                                                                    file['name']
-                                                                            as String? ??
-                                                                        'file';
-                                                                if (fileUrl !=
-                                                                        null &&
-                                                                    fileUrl
-                                                                        .isNotEmpty) {
-                                                                  try {
-                                                                    final response = await html.HttpRequest.request(
-                                                                        fileUrl,
-                                                                        responseType:
-                                                                            'arraybuffer');
-                                                                    final bytes =
-                                                                        response.response
-                                                                            as ByteBuffer;
-                                                                    archive.addFile(ArchiveFile(
-                                                                        fileName,
-                                                                        bytes
-                                                                            .lengthInBytes,
-                                                                        bytes
-                                                                            .asUint8List()));
-                                                                  } catch (e) {
-                                                                    debugPrint(
-                                                                        'Failed to fetch file $fileName: $e');
+                                                                    'Download folder: $folderName');
+                                                                final files = _documents
+                                                                    .where((item) =>
+                                                                        item['parentId'] ==
+                                                                            folderId &&
+                                                                        item['type'] ==
+                                                                            'file')
+                                                                    .toList();
+                                                                if (files
+                                                                    .isEmpty) {
+                                                                  debugPrint(
+                                                                      'No files found in folder $folderName');
+                                                                  return;
+                                                                }
+                                                                final archive =
+                                                                    Archive();
+                                                                for (final file
+                                                                    in files) {
+                                                                  final fileUrl =
+                                                                      file['url']
+                                                                          as String?;
+                                                                  final fileName =
+                                                                      file['name']
+                                                                              as String? ??
+                                                                          'file';
+                                                                  if (fileUrl !=
+                                                                          null &&
+                                                                      fileUrl
+                                                                          .isNotEmpty) {
+                                                                    try {
+                                                                      final response = await html.HttpRequest.request(
+                                                                          fileUrl,
+                                                                          responseType:
+                                                                              'arraybuffer');
+                                                                      final bytes =
+                                                                          response.response
+                                                                              as ByteBuffer;
+                                                                      archive.addFile(ArchiveFile(
+                                                                          fileName,
+                                                                          bytes
+                                                                              .lengthInBytes,
+                                                                          bytes
+                                                                              .asUint8List()));
+                                                                    } catch (e) {
+                                                                      debugPrint(
+                                                                          'Failed to fetch file $fileName: $e');
+                                                                    }
                                                                   }
                                                                 }
-                                                              }
-                                                              final zipData =
-                                                                  ZipEncoder()
-                                                                      .encode(
-                                                                          archive);
-                                                              if (zipData !=
-                                                                  null) {
-                                                                final blob =
-                                                                    html.Blob([
-                                                                  zipData
-                                                                ], 'application/zip');
-                                                                final url = html
-                                                                        .Url
-                                                                    .createObjectUrlFromBlob(
-                                                                        blob);
-                                                                final anchor = html
-                                                                    .AnchorElement(
-                                                                        href:
-                                                                            url)
-                                                                  ..download =
-                                                                      '$folderName.zip'
-                                                                  ..target =
-                                                                      'blank';
-                                                                html.document
-                                                                    .body!
-                                                                    .append(
-                                                                        anchor);
-                                                                anchor.click();
-                                                                anchor.remove();
-                                                                html.Url
-                                                                    .revokeObjectUrl(
-                                                                        url);
-                                                              }
-                                                            },
-                                                            onOpenFolder: () =>
-                                                                _openFolder(
-                                                                    docId),
-                                                          )
-                                                        : FileCard(
-                                                            key: ValueKey(
-                                                                'file-$docId'),
-                                                            isUploading:
-                                                                isUploadingDoc,
-                                                            isSelected:
-                                                                isSelected,
-                                                            isSelectMode:
-                                                                _isSelectMode,
-                                                            name:
-                                                                (doc['name'] ??
-                                                                        '')
-                                                                    .toString(),
-                                                            extension:
+                                                                final zipData =
+                                                                    ZipEncoder()
+                                                                        .encode(
+                                                                            archive);
+                                                                if (zipData !=
+                                                                    null) {
+                                                                  final blob =
+                                                                      html.Blob([
+                                                                    zipData
+                                                                  ], 'application/zip');
+                                                                  final url = html
+                                                                          .Url
+                                                                      .createObjectUrlFromBlob(
+                                                                          blob);
+                                                                  final anchor = html
+                                                                      .AnchorElement(
+                                                                          href:
+                                                                              url)
+                                                                    ..download =
+                                                                        '$folderName.zip'
+                                                                    ..target =
+                                                                        'blank';
+                                                                  html.document
+                                                                      .body!
+                                                                      .append(
+                                                                          anchor);
+                                                                  anchor
+                                                                      .click();
+                                                                  anchor
+                                                                      .remove();
+                                                                  html.Url
+                                                                      .revokeObjectUrl(
+                                                                          url);
+                                                                }
+                                                              },
+                                                              onOpenFolder: () =>
+                                                                  _openFolder(
+                                                                      docId),
+                                                              showActions:
+                                                                  !isProtectedRootFolder,
+                                                            )
+                                                          : FileCard(
+                                                              key: ValueKey(
+                                                                  'file-$docId'),
+                                                              isUploading:
+                                                                  isUploadingDoc,
+                                                              isSelected:
+                                                                  isSelected,
+                                                              isSelectMode:
+                                                                  _isSelectMode,
+                                                              name: (doc['name'] ??
+                                                                      '')
+                                                                  .toString(),
+                                                              searchQuery:
+                                                                  _searchQuery,
+                                                              extension:
+                                                                  docExtension,
+                                                              iconPath:
+                                                                  _getFileIconPath(
                                                                 docExtension,
-                                                            iconPath:
-                                                                _getFileIconPath(
-                                                              docExtension,
-                                                            ),
-                                                            uploadedLabel:
-                                                                (doc['uploadedLabel'] ??
-                                                                        '')
-                                                                    .toString(),
-                                                            updatedLabel:
-                                                                (doc['updatedLabel'] ??
-                                                                        '')
-                                                                    .toString(),
-                                                            onRename:
-                                                                (newName) async {
-                                                              try {
-                                                                await _supabase
-                                                                    .from(
-                                                                        'documents')
-                                                                    .update({
-                                                                  'name':
-                                                                      newName
-                                                                }).eq('id',
-                                                                        docId);
-                                                                setState(() {
-                                                                  final docIndex =
-                                                                      _documents.indexWhere((item) =>
-                                                                          item[
-                                                                              'id'] ==
+                                                              ),
+                                                              uploadedLabel:
+                                                                  (doc['uploadedLabel'] ??
+                                                                          '')
+                                                                      .toString(),
+                                                              updatedLabel:
+                                                                  (doc['updatedLabel'] ??
+                                                                          '')
+                                                                      .toString(),
+                                                              onRename:
+                                                                  (newName) async {
+                                                                try {
+                                                                  await _supabase
+                                                                      .from(
+                                                                          'documents')
+                                                                      .update({
+                                                                    'name':
+                                                                        newName
+                                                                  }).eq('id',
                                                                           docId);
-                                                                  if (docIndex !=
-                                                                      -1) {
-                                                                    _documents[docIndex]
-                                                                            [
-                                                                            'name'] =
-                                                                        newName;
-                                                                    _documents[docIndex]
-                                                                            [
-                                                                            'updatedLabel'] =
-                                                                        'Updated: ${_formatDate(DateTime.now())}';
+                                                                  setState(() {
+                                                                    final docIndex =
+                                                                        _documents.indexWhere((item) =>
+                                                                            item['id'] ==
+                                                                            docId);
+                                                                    if (docIndex !=
+                                                                        -1) {
+                                                                      _documents[docIndex]
+                                                                              [
+                                                                              'name'] =
+                                                                          newName;
+                                                                      _documents[docIndex]
+                                                                              [
+                                                                              'updatedLabel'] =
+                                                                          'Updated: ${_formatDate(DateTime.now())}';
+                                                                    }
+                                                                  });
+                                                                } catch (e) {
+                                                                  debugPrint(
+                                                                      'Error renaming file: $e');
+                                                                }
+                                                              },
+                                                              onDelete:
+                                                                  () async {
+                                                                try {
+                                                                  final fileUrl =
+                                                                      doc['url']
+                                                                          as String?;
+                                                                  if (fileUrl !=
+                                                                          null &&
+                                                                      fileUrl
+                                                                          .isNotEmpty) {
+                                                                    final path = Uri.parse(
+                                                                            fileUrl)
+                                                                        .path
+                                                                        .split(
+                                                                            '/documents/')
+                                                                        .last;
+                                                                    await _supabase
+                                                                        .storage
+                                                                        .from(
+                                                                            'documents')
+                                                                        .remove([
+                                                                      path
+                                                                    ]);
                                                                   }
-                                                                });
-                                                              } catch (e) {
-                                                                debugPrint(
-                                                                    'Error renaming file: $e');
-                                                              }
-                                                            },
-                                                            onDelete: () async {
-                                                              try {
+                                                                  await _supabase
+                                                                      .from(
+                                                                          'documents')
+                                                                      .delete()
+                                                                      .eq('id',
+                                                                          docId);
+                                                                  setState(() {
+                                                                    _documents.removeWhere(
+                                                                        (item) =>
+                                                                            item['id'] ==
+                                                                            docId);
+                                                                  });
+                                                                } catch (e) {
+                                                                  debugPrint(
+                                                                      'Error deleting file: $e');
+                                                                }
+                                                              },
+                                                              onDownload:
+                                                                  () async {
+                                                                final fileName =
+                                                                    doc['name'] ??
+                                                                        'file';
                                                                 final fileUrl =
                                                                     doc['url']
                                                                         as String?;
@@ -3869,118 +4005,147 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                         null &&
                                                                     fileUrl
                                                                         .isNotEmpty) {
-                                                                  final path = Uri
-                                                                          .parse(
+                                                                  debugPrint(
+                                                                      'Download file: $fileName from $fileUrl');
+                                                                  final anchor = html
+                                                                      .AnchorElement(
+                                                                          href:
                                                                               fileUrl)
-                                                                      .path
-                                                                      .split(
-                                                                          '/documents/')
-                                                                      .last;
-                                                                  await _supabase
-                                                                      .storage
-                                                                      .from(
-                                                                          'documents')
-                                                                      .remove([
-                                                                    path
-                                                                  ]);
+                                                                    ..download =
+                                                                        fileName
+                                                                    ..target =
+                                                                        'blank';
+                                                                  html.document
+                                                                      .body!
+                                                                      .append(
+                                                                          anchor);
+                                                                  anchor
+                                                                      .click();
+                                                                  anchor
+                                                                      .remove();
+                                                                } else {
+                                                                  debugPrint(
+                                                                      'File URL not found for $fileName');
                                                                 }
-                                                                await _supabase
-                                                                    .from(
-                                                                        'documents')
-                                                                    .delete()
-                                                                    .eq('id',
-                                                                        docId);
-                                                                setState(() {
-                                                                  _documents.removeWhere(
-                                                                      (item) =>
-                                                                          item[
-                                                                              'id'] ==
-                                                                          docId);
-                                                                });
-                                                              } catch (e) {
-                                                                debugPrint(
-                                                                    'Error deleting file: $e');
-                                                              }
-                                                            },
-                                                            onDownload:
-                                                                () async {
-                                                              final fileName =
-                                                                  doc['name'] ??
-                                                                      'file';
-                                                              final fileUrl =
-                                                                  doc['url']
-                                                                      as String?;
-                                                              if (fileUrl !=
-                                                                      null &&
-                                                                  fileUrl
-                                                                      .isNotEmpty) {
-                                                                debugPrint(
-                                                                    'Download file: $fileName from $fileUrl');
-                                                                final anchor = html
-                                                                    .AnchorElement(
-                                                                        href:
-                                                                            fileUrl)
-                                                                  ..download =
-                                                                      fileName
-                                                                  ..target =
-                                                                      'blank';
-                                                                html.document
-                                                                    .body!
-                                                                    .append(
-                                                                        anchor);
-                                                                anchor.click();
-                                                                anchor.remove();
-                                                              } else {
-                                                                debugPrint(
-                                                                    'File URL not found for $fileName');
-                                                              }
-                                                            },
-                                                            onOpen: () {
-                                                              _openDocumentFile(
-                                                                Map<String,
-                                                                        dynamic>.from(
-                                                                    doc),
-                                                              );
-                                                            },
-                                                          ),
-                                                  ),
-                                                ],
+                                                              },
+                                                              onOpen: () {
+                                                                _openDocumentFile(
+                                                                  Map<String,
+                                                                          dynamic>.from(
+                                                                      doc),
+                                                                );
+                                                              },
+                                                            ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            );
+                                          }(),
+                                          if (forcePinnedFoldersToFirstRow &&
+                                              hasUploadedDocuments &&
+                                              index ==
+                                                  leadingPinnedRootFolderCount -
+                                                      1) ...[
+                                            const SizedBox(
+                                              width: double.infinity,
+                                              height: 0,
+                                            ),
+                                            SizedBox(
+                                              width: double.infinity,
+                                              child: Text(
+                                                'Uploaded Documents',
+                                                style: sectionHeadingStyle,
                                               ),
                                             ),
-                                          );
-                                        }(),
-                                        if (forcePinnedFoldersToFirstRow &&
-                                            index ==
-                                                leadingPinnedRootFolderCount -
-                                                    1) ...[
-                                          const SizedBox(
-                                            width: double.infinity,
-                                            height: 0,
-                                          ),
-                                          SizedBox(
-                                            width: double.infinity,
-                                            child: Text(
-                                              'Uploaded Documents',
-                                              style: sectionHeadingStyle,
-                                            ),
-                                          ),
+                                          ],
                                         ],
+                                        if (_showAddFolderDialog)
+                                          AddFolderDialog(
+                                            onClose: () => setState(() =>
+                                                _showAddFolderDialog = false),
+                                            onCreate: _addFolder,
+                                          ),
                                       ],
-                                      if (_showAddFolderDialog)
-                                        AddFolderDialog(
-                                          onClose: () => setState(() =>
-                                              _showAddFolderDialog = false),
-                                          onCreate: _addFolder,
+                                    ),
+                                    if (showUploadedDocsEmptySection) ...[
+                                      const SizedBox(height: 16),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: Text(
+                                          'Uploaded Documents',
+                                          style: sectionHeadingStyle,
                                         ),
+                                      ),
+                                      const SizedBox(height: 16),
+                                      _buildUploadedDocumentsEmptySection(
+                                        expandToViewport: false,
+                                        minHeight: max(
+                                          220.0,
+                                          MediaQuery.of(context).size.height -
+                                              620,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                  const SizedBox(height: 24),
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                        if (showStaticCenteredState) {
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const SizedBox(height: 24),
+                                if (_currentFolderId != null) ...[
+                                  Row(
+                                    children: [
+                                      InkWell(
+                                        onTap: _goBack,
+                                        child: Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.arrow_back,
+                                              size: 16,
+                                              color: Color(0xFF0C8CE9),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              'Back',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.normal,
+                                                color: Colors.black,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     ],
                                   ),
+                                  const SizedBox(height: 16),
                                 ],
+                                if (_currentFolderId == null) ...[
+                                  Text(
+                                    'Uploaded Documents',
+                                    style: sectionHeadingStyle,
+                                  ),
+                                  const SizedBox(height: 16),
+                                ],
+                                Expanded(
+                                  child: _buildUploadedDocumentsEmptySection(),
+                                ),
                                 const SizedBox(height: 24),
                               ],
                             ),
-                          ),
-                        ],
-                      ),
+                          );
+                        }
+                        return SingleChildScrollView(child: content);
+                      },
                     ),
             ),
           ],
@@ -4082,10 +4247,10 @@ class _DocumentsEmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const SizedBox(height: 40),
           SvgPicture.asset(
             'assets/images/Document_active.svg',
             width: 65,
@@ -4141,7 +4306,6 @@ class _DocumentsEmptyState extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 40),
         ],
       ),
     );
@@ -4150,6 +4314,7 @@ class _DocumentsEmptyState extends StatelessWidget {
 
 class DocumentCard extends StatefulWidget {
   final String name;
+  final String searchQuery;
   final String type;
   final int fileCount;
   final String uploadedLabel;
@@ -4162,10 +4327,12 @@ class DocumentCard extends StatefulWidget {
   final VoidCallback onDownload;
   final VoidCallback onDelete;
   final VoidCallback onOpenFolder;
+  final bool showActions;
 
   const DocumentCard({
     super.key,
     required this.name,
+    this.searchQuery = '',
     required this.type,
     required this.fileCount,
     required this.uploadedLabel,
@@ -4178,6 +4345,7 @@ class DocumentCard extends StatefulWidget {
     required this.onDownload,
     required this.onDelete,
     required this.onOpenFolder,
+    this.showActions = true,
   });
 
   @override
@@ -4387,8 +4555,9 @@ class _DocumentCardState extends State<DocumentCard> {
                                   onEditingComplete: _commitRename,
                                 ),
                               )
-                            : Text(
-                                widget.name,
+                            : SearchHighlightText(
+                                text: widget.name,
+                                query: widget.searchQuery,
                                 style: GoogleFonts.inter(
                                   fontSize: 14,
                                   fontWeight: FontWeight.normal,
@@ -4442,215 +4611,232 @@ class _DocumentCardState extends State<DocumentCard> {
                 right: -14,
                 child: Material(
                   color: Colors.transparent,
-                  child: widget.isSelectMode
-                      ? Container(
-                          width: 32,
-                          height: 32,
-                          alignment: Alignment.center,
-                          child: _threeDotsIcon(),
-                        )
-                      : Theme(
-                          data: Theme.of(context).copyWith(
-                            splashFactory: NoSplash.splashFactory,
-                            highlightColor: Colors.transparent,
-                            splashColor: Colors.transparent,
-                          ),
-                          child: PopupMenuButton<_DocumentCardAction>(
-                            tooltip: '',
-                            padding: EdgeInsets.zero,
-                            position: PopupMenuPosition.under,
-                            child: Container(
+                  child: !widget.showActions
+                      ? const SizedBox.shrink()
+                      : widget.isSelectMode
+                          ? Container(
                               width: 32,
                               height: 32,
                               alignment: Alignment.center,
-                              child: MouseRegion(
-                                cursor: SystemMouseCursors.click,
-                                child: _threeDotsIcon(),
+                              child: _threeDotsIcon(),
+                            )
+                          : Theme(
+                              data: Theme.of(context).copyWith(
+                                splashFactory: NoSplash.splashFactory,
+                                highlightColor: Colors.transparent,
+                                splashColor: Colors.transparent,
                               ),
-                            ),
-                            offset: Offset(_popupShiftX(context), 0),
-                            color: Colors.transparent,
-                            elevation: 0,
-                            shadowColor: Colors.transparent,
-                            enableFeedback: false,
-                            onSelected: (action) {
-                              switch (action) {
-                                case _DocumentCardAction.rename:
-                                  _beginRename();
-                                  break;
-                                case _DocumentCardAction.download:
-                                  widget.onDownload();
-                                  break;
-                                case _DocumentCardAction.delete:
-                                  widget.onDelete();
-                                  break;
-                              }
-                            },
-                            itemBuilder: (context) =>
-                                <PopupMenuEntry<_DocumentCardAction>>[
-                              PopupMenuItem(
-                                enabled: false,
+                              child: PopupMenuButton<_DocumentCardAction>(
+                                tooltip: '',
                                 padding: EdgeInsets.zero,
+                                position: PopupMenuPosition.under,
                                 child: Container(
-                                  width: 197,
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFF8F9FA),
-                                    borderRadius: BorderRadius.circular(8),
-                                    boxShadow: const [
-                                      BoxShadow(
-                                        color: Color(0x80000000),
-                                        blurRadius: 2,
-                                        offset: Offset(0, 0),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      InkWell(
-                                        borderRadius: BorderRadius.circular(8),
-                                        onTap: () {
-                                          Navigator.of(context).pop();
-                                          _beginRename();
-                                        },
-                                        child: Container(
-                                          height: 36,
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 16, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            boxShadow: const [
-                                              BoxShadow(
-                                                color: Color(0x40000000),
-                                                blurRadius: 2,
-                                                offset: Offset(0, 0),
-                                              ),
-                                            ],
-                                          ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                'Rename',
-                                                style: GoogleFonts.inter(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.normal,
-                                                  color: Colors.black,
-                                                ),
-                                              ),
-                                              SvgPicture.asset(
-                                                'assets/images/rename.svg',
-                                                width: 20,
-                                                height: 20,
-                                                fit: BoxFit.contain,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      InkWell(
-                                        borderRadius: BorderRadius.circular(8),
-                                        onTap: () {
-                                          Navigator.of(context).pop();
-                                          widget.onDownload();
-                                        },
-                                        child: Container(
-                                          height: 36,
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 16, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            boxShadow: const [
-                                              BoxShadow(
-                                                color: Color(0x40000000),
-                                                blurRadius: 2,
-                                                offset: Offset(0, 0),
-                                              ),
-                                            ],
-                                          ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                'Download',
-                                                style: GoogleFonts.inter(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.normal,
-                                                  color: Colors.black,
-                                                ),
-                                              ),
-                                              SvgPicture.asset(
-                                                'assets/images/Download_all.svg',
-                                                width: 16,
-                                                height: 16,
-                                                fit: BoxFit.contain,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      InkWell(
-                                        borderRadius: BorderRadius.circular(8),
-                                        onTap: () {
-                                          Navigator.of(context).pop();
-                                          widget.onDelete();
-                                        },
-                                        child: Container(
-                                          height: 36,
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 16, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            boxShadow: const [
-                                              BoxShadow(
-                                                color: Color(0x40000000),
-                                                blurRadius: 2,
-                                                offset: Offset(0, 0),
-                                              ),
-                                            ],
-                                          ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                'Delete Folder',
-                                                style: GoogleFonts.inter(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.normal,
-                                                  color: Colors.red,
-                                                ),
-                                              ),
-                                              SvgPicture.asset(
-                                                'assets/images/delete_folder.svg',
-                                                width: 13,
-                                                height: 16,
-                                                fit: BoxFit.contain,
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                  width: 32,
+                                  height: 32,
+                                  alignment: Alignment.center,
+                                  child: MouseRegion(
+                                    cursor: SystemMouseCursors.click,
+                                    child: _threeDotsIcon(),
                                   ),
                                 ),
+                                offset: Offset(_popupShiftX(context), 0),
+                                color: Colors.transparent,
+                                elevation: 0,
+                                shadowColor: Colors.transparent,
+                                enableFeedback: false,
+                                onSelected: (action) {
+                                  switch (action) {
+                                    case _DocumentCardAction.rename:
+                                      _beginRename();
+                                      break;
+                                    case _DocumentCardAction.download:
+                                      widget.onDownload();
+                                      break;
+                                    case _DocumentCardAction.delete:
+                                      widget.onDelete();
+                                      break;
+                                  }
+                                },
+                                itemBuilder: (context) =>
+                                    <PopupMenuEntry<_DocumentCardAction>>[
+                                  PopupMenuItem(
+                                    enabled: false,
+                                    padding: EdgeInsets.zero,
+                                    child: Container(
+                                      width: 197,
+                                      padding: const EdgeInsets.all(8),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFF8F9FA),
+                                        borderRadius: BorderRadius.circular(8),
+                                        boxShadow: const [
+                                          BoxShadow(
+                                            color: Color(0x80000000),
+                                            blurRadius: 2,
+                                            offset: Offset(0, 0),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          InkWell(
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            onTap: () {
+                                              Navigator.of(context).pop();
+                                              _beginRename();
+                                            },
+                                            child: Container(
+                                              height: 36,
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white,
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                boxShadow: const [
+                                                  BoxShadow(
+                                                    color: Color(0x40000000),
+                                                    blurRadius: 2,
+                                                    offset: Offset(0, 0),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment
+                                                        .spaceBetween,
+                                                children: [
+                                                  Text(
+                                                    'Rename',
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  SvgPicture.asset(
+                                                    'assets/images/rename.svg',
+                                                    width: 20,
+                                                    height: 20,
+                                                    fit: BoxFit.contain,
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 10),
+                                          InkWell(
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            onTap: () {
+                                              Navigator.of(context).pop();
+                                              widget.onDownload();
+                                            },
+                                            child: Container(
+                                              height: 36,
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white,
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                boxShadow: const [
+                                                  BoxShadow(
+                                                    color: Color(0x40000000),
+                                                    blurRadius: 2,
+                                                    offset: Offset(0, 0),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment
+                                                        .spaceBetween,
+                                                children: [
+                                                  Text(
+                                                    'Download',
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.black,
+                                                    ),
+                                                  ),
+                                                  SvgPicture.asset(
+                                                    'assets/images/Download_all.svg',
+                                                    width: 16,
+                                                    height: 16,
+                                                    fit: BoxFit.contain,
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 10),
+                                          InkWell(
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            onTap: () {
+                                              Navigator.of(context).pop();
+                                              widget.onDelete();
+                                            },
+                                            child: Container(
+                                              height: 36,
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: Colors.white,
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                boxShadow: const [
+                                                  BoxShadow(
+                                                    color: Color(0x40000000),
+                                                    blurRadius: 2,
+                                                    offset: Offset(0, 0),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment
+                                                        .spaceBetween,
+                                                children: [
+                                                  Text(
+                                                    'Delete Folder',
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: Colors.red,
+                                                    ),
+                                                  ),
+                                                  SvgPicture.asset(
+                                                    'assets/images/delete_folder.svg',
+                                                    width: 13,
+                                                    height: 16,
+                                                    fit: BoxFit.contain,
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                        ),
+                            ),
                 ),
               ),
             ],
@@ -4679,6 +4865,7 @@ class _Dot extends StatelessWidget {
 
 class FileCard extends StatefulWidget {
   final String name;
+  final String searchQuery;
   final String extension;
   final String iconPath;
   final String uploadedLabel;
@@ -4694,6 +4881,7 @@ class FileCard extends StatefulWidget {
   const FileCard({
     super.key,
     required this.name,
+    this.searchQuery = '',
     required this.extension,
     required this.iconPath,
     required this.uploadedLabel,
@@ -4908,8 +5096,9 @@ class _FileCardState extends State<FileCard> {
                                     onEditingComplete: _commitRename,
                                   ),
                                 )
-                              : Text(
-                                  widget.name,
+                              : SearchHighlightText(
+                                  text: widget.name,
+                                  query: widget.searchQuery,
                                   style: GoogleFonts.inter(
                                     fontSize: 14,
                                     fontWeight: FontWeight.normal,

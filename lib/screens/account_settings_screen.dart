@@ -85,6 +85,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
   bool _isPlotStatusPageLoading = false;
   int _errorBadgeRefreshGeneration = 0;
   int _projectDataVersion = 0;
+  int _projectsListVersion = 0;
   bool _projectDataDirty = false;
   bool _pendingDataEntryBadgeRecalc = false;
   Timer? _savingStatusReconcileTimer;
@@ -1082,17 +1083,15 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         );
       case NavigationPage.recentProjects:
         return RecentProjectsPage(
+          key: ValueKey<String>('recent_projects_$_projectsListVersion'),
           onCreateProject: () => _showCreateProjectDialog(),
-          onProjectSelected: (projectId, projectName) {
-            _openProjectFromList(projectId, projectName);
-          },
+          onProjectSelected: _openProjectFromList,
         );
       case NavigationPage.allProjects:
         return AllProjectsPage(
+          key: ValueKey<String>('all_projects_$_projectsListVersion'),
           onCreateProject: () => _showCreateProjectDialog(),
-          onProjectSelected: (projectId, projectName) {
-            _openProjectFromList(projectId, projectName);
-          },
+          onProjectSelected: _openProjectFromList,
         );
       case NavigationPage.trash:
         return const TrashPage();
@@ -1249,6 +1248,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       setState(() {
         _projectName = projectName;
         _projectId = projectId;
+        _projectsListVersion++;
         _projectAccessRole = null;
         _projectAccessRoleOptions = <String>[];
         _projectOwnerEmail = null;

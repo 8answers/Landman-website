@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:convert';
 
@@ -490,6 +491,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   bool _isGoogleSignInInProgress = false;
   bool _hasAttemptedAutoGoogleSignIn = false;
   bool _oauthCallbackResolutionTimedOut = false;
+  StreamSubscription<AuthState>? _authStateSubscription;
   static const Duration _oauthCallbackWaitTimeout = Duration(seconds: 6);
 
   Future<void> _markRecentProjectsAsStartPage() async {
@@ -595,6 +597,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
   void initState() {
     super.initState();
     _initializeAuthWrapper();
+  }
+
+  @override
+  void dispose() {
+    _authStateSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _initializeAuthWrapper() async {
@@ -831,7 +839,9 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   void _listenToAuthStateChanges() {
     // Listen for auth state changes
-    Supabase.instance.client.auth.onAuthStateChange.listen((data) async {
+    _authStateSubscription?.cancel();
+    _authStateSubscription =
+        Supabase.instance.client.auth.onAuthStateChange.listen((data) async {
       final AuthChangeEvent event = data.event;
       final Session? session = data.session;
 

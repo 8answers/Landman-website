@@ -24,6 +24,7 @@ class _AccessInviteEntry {
   final TextEditingController emailController;
   _AccessInviteStatus status;
   bool isPauseResumeLoading = false;
+  bool isSendRequestLoading = false;
 
   String get email => emailController.text.trim();
 
@@ -386,7 +387,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final TextEditingController _accessControlEmailController =
       TextEditingController();
   final FocusNode _deleteConfirmFocusNode = FocusNode();
-  bool _isAccessControlTabSelected = true;
+  bool _isAccessControlTabSelected = false;
   _AccessControlRole _selectedAccessControlRole = _AccessControlRole.admin;
   final Map<_AccessControlRole, String> _accessControlRoleEmails =
       <_AccessControlRole, String>{
@@ -416,6 +417,14 @@ class _SettingsPageState extends State<SettingsPage> {
     _AccessControlRole.projectManager: false,
     _AccessControlRole.agent: false,
   };
+  final Map<_AccessControlRole, bool> _sendRequestLoadingByRole =
+      <_AccessControlRole, bool>{
+    _AccessControlRole.admin: false,
+    _AccessControlRole.partner: false,
+    _AccessControlRole.projectManager: false,
+    _AccessControlRole.agent: false,
+  };
+  bool _isAccessControlLoading = true;
 
   bool _canEditAccessRole(_AccessControlRole role) {
     if (widget.isRestrictedViewer) return false;
@@ -971,6 +980,17 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _skeletonBlock({required double width, required double height}) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE3E7EB),
+        borderRadius: BorderRadius.circular(8),
+      ),
+    );
+  }
+
   String _accessControlRoleLabel(_AccessControlRole role) {
     switch (role) {
       case _AccessControlRole.admin:
@@ -1077,6 +1097,12 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _loadAccessControlData() async {
+    if (mounted) {
+      setState(() {
+        _isAccessControlLoading = true;
+      });
+    }
+
     final projectId = widget.projectId?.trim() ?? '';
     if (projectId.isEmpty) {
       if (!mounted) return;
@@ -1085,200 +1111,214 @@ class _SettingsPageState extends State<SettingsPage> {
         _accessControlEmailController.text =
             _accessControlRoleEmails[_selectedAccessControlRole] ?? '';
       });
+      if (mounted) {
+        setState(() {
+          _isAccessControlLoading = false;
+        });
+      }
       return;
     }
 
-    final roleEmails = <_AccessControlRole, String>{
-      _AccessControlRole.admin: '',
-      _AccessControlRole.partner: '',
-      _AccessControlRole.projectManager: '',
-      _AccessControlRole.agent: '',
-    };
-    final roleStatuses = <_AccessControlRole, _AccessInviteStatus>{
-      _AccessControlRole.admin: _AccessInviteStatus.accepted,
-      _AccessControlRole.partner: _AccessInviteStatus.none,
-      _AccessControlRole.projectManager: _AccessInviteStatus.none,
-      _AccessControlRole.agent: _AccessInviteStatus.none,
-    };
-    final roleAdditionalRows = <_AccessControlRole, List<_AccessInviteEntry>>{
-      _AccessControlRole.admin: <_AccessInviteEntry>[],
-      _AccessControlRole.partner: <_AccessInviteEntry>[],
-      _AccessControlRole.projectManager: <_AccessInviteEntry>[],
-      _AccessControlRole.agent: <_AccessInviteEntry>[],
-    };
-    final roleSeenEmails = <_AccessControlRole, Set<String>>{
-      _AccessControlRole.admin: <String>{},
-      _AccessControlRole.partner: <String>{},
-      _AccessControlRole.projectManager: <String>{},
-      _AccessControlRole.agent: <String>{},
-    };
-
-    final currentUser = Supabase.instance.client.auth.currentUser;
-    final currentUserId = currentUser?.id ?? '';
-    final currentUserEmail = currentUser?.email?.trim() ?? '';
-    final prefs = await SharedPreferences.getInstance();
-    final ownerEmailCacheKey = 'nav_project_owner_email_$projectId';
-
     try {
-      Map<String, dynamic>? projectRow;
+      final roleEmails = <_AccessControlRole, String>{
+        _AccessControlRole.admin: '',
+        _AccessControlRole.partner: '',
+        _AccessControlRole.projectManager: '',
+        _AccessControlRole.agent: '',
+      };
+      final roleStatuses = <_AccessControlRole, _AccessInviteStatus>{
+        _AccessControlRole.admin: _AccessInviteStatus.accepted,
+        _AccessControlRole.partner: _AccessInviteStatus.none,
+        _AccessControlRole.projectManager: _AccessInviteStatus.none,
+        _AccessControlRole.agent: _AccessInviteStatus.none,
+      };
+      final roleAdditionalRows = <_AccessControlRole, List<_AccessInviteEntry>>{
+        _AccessControlRole.admin: <_AccessInviteEntry>[],
+        _AccessControlRole.partner: <_AccessInviteEntry>[],
+        _AccessControlRole.projectManager: <_AccessInviteEntry>[],
+        _AccessControlRole.agent: <_AccessInviteEntry>[],
+      };
+      final roleSeenEmails = <_AccessControlRole, Set<String>>{
+        _AccessControlRole.admin: <String>{},
+        _AccessControlRole.partner: <String>{},
+        _AccessControlRole.projectManager: <String>{},
+        _AccessControlRole.agent: <String>{},
+      };
+
+      final currentUser = Supabase.instance.client.auth.currentUser;
+      final currentUserId = currentUser?.id ?? '';
+      final currentUserEmail = currentUser?.email?.trim() ?? '';
+      final prefs = await SharedPreferences.getInstance();
+      final ownerEmailCacheKey = 'nav_project_owner_email_$projectId';
+
       try {
-        projectRow = await Supabase.instance.client
-            .from('projects')
-            .select('user_id, owner_email')
-            .eq('id', projectId)
-            .maybeSingle();
-      } catch (_) {
-        projectRow = await Supabase.instance.client
-            .from('projects')
-            .select('user_id')
-            .eq('id', projectId)
-            .maybeSingle();
-      }
-      final ownerId = (projectRow?['user_id'] ?? '').toString().trim();
-      var ownerEmail = (projectRow?['owner_email'] ?? '').toString().trim();
-      if (ownerEmail.isEmpty &&
-          ownerId.isNotEmpty &&
-          ownerId == currentUserId &&
-          currentUserEmail.isNotEmpty) {
-        ownerEmail = currentUserEmail;
+        Map<String, dynamic>? projectRow;
         try {
-          await Supabase.instance.client
+          projectRow = await Supabase.instance.client
               .from('projects')
-              .update({'owner_email': ownerEmail})
+              .select('user_id, owner_email')
               .eq('id', projectId)
-              .eq('user_id', currentUserId);
+              .maybeSingle();
         } catch (_) {
-          // Ignore owner_email backfill failure.
+          projectRow = await Supabase.instance.client
+              .from('projects')
+              .select('user_id')
+              .eq('id', projectId)
+              .maybeSingle();
         }
-      }
-      roleEmails[_AccessControlRole.admin] = ownerEmail.isNotEmpty
-          ? ownerEmail
-          : (ownerId == currentUserId ? _loggedInUserEmail : '');
-      if (roleEmails[_AccessControlRole.admin]!.isNotEmpty) {
-        roleSeenEmails[_AccessControlRole.admin]!
-            .add(roleEmails[_AccessControlRole.admin]!.toLowerCase());
-        await prefs.setString(
-          ownerEmailCacheKey,
-          roleEmails[_AccessControlRole.admin]!,
-        );
-        await prefs.setString(
-          'nav_project_owner_email',
-          roleEmails[_AccessControlRole.admin]!,
-        );
-      }
-    } catch (_) {
-      roleEmails[_AccessControlRole.admin] = '';
-    }
-
-    if (roleEmails[_AccessControlRole.admin]!.isEmpty) {
-      final cachedOwnerEmail =
-          prefs.getString(ownerEmailCacheKey)?.trim() ?? '';
-      final globalOwnerEmail =
-          prefs.getString('nav_project_owner_email')?.trim() ?? '';
-      final widgetOwnerEmail = (widget.projectOwnerEmail ?? '').trim();
-      if (cachedOwnerEmail.isNotEmpty) {
-        roleEmails[_AccessControlRole.admin] = cachedOwnerEmail;
-      } else if (globalOwnerEmail.isNotEmpty) {
-        roleEmails[_AccessControlRole.admin] = globalOwnerEmail;
-      } else if (widgetOwnerEmail.isNotEmpty) {
-        roleEmails[_AccessControlRole.admin] = widgetOwnerEmail;
-      }
-    }
-
-    if (roleEmails[_AccessControlRole.admin]!.isEmpty) {
-      try {
-        final adminInvite = await Supabase.instance.client
-            .from('project_access_invites')
-            .select('invited_email')
-            .eq('project_id', projectId)
-            .eq('role', 'admin')
-            .order('requested_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-        final adminInviteEmail =
-            (adminInvite?['invited_email'] ?? '').toString().trim();
-        if (adminInviteEmail.isNotEmpty) {
-          roleEmails[_AccessControlRole.admin] = adminInviteEmail;
-          await prefs.setString(ownerEmailCacheKey, adminInviteEmail);
-          await prefs.setString('nav_project_owner_email', adminInviteEmail);
+        final ownerId = (projectRow?['user_id'] ?? '').toString().trim();
+        var ownerEmail = (projectRow?['owner_email'] ?? '').toString().trim();
+        if (ownerEmail.isEmpty &&
+            ownerId.isNotEmpty &&
+            ownerId == currentUserId &&
+            currentUserEmail.isNotEmpty) {
+          ownerEmail = currentUserEmail;
+          try {
+            await Supabase.instance.client
+                .from('projects')
+                .update({'owner_email': ownerEmail})
+                .eq('id', projectId)
+                .eq('user_id', currentUserId);
+          } catch (_) {
+            // Ignore owner_email backfill failure.
+          }
         }
-      } catch (_) {
-        // Ignore fallback lookup failure.
-      }
-    }
-
-    try {
-      final invites = await Supabase.instance.client
-          .from('project_access_invites')
-          .select('invited_email, role, status, requested_at')
-          .eq('project_id', projectId)
-          .order('requested_at', ascending: false);
-      for (final row in invites) {
-        final role = _roleFromDbValue((row['role'] ?? '').toString());
-        if (role == null) continue;
-        final email = (row['invited_email'] ?? '').toString().trim();
-        final status = _inviteStatusFromDb((row['status'] ?? '').toString());
-        final isOwnAccount = currentUserEmail.isNotEmpty &&
-            email.toLowerCase() == currentUserEmail.toLowerCase();
-        final visibleToRestrictedViewer = role == _AccessControlRole.partner &&
-            (status == _AccessInviteStatus.accepted ||
-                status == _AccessInviteStatus.paused);
-        if (widget.isRestrictedViewer &&
-            !visibleToRestrictedViewer &&
-            !isOwnAccount) {
-          continue;
-        }
-        final normalizedEmail = email.toLowerCase();
-        if (email.isNotEmpty &&
-            roleSeenEmails[role]!.contains(normalizedEmail)) {
-          continue;
-        }
-        if (email.isNotEmpty) {
-          roleSeenEmails[role]!.add(normalizedEmail);
-        }
-        if (roleEmails[role]!.isEmpty && email.isNotEmpty) {
-          roleEmails[role] = email;
-          roleStatuses[role] = status;
-          continue;
-        }
-        if (email.isNotEmpty) {
-          roleAdditionalRows[role]!.add(
-            _AccessInviteEntry(
-              email: email,
-              status: status,
-            ),
+        roleEmails[_AccessControlRole.admin] = ownerEmail.isNotEmpty
+            ? ownerEmail
+            : (ownerId == currentUserId ? _loggedInUserEmail : '');
+        if (roleEmails[_AccessControlRole.admin]!.isNotEmpty) {
+          roleSeenEmails[_AccessControlRole.admin]!
+              .add(roleEmails[_AccessControlRole.admin]!.toLowerCase());
+          await prefs.setString(
+            ownerEmailCacheKey,
+            roleEmails[_AccessControlRole.admin]!,
+          );
+          await prefs.setString(
+            'nav_project_owner_email',
+            roleEmails[_AccessControlRole.admin]!,
           );
         }
+      } catch (_) {
+        roleEmails[_AccessControlRole.admin] = '';
       }
-    } catch (_) {
-      // Invite table may not be readable for non-owner roles.
-    }
 
-    _promoteCurrentUserAccessRowsToTop(
-      currentUserEmail: currentUserEmail,
-      roleEmails: roleEmails,
-      roleStatuses: roleStatuses,
-      roleAdditionalRows: roleAdditionalRows,
-    );
+      if (roleEmails[_AccessControlRole.admin]!.isEmpty) {
+        final cachedOwnerEmail =
+            prefs.getString(ownerEmailCacheKey)?.trim() ?? '';
+        final globalOwnerEmail =
+            prefs.getString('nav_project_owner_email')?.trim() ?? '';
+        final widgetOwnerEmail = (widget.projectOwnerEmail ?? '').trim();
+        if (cachedOwnerEmail.isNotEmpty) {
+          roleEmails[_AccessControlRole.admin] = cachedOwnerEmail;
+        } else if (globalOwnerEmail.isNotEmpty) {
+          roleEmails[_AccessControlRole.admin] = globalOwnerEmail;
+        } else if (widgetOwnerEmail.isNotEmpty) {
+          roleEmails[_AccessControlRole.admin] = widgetOwnerEmail;
+        }
+      }
 
-    if (!mounted) return;
-    setState(() {
-      _accessControlRoleEmails
-        ..clear()
-        ..addAll(roleEmails);
-      _accessControlInviteStatuses
-        ..clear()
-        ..addAll(roleStatuses);
-      _disposeAdditionalAccessRows();
-      roleAdditionalRows.forEach((role, entries) {
-        _additionalAccessRows[role]!.addAll(entries);
-      });
-      _accessControlEmailController.text =
-          _accessControlRoleEmails[_selectedAccessControlRole] ?? '';
-      _accessControlEmailController.selection = TextSelection.collapsed(
-        offset: _accessControlEmailController.text.length,
+      if (roleEmails[_AccessControlRole.admin]!.isEmpty) {
+        try {
+          final adminInvite = await Supabase.instance.client
+              .from('project_access_invites')
+              .select('invited_email')
+              .eq('project_id', projectId)
+              .eq('role', 'admin')
+              .order('requested_at', ascending: false)
+              .limit(1)
+              .maybeSingle();
+          final adminInviteEmail =
+              (adminInvite?['invited_email'] ?? '').toString().trim();
+          if (adminInviteEmail.isNotEmpty) {
+            roleEmails[_AccessControlRole.admin] = adminInviteEmail;
+            await prefs.setString(ownerEmailCacheKey, adminInviteEmail);
+            await prefs.setString('nav_project_owner_email', adminInviteEmail);
+          }
+        } catch (_) {
+          // Ignore fallback lookup failure.
+        }
+      }
+
+      try {
+        final invites = await Supabase.instance.client
+            .from('project_access_invites')
+            .select('invited_email, role, status, requested_at')
+            .eq('project_id', projectId)
+            .order('requested_at', ascending: false);
+        for (final row in invites) {
+          final role = _roleFromDbValue((row['role'] ?? '').toString());
+          if (role == null) continue;
+          final email = (row['invited_email'] ?? '').toString().trim();
+          final status = _inviteStatusFromDb((row['status'] ?? '').toString());
+          final isOwnAccount = currentUserEmail.isNotEmpty &&
+              email.toLowerCase() == currentUserEmail.toLowerCase();
+          final visibleToRestrictedViewer =
+              role == _AccessControlRole.partner &&
+                  (status == _AccessInviteStatus.accepted ||
+                      status == _AccessInviteStatus.paused);
+          if (widget.isRestrictedViewer &&
+              !visibleToRestrictedViewer &&
+              !isOwnAccount) {
+            continue;
+          }
+          final normalizedEmail = email.toLowerCase();
+          if (email.isNotEmpty &&
+              roleSeenEmails[role]!.contains(normalizedEmail)) {
+            continue;
+          }
+          if (email.isNotEmpty) {
+            roleSeenEmails[role]!.add(normalizedEmail);
+          }
+          if (roleEmails[role]!.isEmpty && email.isNotEmpty) {
+            roleEmails[role] = email;
+            roleStatuses[role] = status;
+            continue;
+          }
+          if (email.isNotEmpty) {
+            roleAdditionalRows[role]!.add(
+              _AccessInviteEntry(
+                email: email,
+                status: status,
+              ),
+            );
+          }
+        }
+      } catch (_) {
+        // Invite table may not be readable for non-owner roles.
+      }
+
+      _promoteCurrentUserAccessRowsToTop(
+        currentUserEmail: currentUserEmail,
+        roleEmails: roleEmails,
+        roleStatuses: roleStatuses,
+        roleAdditionalRows: roleAdditionalRows,
       );
-    });
+
+      if (!mounted) return;
+      setState(() {
+        _accessControlRoleEmails
+          ..clear()
+          ..addAll(roleEmails);
+        _accessControlInviteStatuses
+          ..clear()
+          ..addAll(roleStatuses);
+        _disposeAdditionalAccessRows();
+        roleAdditionalRows.forEach((role, entries) {
+          _additionalAccessRows[role]!.addAll(entries);
+        });
+        _accessControlEmailController.text =
+            _accessControlRoleEmails[_selectedAccessControlRole] ?? '';
+        _accessControlEmailController.selection = TextSelection.collapsed(
+          offset: _accessControlEmailController.text.length,
+        );
+        _isAccessControlLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isAccessControlLoading = false;
+      });
+    }
   }
 
   void _selectAccessControlRole(_AccessControlRole role) {
@@ -1549,38 +1589,52 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _onSendRequestTap() async {
-    if (_isRoleReadOnly(_selectedAccessControlRole)) return;
+    final role = _selectedAccessControlRole;
+    if (_isRoleReadOnly(role)) return;
+    if (_sendRequestLoadingByRole[role] ?? false) return;
     if (!_isValidEmail(_accessControlEmailController.text)) return;
-    if (_inviteStatusForRole(_selectedAccessControlRole) !=
-        _AccessInviteStatus.none) {
+    if (_inviteStatusForRole(role) != _AccessInviteStatus.none) {
       return;
     }
     final targetEmail = _accessControlEmailController.text.trim();
     final projectId = widget.projectId?.trim() ?? '';
     if (projectId.isEmpty) return;
 
-    final inviteStored = await ProjectAccessService.createOrUpdateInvite(
-      projectId: projectId,
-      email: targetEmail,
-      role: _inviteRoleParam(_selectedAccessControlRole),
-    );
-    await _sendAccessInviteEmail(targetEmail);
-    if (!mounted) return;
-
-    if (!inviteStored) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Invite link generated, but access invite was not saved in database yet.',
-          ),
-        ),
-      );
-    }
-
     setState(() {
-      _accessControlInviteStatuses[_selectedAccessControlRole] =
-          _AccessInviteStatus.requested;
+      _sendRequestLoadingByRole[role] = true;
     });
+
+    try {
+      final inviteStored = await ProjectAccessService.createOrUpdateInvite(
+        projectId: projectId,
+        email: targetEmail,
+        role: _inviteRoleParam(role),
+      );
+      if (!inviteStored) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Access invite was not saved in database. Please check project access policies/permissions.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      await _sendAccessInviteEmail(targetEmail);
+      if (!mounted) return;
+
+      setState(() {
+        _accessControlInviteStatuses[role] = _AccessInviteStatus.requested;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _sendRequestLoadingByRole[role] = false;
+        });
+      }
+    }
   }
 
   bool _showEmailEndTick(_AccessControlRole role) {
@@ -1658,6 +1712,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _isPauseResumeLoadingForRole(_AccessControlRole role) {
     return _pauseResumeLoadingByRole[role] ?? false;
+  }
+
+  bool _isSendRequestLoadingForRole(_AccessControlRole role) {
+    return _sendRequestLoadingByRole[role] ?? false;
   }
 
   int _rolePeopleCount(_AccessControlRole role) {
@@ -1764,32 +1822,48 @@ class _SettingsPageState extends State<SettingsPage> {
     _AccessInviteEntry entry,
   ) async {
     if (_isRoleReadOnly(role)) return;
+    if (entry.isSendRequestLoading) return;
     final email = entry.email;
     if (!_isValidEmail(email)) return;
     if (entry.status != _AccessInviteStatus.none) return;
     final projectId = widget.projectId?.trim() ?? '';
     if (projectId.isEmpty) return;
 
-    final inviteStored = await ProjectAccessService.createOrUpdateInvite(
-      projectId: projectId,
-      email: email,
-      role: _inviteRoleParam(role),
-    );
-    await _sendAccessInviteEmailForRole(email, role);
-    if (!mounted) return;
-
-    if (!inviteStored) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Invite link generated, but access invite was not saved in database yet.',
-          ),
-        ),
-      );
-    }
     setState(() {
-      entry.status = _AccessInviteStatus.requested;
+      entry.isSendRequestLoading = true;
     });
+
+    try {
+      final inviteStored = await ProjectAccessService.createOrUpdateInvite(
+        projectId: projectId,
+        email: email,
+        role: _inviteRoleParam(role),
+      );
+      if (!inviteStored) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Access invite was not saved in database. Please check project access policies/permissions.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      await _sendAccessInviteEmailForRole(email, role);
+      if (!mounted) return;
+
+      setState(() {
+        entry.status = _AccessInviteStatus.requested;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          entry.isSendRequestLoading = false;
+        });
+      }
+    }
   }
 
   void _addAdditionalAccessRow(_AccessControlRole role) {
@@ -2146,19 +2220,37 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     child: Center(
                       child: MouseRegion(
-                        cursor: _isValidEmail(entry.emailController.text)
+                        cursor: (_isValidEmail(entry.emailController.text) &&
+                                !entry.isSendRequestLoading)
                             ? SystemMouseCursors.click
                             : SystemMouseCursors.basic,
                         child: GestureDetector(
-                          onTap: () {
-                            _onSendRequestTapForAdditionalRow(role, entry);
-                          },
+                          onTap: entry.isSendRequestLoading
+                              ? null
+                              : () {
+                                  _onSendRequestTapForAdditionalRow(
+                                    role,
+                                    entry,
+                                  );
+                                },
                           child: Builder(
                             builder: (context) {
                               final actionColor = _sendRequestColorForStatus(
                                 entry.status,
                                 entry.emailController.text,
                               );
+                              if (entry.isSendRequestLoading) {
+                                return SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                      actionColor,
+                                    ),
+                                  ),
+                                );
+                              }
                               return Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -2427,6 +2519,86 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildAccessControlTabContent() {
+    if (_isAccessControlLoading) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 744),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8F9FA),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 2,
+                  offset: const Offset(0, 0),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _skeletonBlock(width: 180, height: 24),
+                const SizedBox(height: 8),
+                _skeletonBlock(width: 360, height: 16),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    _skeletonBlock(width: 90, height: 32),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 90, height: 32),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 130, height: 32),
+                    const SizedBox(width: 24),
+                    _skeletonBlock(width: 80, height: 32),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.25),
+                        blurRadius: 2,
+                        offset: const Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _skeletonBlock(width: 190, height: 24),
+                      const SizedBox(height: 8),
+                      _skeletonBlock(width: 420, height: 16),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          _skeletonBlock(width: 400, height: 40),
+                          const SizedBox(width: 24),
+                          _skeletonBlock(width: 147, height: 40),
+                          const SizedBox(width: 20),
+                          _skeletonBlock(width: 88, height: 40),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      _skeletonBlock(width: 120, height: 36),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: ConstrainedBox(
@@ -2800,21 +2972,46 @@ class _SettingsPageState extends State<SettingsPage> {
                                       ),
                                       child: Center(
                                         child: MouseRegion(
-                                          cursor: _isValidEmail(
-                                            _accessControlEmailController.text,
-                                          )
+                                          cursor: (_isValidEmail(
+                                                    _accessControlEmailController
+                                                        .text,
+                                                  ) &&
+                                                  !_isSendRequestLoadingForRole(
+                                                    _selectedAccessControlRole,
+                                                  ))
                                               ? SystemMouseCursors.click
                                               : SystemMouseCursors.basic,
                                           child: GestureDetector(
-                                            onTap: () {
-                                              _onSendRequestTap();
-                                            },
+                                            onTap: _isSendRequestLoadingForRole(
+                                              _selectedAccessControlRole,
+                                            )
+                                                ? null
+                                                : () {
+                                                    _onSendRequestTap();
+                                                  },
                                             child: Builder(
                                               builder: (context) {
                                                 final actionColor =
                                                     _sendRequestColor(
                                                   _selectedAccessControlRole,
                                                 );
+                                                if (_isSendRequestLoadingForRole(
+                                                  _selectedAccessControlRole,
+                                                )) {
+                                                  return SizedBox(
+                                                    width: 16,
+                                                    height: 16,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      valueColor:
+                                                          AlwaysStoppedAnimation<
+                                                              Color>(
+                                                        actionColor,
+                                                      ),
+                                                    ),
+                                                  );
+                                                }
                                                 return Row(
                                                   mainAxisSize:
                                                       MainAxisSize.min,

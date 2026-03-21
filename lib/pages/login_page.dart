@@ -19,6 +19,7 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   int _currentImageIndex = 0;
   Timer? _rotationTimer;
+  StreamSubscription<AuthState>? _authStateSubscription;
   bool _isLoading = false;
   final List<String> _imagePaths = [
     'assets/images/Construction_amico_1.png',
@@ -135,6 +136,7 @@ class _LoginPageState extends State<LoginPage> {
     if (session != null) {
       // User is already logged in, navigate to dashboard
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         _navigateToDashboard();
       });
     }
@@ -142,7 +144,8 @@ class _LoginPageState extends State<LoginPage> {
 
   void _listenToAuthChanges() {
     // Listen for auth state changes (e.g., after OAuth redirect)
-    _supabase.auth.onAuthStateChange.listen((data) {
+    _authStateSubscription?.cancel();
+    _authStateSubscription = _supabase.auth.onAuthStateChange.listen((data) {
       final AuthChangeEvent event = data.event;
       final Session? session = data.session;
 
@@ -402,6 +405,7 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void dispose() {
     _rotationTimer?.cancel();
+    _authStateSubscription?.cancel();
     super.dispose();
   }
 
