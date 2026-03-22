@@ -21,6 +21,7 @@ class DocumentsPage extends StatefulWidget {
   final String? projectId;
   final int dataVersion;
   final bool isAgentView;
+  final bool isPartnerView;
   final Function(ProjectSaveStatusType)? onSaveStatusChanged;
 
   const DocumentsPage({
@@ -28,6 +29,7 @@ class DocumentsPage extends StatefulWidget {
     this.projectId,
     this.dataVersion = 0,
     this.isAgentView = false,
+    this.isPartnerView = false,
     this.onSaveStatusChanged,
   });
 
@@ -67,8 +69,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
   static const String _defaultLayoutsFolderName = 'Layouts';
   static const List<String> _pinnedRootFolderOrder = <String>[
     _defaultExpensesFolderName,
-    _defaultAmenityFolderName,
     _defaultLayoutsFolderName,
+    _defaultAmenityFolderName,
   ];
   static const String _agentSiteRootFolderName = 'site';
   static const String _agentAmenityRootFolderName = 'amenity area';
@@ -128,6 +130,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
   Timer? _layoutViewerAutosaveTimer;
   OverlayEntry? _layoutImageViewerOverlayEntry;
   bool _isDeletingLayoutViewerImage = false;
+
+  bool get _isDocumentActionReadOnly =>
+      widget.isAgentView || widget.isPartnerView;
 
   Widget _skeletonBlock({required double width, required double height}) {
     return Container(
@@ -262,27 +267,27 @@ class _DocumentsPageState extends State<DocumentsPage> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 24),
-                    Opacity(
-                      opacity: hasUploadedDocuments ? 1.0 : 0.5,
-                      child: IgnorePointer(
-                        ignoring: !hasUploadedDocuments,
-                        child: _SecondaryActionButton(
-                          label: 'Download All',
-                          trailing: SvgPicture.asset(
-                            'assets/images/Download_all.svg',
-                            width: 16,
-                            height: 16,
-                            colorFilter: const ColorFilter.mode(
-                              Color(0xFF0C8CE9),
-                              BlendMode.srcIn,
+                    if (!isReadOnly) ...[
+                      const SizedBox(width: 24),
+                      Opacity(
+                        opacity: hasUploadedDocuments ? 1.0 : 0.5,
+                        child: IgnorePointer(
+                          ignoring: !hasUploadedDocuments,
+                          child: _SecondaryActionButton(
+                            label: 'Download All',
+                            trailing: SvgPicture.asset(
+                              'assets/images/Download_all.svg',
+                              width: 16,
+                              height: 16,
+                              colorFilter: const ColorFilter.mode(
+                                Color(0xFF0C8CE9),
+                                BlendMode.srcIn,
+                              ),
                             ),
+                            onTap: _downloadDocuments,
                           ),
-                          onTap: _downloadDocuments,
                         ),
                       ),
-                    ),
-                    if (!isReadOnly) ...[
                       const SizedBox(width: 24),
                       Opacity(
                         opacity: hasUploadedDocuments ? 1.0 : 0.5,
@@ -325,6 +330,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                       ),
                       const SizedBox(width: 24),
                     ],
+                    if (isReadOnly) const SizedBox(width: 8),
                     Expanded(
                       child: Container(
                         height: 36,
@@ -465,14 +471,14 @@ class _DocumentsPageState extends State<DocumentsPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            widget.isAgentView
+            _isDocumentActionReadOnly
                 ? Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 8,
                       vertical: 4,
                     ),
                     child: Text(
-                      'No site/amenity documents found.',
+                      'No uploaded documents found.',
                       textAlign: TextAlign.center,
                       style: GoogleFonts.inter(
                         fontSize: 16,
@@ -750,6 +756,49 @@ class _DocumentsPageState extends State<DocumentsPage> {
                 .eq('project_id', widget.projectId!)
                 .eq('type', 'folder')
                 .eq('name', _defaultAmenityFolderName)
+                .limit(1);
+            if (retry is List && retry.isNotEmpty) {
+              docs.add(retry.first);
+            }
+          } catch (_) {
+            // ignore follow-up retry error
+          }
+        }
+      }
+
+      final hasRootLayoutsFolder = docs.any((doc) {
+        if (doc is! Map) return false;
+        final type = (doc['type'] ?? '').toString().toLowerCase();
+        final name = (doc['name'] ?? '').toString().trim().toLowerCase();
+        final parentId = doc['parent_id'];
+        final isRoot = parentId == null || parentId.toString().trim().isEmpty;
+        return type == 'folder' &&
+            name == _defaultLayoutsFolderName.toLowerCase() &&
+            isRoot;
+      });
+
+      if (!hasRootLayoutsFolder) {
+        try {
+          final inserted = await _supabase
+              .from('documents')
+              .insert({
+                'project_id': widget.projectId!,
+                'name': _defaultLayoutsFolderName,
+                'type': 'folder',
+                'parent_id': null,
+              })
+              .select()
+              .single();
+          docs.add(inserted);
+        } catch (e) {
+          debugPrint('Error ensuring default Layouts folder: $e');
+          try {
+            final retry = await _supabase
+                .from('documents')
+                .select()
+                .eq('project_id', widget.projectId!)
+                .eq('type', 'folder')
+                .eq('name', _defaultLayoutsFolderName)
                 .limit(1);
             if (retry is List && retry.isNotEmpty) {
               docs.add(retry.first);
@@ -3187,7 +3236,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
   String _resolveBreadcrumbRootLabel(List<Map<String, dynamic>> folderPath) {
     if (folderPath.isEmpty) return '';
     return _isPinnedRootFolder(folderPath.first)
-        ? 'Site images'
+        ? 'System folders'
         : 'Uploaded Documents';
   }
 
@@ -3367,7 +3416,18 @@ class _DocumentsPageState extends State<DocumentsPage> {
       final isFile = (doc['type'] ?? '').toString().toLowerCase() == 'file';
       if (!isFile) return false;
       if (widget.isAgentView && !_isDocumentVisibleToAgent(doc)) return false;
-      return true;
+
+      final rootFolderId = _rootFolderIdForDocument(doc);
+      if (rootFolderId == null || rootFolderId.isEmpty) return true;
+
+      final rootFolder = _documents.firstWhere(
+        (item) => (item['id'] ?? '').toString() == rootFolderId,
+        orElse: () => <String, dynamic>{},
+      );
+      if (rootFolder.isEmpty) return true;
+
+      // Files under pinned roots belong to Site Images, not Uploaded Documents.
+      return !_isPinnedRootFolder(rootFolder);
     });
     final showSiteImagesHeading =
         _currentFolderId == null && leadingPinnedRootFolderCount > 0;
@@ -3447,7 +3507,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
             if (!_isLoading) ...[
               _buildDocumentsActionRow(
                 documents,
-                isReadOnly: widget.isAgentView,
+                isReadOnly: _isDocumentActionReadOnly,
                 hasUploadedDocuments: hasUploadedDocuments,
               ),
               _buildDocumentsTabLine(),
@@ -3553,7 +3613,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                             breadcrumbTextStyle
                                                                 .copyWith(
                                                           color: breadcrumbRootLabel ==
-                                                                  'Site images'
+                                                                  'System folders'
                                                               ? Colors.black
                                                                   .withOpacity(
                                                                       0.5)
@@ -3788,7 +3848,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                             SizedBox(
                                               width: double.infinity,
                                               child: Text(
-                                                'Site images',
+                                                'System folders',
                                                 style: sectionHeadingStyle,
                                               ),
                                             ),
@@ -4322,7 +4382,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                               style:
                                                   breadcrumbTextStyle.copyWith(
                                                 color: breadcrumbRootLabel ==
-                                                        'Site images'
+                                                        'System folders'
                                                     ? Colors.black
                                                         .withOpacity(0.5)
                                                     : (folderPath.length == 1

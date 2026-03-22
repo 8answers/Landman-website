@@ -11,6 +11,7 @@ class _ProjectDataCacheEntry {
 
 class ProjectStorageService {
   static final SupabaseClient _supabase = Supabase.instance.client;
+  static const String _layoutDocumentsFolderName = 'Layouts';
   static final Map<String, _ProjectDataCacheEntry> _projectDataCache = {};
   static const Duration _defaultProjectDataCacheMaxAge = Duration(seconds: 45);
   static const bool _enableVerboseLogs = false;
@@ -140,6 +141,124 @@ class ProjectStorageService {
         return 'reserved';
       default:
         return 'available';
+    }
+  }
+
+  static Future<String?> _findRootDocumentsFolderIdByName(
+    String projectId,
+    String folderName,
+  ) async {
+    final existing = (await _supabase
+        .from('documents')
+        .select('id,parent_id,name,created_at')
+        .eq('project_id', projectId)
+        .eq('type', 'folder')
+        .order('created_at', ascending: true))
+        .cast<Map<String, dynamic>>();
+
+    if (existing.isEmpty) return null;
+    final wanted = folderName.trim().toLowerCase();
+
+    for (final row in existing) {
+      final parentId = row['parent_id'];
+      final isRoot = parentId == null || parentId.toString().trim().isEmpty;
+      if (!isRoot) continue;
+      final rowName = (row['name'] ?? '').toString().trim().toLowerCase();
+      if (rowName != wanted) continue;
+      final id = (row['id'] ?? '').toString().trim();
+      if (id.isNotEmpty) return id;
+    }
+
+    return null;
+  }
+
+  static Future<void> _syncLayoutDocumentsFolderName({
+    required String projectId,
+    required String layoutId,
+    required String layoutName,
+    String previousLayoutName = '',
+  }) async {
+    final normalizedLayoutId = layoutId.trim();
+    final normalizedLayoutName = layoutName.trim();
+    if (normalizedLayoutId.isEmpty || normalizedLayoutName.isEmpty) return;
+
+    try {
+      final layoutsRootId = await _findRootDocumentsFolderIdByName(
+        projectId,
+        _layoutDocumentsFolderName,
+      );
+      if (layoutsRootId == null || layoutsRootId.isEmpty) return;
+
+      final childFolders = (await _supabase
+          .from('documents')
+          .select('id,name')
+          .eq('project_id', projectId)
+          .eq('type', 'folder')
+          .eq('parent_id', layoutsRootId)
+          .order('created_at', ascending: true)
+          .limit(500))
+          .cast<Map<String, dynamic>>();
+      if (childFolders.isEmpty) return;
+
+      final candidateByCurrentName = childFolders.firstWhere(
+        (row) =>
+            (row['name'] ?? '').toString().trim().toLowerCase() ==
+                normalizedLayoutName.toLowerCase(),
+        orElse: () => <String, dynamic>{},
+      );
+      if ((candidateByCurrentName['id'] ?? '').toString().trim().isNotEmpty) {
+        // Already in sync.
+        return;
+      }
+
+      String candidateFolderId = '';
+      final normalizedPathMarker = '/layout_$normalizedLayoutId/';
+      for (final folderRow in childFolders) {
+        final folderId = (folderRow['id'] ?? '').toString().trim();
+        if (folderId.isEmpty) continue;
+
+        final files = await _supabase
+            .from('documents')
+            .select('file_url')
+            .eq('project_id', projectId)
+            .eq('type', 'file')
+            .eq('parent_id', folderId)
+            .order('created_at', ascending: false)
+            .limit(50);
+        if (files.isEmpty) continue;
+
+        var matched = false;
+        for (final fileRow in files) {
+          final fileUrl = (fileRow['file_url'] ?? '').toString();
+          if (fileUrl.contains(normalizedPathMarker)) {
+            matched = true;
+            break;
+          }
+        }
+        if (matched) {
+          candidateFolderId = folderId;
+          break;
+        }
+      }
+
+      if (candidateFolderId.isEmpty && previousLayoutName.trim().isNotEmpty) {
+        final fallbackByPreviousName = childFolders.firstWhere(
+          (row) =>
+              (row['name'] ?? '').toString().trim().toLowerCase() ==
+                  previousLayoutName.trim().toLowerCase(),
+          orElse: () => <String, dynamic>{},
+        );
+        candidateFolderId =
+            (fallbackByPreviousName['id'] ?? '').toString().trim();
+      }
+
+      if (candidateFolderId.isEmpty) return;
+
+      await _supabase
+          .from('documents')
+          .update({'name': normalizedLayoutName}).eq('id', candidateFolderId);
+    } catch (e) {
+      _log('_syncLayoutDocumentsFolderName skipped for "$layoutName": $e');
     }
   }
 
@@ -575,15 +694,12 @@ class ProjectStorageService {
 
       if (sectionErrors.isNotEmpty) {
         final summary =
-            'Partial save failure for project $projectId -> ${sectionErrors.join(' | ')}';
-        // If at least one requested section saved successfully, do not fail
-        // the whole transaction from UI perspective. This prevents false
-        // "Not saved" status when the edited section already persisted.
-        if (attemptedSectionSaves > 0 && successfulSectionSaves > 0) {
-          _log(summary);
-        } else {
-          throw Exception(summary);
-        }
+            'Project save failed for one or more sections (project=$projectId, attempted=$attemptedSectionSaves, successful=$successfulSectionSaves): ${sectionErrors.join(' | ')}';
+        // IMPORTANT:
+        // Do not swallow section failures. If any changed section fails (e.g.
+        // partners), returning success causes false "Saved" state and data can
+        // appear to vanish on reload because the failed section never persisted.
+        throw Exception(summary);
       }
 
       invalidateProjectCache(projectId);
@@ -991,10 +1107,15 @@ class ProjectStorageService {
         .eq('project_id', projectId);
 
     final existingLayoutMap = <String, String>{};
+    final existingLayoutNameById = <String, String>{};
     for (var layout in existingLayouts) {
+      final id = (layout['id'] ?? '').toString().trim();
       final name = (layout['name'] ?? '').toString().trim();
       if (name.isNotEmpty) {
-        existingLayoutMap[name] = layout['id'];
+        existingLayoutMap[name] = id;
+      }
+      if (id.isNotEmpty) {
+        existingLayoutNameById[id] = name;
       }
     }
 
@@ -1080,6 +1201,38 @@ class ProjectStorageService {
             rethrow;
           }
         }
+      }
+
+      final previousLayoutName = existingLayoutNameById[layoutId] ?? '';
+      final isLayoutRenamed = previousLayoutName.trim().isNotEmpty &&
+          previousLayoutName.trim() != layoutName;
+      if (isLayoutRenamed) {
+        try {
+          await _supabase
+              .from('layouts')
+              .update({'name': layoutName}).eq('id', layoutId);
+        } catch (e) {
+          _log(
+              '_saveLayoutsAndPlots: failed to update layout name "$previousLayoutName" -> "$layoutName": $e');
+        }
+
+        // Keep name maps consistent so renamed layouts are not accidentally
+        // treated as stale and deleted at the end of save.
+        if (existingLayoutMap[previousLayoutName] == layoutId) {
+          existingLayoutMap.remove(previousLayoutName);
+        }
+        existingLayoutMap[layoutName] = layoutId;
+        existingLayoutNameById[layoutId] = layoutName;
+
+        await _syncLayoutDocumentsFolderName(
+          projectId: projectId,
+          layoutId: layoutId,
+          layoutName: layoutName,
+          previousLayoutName: previousLayoutName,
+        );
+      } else {
+        existingLayoutMap[layoutName] = layoutId;
+        existingLayoutNameById[layoutId] = layoutName;
       }
 
       try {

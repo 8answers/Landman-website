@@ -324,6 +324,9 @@ class _LoginPageState extends State<LoginPage> {
             openInviteDashboardOnce ||
             invitedRole.isNotEmpty);
 
+    var hasValidInviteContext = hasInviteContext;
+    var inviteAccessDenied = false;
+    var isOwnerInviteContext = false;
     var resolvedInviteRole =
         invitedRole.isEmpty ? 'partner' : invitedRole.toLowerCase();
     if (hasInviteContext) {
@@ -335,33 +338,52 @@ class _LoginPageState extends State<LoginPage> {
           await ProjectAccessService.resolveCurrentUserRoleForProject(
         projectId: invitedProjectId,
       );
-      if (dbRole != null && dbRole != 'owner') {
+      if (dbRole == null) {
+        hasValidInviteContext = false;
+        inviteAccessDenied = true;
+      } else if (dbRole == 'owner') {
+        hasValidInviteContext = true;
+        isOwnerInviteContext = true;
+      } else {
         resolvedInviteRole = dbRole;
       }
     }
 
-    if (hasInviteContext) {
+    if (hasValidInviteContext) {
+      await prefs.remove('nav_access_denied_notice');
+      await prefs.setString('nav_project_id', invitedProjectId);
       await prefs.setString('nav_current_page', 'dashboard');
       await prefs.remove('nav_previous_page');
-      await prefs.setString('nav_invited_project_role', resolvedInviteRole);
       if (ownerEmail.isNotEmpty) {
         await prefs.setString('nav_project_owner_email', ownerEmail);
       }
-      await prefs.setBool('nav_has_invite_context', true);
-      await prefs.setBool('nav_open_invite_dashboard_once', true);
       await prefs.setBool('nav_force_recent_on_next_open', false);
-    } else {
-      // Preserve last visited page after non-invite login.
-      // Only initialize to Recent Projects when nav state does not exist yet.
-      final existingPage = (prefs.getString('nav_current_page') ?? '').trim();
-      if (existingPage.isEmpty) {
-        await prefs.setString('nav_current_page', 'recentProjects');
-        await prefs.remove('nav_previous_page');
+      if (isOwnerInviteContext) {
+        await prefs.remove('nav_invited_project_role');
+        await prefs.remove('nav_has_invite_context');
+        await prefs.remove('nav_open_invite_dashboard_once');
+      } else {
+        await prefs.setString('nav_invited_project_role', resolvedInviteRole);
+        await prefs.setBool('nav_has_invite_context', true);
+        await prefs.setBool('nav_open_invite_dashboard_once', true);
       }
+    } else {
+      // Non-invite login should always open Recent Projects.
+      await prefs.setString('nav_current_page', 'recentProjects');
+      await prefs.remove('nav_previous_page');
       await prefs.setBool('nav_force_recent_on_next_open', false);
+      await prefs.remove('nav_project_id');
+      await prefs.remove('nav_project_name');
+      await prefs.remove('nav_project_owner_email');
       await prefs.remove('nav_open_invite_dashboard_once');
       await prefs.remove('nav_invited_project_role');
       await prefs.remove('nav_has_invite_context');
+      if (inviteAccessDenied) {
+        await prefs.setString(
+          'nav_access_denied_notice',
+          'Access denied. Contact admin to request project access.',
+        );
+      }
     }
 
     // Navigate to account settings screen (main app screen)

@@ -404,6 +404,16 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     }
   }
 
+  bool _isProjectScopedPage(NavigationPage page) {
+    return page == NavigationPage.projectDetails ||
+        page == NavigationPage.dataEntry ||
+        page == NavigationPage.dashboard ||
+        page == NavigationPage.plotStatus ||
+        page == NavigationPage.documents ||
+        page == NavigationPage.settings ||
+        page == NavigationPage.report;
+  }
+
   void _ensureRetainedPageInitialized(NavigationPage page) {
     _initializedRetainedPages.add(_normalizePageForRetention(page));
   }
@@ -455,7 +465,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     final projectId = prefs.getString('nav_project_id');
     var projectName =
         prefs.getString('nav_project_name') ?? authInviteContext['projectName'];
-    final projectOwnerEmail = ((prefs.getString('nav_project_owner_email') ??
+    var projectOwnerEmail = ((prefs.getString('nav_project_owner_email') ??
                 authInviteContext['ownerEmail'] ??
                 params['ownerEmail'] ??
                 '')
@@ -478,7 +488,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     final effectiveProjectAccessRole = projectAccessRole.isNotEmpty
         ? projectAccessRole
         : inviteProjectRoleFromUrl;
-    final hasInviteContext = normalizedProjectId.isNotEmpty &&
+    var hasInviteContext = normalizedProjectId.isNotEmpty &&
         (hasInviteContextFlag ||
             openInviteDashboardOnce ||
             effectiveProjectAccessRole.isNotEmpty ||
@@ -505,13 +515,54 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       }
     }
 
+    var validatedProjectId = normalizedProjectId;
+    if (validatedProjectId.isNotEmpty) {
+      String? validatedRole;
+      try {
+        validatedRole =
+            await ProjectAccessService.resolveCurrentUserRoleForProject(
+          projectId: validatedProjectId,
+        );
+      } catch (_) {
+        validatedRole = null;
+      }
+
+      final normalizedValidatedRole =
+          (validatedRole ?? '').trim().toLowerCase();
+      if (normalizedValidatedRole.isEmpty) {
+        validatedProjectId = '';
+        projectName = null;
+        projectOwnerEmail = '';
+        hasInviteContext = false;
+        resolvedInviteRole = '';
+        await prefs.remove('nav_project_id');
+        await prefs.remove('nav_project_name');
+        await prefs.remove('nav_project_owner_email');
+        await prefs.remove('nav_invited_project_role');
+        await prefs.remove('nav_has_invite_context');
+        await prefs.remove('nav_open_invite_dashboard_once');
+      } else if (normalizedValidatedRole == 'owner') {
+        hasInviteContext = false;
+        resolvedInviteRole = '';
+        await prefs.remove('nav_invited_project_role');
+        await prefs.remove('nav_has_invite_context');
+      } else {
+        hasInviteContext = true;
+        resolvedInviteRole = normalizedValidatedRole;
+        await prefs.setString(
+            'nav_invited_project_role', normalizedValidatedRole);
+        await prefs.setBool('nav_has_invite_context', true);
+      }
+      await prefs.remove('nav_access_denied_notice');
+    }
+
     final hasMissingProjectName =
         (projectName == null || projectName.trim().isEmpty) &&
-            normalizedProjectId.isNotEmpty;
+            validatedProjectId.isNotEmpty;
     if (hasMissingProjectName) {
       try {
         final projectData = await ProjectStorageService.fetchProjectDataById(
-            normalizedProjectId);
+            validatedProjectId);
         final resolvedProjectName =
             (projectData?['projectName'] ?? projectData?['project_name'] ?? '')
                 .toString()
@@ -532,6 +583,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         (!isReload && !hasPersistedCurrentPage);
 
     if (hasInviteContext &&
+        validatedProjectId.isNotEmpty &&
         (openInviteDashboardOnce ||
             shouldForceRecent ||
             pageName == null ||
@@ -543,7 +595,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         await prefs.setBool('nav_has_invite_context', true);
       }
       if (normalizedProjectIdFromPrefs.isEmpty) {
-        await prefs.setString('nav_project_id', normalizedProjectId);
+        await prefs.setString('nav_project_id', validatedProjectId);
       }
       if (resolvedInviteRole.isNotEmpty &&
           effectiveProjectAccessRole != resolvedInviteRole) {
@@ -556,7 +608,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       setState(() {
         _currentPage = NavigationPage.dashboard;
         _previousPage = null;
-        _projectId = normalizedProjectId;
+        _projectId = validatedProjectId;
         _projectName = projectName;
         _projectAccessRole = resolvedInviteRole;
         _projectAccessRoleOptions = <String>[];
@@ -567,11 +619,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       _initializeHistory(NavigationPage.dashboard);
       unawaited(
         _refreshProjectRoleOptions(
-          projectId: normalizedProjectId,
+          projectId: validatedProjectId,
           selectedRole: resolvedInviteRole,
         ),
       );
       _refreshErrorBadgesFromStoredData();
+      unawaited(_showPendingAccessDeniedNotice());
       return;
     }
 
@@ -584,7 +637,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       setState(() {
         _currentPage = NavigationPage.recentProjects;
         _previousPage = null;
-        _projectId = normalizedProjectId.isEmpty ? null : normalizedProjectId;
+        _projectId = validatedProjectId.isEmpty ? null : validatedProjectId;
         _projectName = projectName;
         _projectAccessRole = hasInviteContext ? resolvedInviteRole : null;
         _projectAccessRoleOptions = <String>[];
@@ -596,12 +649,13 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       if (hasInviteContext) {
         unawaited(
           _refreshProjectRoleOptions(
-            projectId: normalizedProjectId,
+            projectId: validatedProjectId,
             selectedRole: resolvedInviteRole,
           ),
         );
       }
       _refreshErrorBadgesFromStoredData();
+      unawaited(_showPendingAccessDeniedNotice());
       return;
     }
 
@@ -619,21 +673,29 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       final isInviteRestrictedForRestore = hasInviteContext &&
           (resolvedInviteRole == 'agent' ||
               _isRestrictedInviteRole(resolvedInviteRole));
-      final normalizedPage = (isInviteRestrictedForRestore &&
+      var normalizedPage = (isInviteRestrictedForRestore &&
               !_isPageAllowedForInviteRole(
                 page,
                 roleOverride: resolvedInviteRole,
               ))
           ? NavigationPage.dashboard
           : page;
+      if (_isProjectScopedPage(normalizedPage) && validatedProjectId.isEmpty) {
+        normalizedPage = NavigationPage.recentProjects;
+      }
 
       // Don't restore logout
       if (normalizedPage != NavigationPage.logout) {
         _ensureRetainedPageInitialized(normalizedPage);
+        final normalizedPrevPage = (prevPage != null &&
+                _isProjectScopedPage(prevPage) &&
+                validatedProjectId.isEmpty)
+            ? null
+            : prevPage;
         setState(() {
           _currentPage = normalizedPage;
-          _previousPage = prevPage;
-          _projectId = normalizedProjectId.isEmpty ? null : normalizedProjectId;
+          _previousPage = normalizedPrevPage;
+          _projectId = validatedProjectId.isEmpty ? null : validatedProjectId;
           _projectName = projectName;
           _projectAccessRole = hasInviteContext ? resolvedInviteRole : null;
           _projectAccessRoleOptions = <String>[];
@@ -645,12 +707,13 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         if (hasInviteContext) {
           unawaited(
             _refreshProjectRoleOptions(
-              projectId: normalizedProjectId,
+              projectId: validatedProjectId,
               selectedRole: resolvedInviteRole,
             ),
           );
         }
         _refreshErrorBadgesFromStoredData();
+        unawaited(_showPendingAccessDeniedNotice());
         return;
       }
     }
@@ -659,7 +722,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     setState(() {
       _currentPage = NavigationPage.recentProjects;
       _previousPage = null;
-      _projectId = normalizedProjectId.isEmpty ? null : normalizedProjectId;
+      _projectId = validatedProjectId.isEmpty ? null : validatedProjectId;
       _projectName = projectName;
       _projectAccessRole = hasInviteContext ? resolvedInviteRole : null;
       _projectAccessRoleOptions = <String>[];
@@ -670,12 +733,13 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     if (hasInviteContext) {
       unawaited(
         _refreshProjectRoleOptions(
-          projectId: normalizedProjectId,
+          projectId: validatedProjectId,
           selectedRole: resolvedInviteRole,
         ),
       );
     }
     _refreshErrorBadgesFromStoredData();
+    unawaited(_showPendingAccessDeniedNotice());
   }
 
   Future<void> _persistNavState() async {
@@ -723,6 +787,25 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     await prefs.remove('nav_invited_project_role');
     await prefs.remove('nav_has_invite_context');
     await prefs.remove('nav_open_invite_dashboard_once');
+  }
+
+  Future<void> _showPendingAccessDeniedNotice() async {
+    final prefs = await SharedPreferences.getInstance();
+    final message = (prefs.getString('nav_access_denied_notice') ?? '').trim();
+    if (message.isEmpty) return;
+    await prefs.remove('nav_access_denied_notice');
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.red,
+        ),
+      );
+    });
   }
 
   bool _isMissingNumeric(dynamic value) {
@@ -1090,12 +1173,14 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         return RecentProjectsPage(
           key: ValueKey<String>('recent_projects_$_projectsListVersion'),
           onCreateProject: () => _showCreateProjectDialog(),
+          onProjectsMutated: _handleProjectsListMutation,
           onProjectSelected: _openProjectFromList,
         );
       case NavigationPage.allProjects:
         return AllProjectsPage(
           key: ValueKey<String>('all_projects_$_projectsListVersion'),
           onCreateProject: () => _showCreateProjectDialog(),
+          onProjectsMutated: _handleProjectsListMutation,
           onProjectSelected: _openProjectFromList,
         );
       case NavigationPage.trash:
@@ -1190,6 +1275,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
           projectId: _projectId,
           dataVersion: _projectDataVersion,
           isAgentView: _isAgentInviteRole,
+          isPartnerView: _isPartnerRestricted,
           onSaveStatusChanged: (status) => _handleSaveStatusChangedFromPage(
               NavigationPage.documents, status),
         );
@@ -1198,6 +1284,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
           projectId: _projectId,
           projectName: _projectName,
           projectOwnerEmail: _projectOwnerEmail,
+          viewerRole: _projectAccessRole,
           isRestrictedViewer: _isPartnerRestricted,
           isAccessControlReadOnly: _isProjectManagerInviteRole,
           allowAgentSectionEditing: _isProjectManagerInviteRole,
@@ -1233,6 +1320,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     }
     _ensureRetainedPageInitialized(NavigationPage.allProjects);
     setState(() {
+      _projectsListVersion++;
       _projectName = null;
       _projectId = null;
       _projectAccessRole = null;
@@ -1242,6 +1330,13 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
       _previousPage = null;
     });
     _persistNavState();
+  }
+
+  void _handleProjectsListMutation() {
+    if (!mounted) return;
+    setState(() {
+      _projectsListVersion++;
+    });
   }
 
   void _showCreateProjectDialog() async {

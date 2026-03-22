@@ -12,12 +12,14 @@ import '../services/project_access_service.dart';
 
 class AllProjectsPage extends StatefulWidget {
   final VoidCallback? onCreateProject;
+  final VoidCallback? onProjectsMutated;
   final Future<void> Function(String projectId, String projectName)?
       onProjectSelected;
 
   const AllProjectsPage({
     super.key,
     this.onCreateProject,
+    this.onProjectsMutated,
     this.onProjectSelected,
   });
 
@@ -367,15 +369,25 @@ class _AllProjectsPageState extends State<AllProjectsPage> {
 
   Future<void> _deleteProject(String projectId) async {
     try {
-      await _supabase.from('projects').delete().eq('id', projectId);
+      final deleteResult =
+          await ProjectAccessService.deleteProjectForCurrentUser(
+        projectId: projectId,
+      );
       final userId = _supabase.auth.currentUser?.id;
       if (userId != null && userId.isNotEmpty) {
         ProjectsListCacheService.invalidateUser(userId);
       }
       await _loadProjects(forceRefresh: true);
+      widget.onProjectsMutated?.call();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Project deleted')),
+        SnackBar(
+          content: Text(
+            deleteResult.deletedForEveryone
+                ? 'Project deleted'
+                : 'Project removed from your list',
+          ),
+        ),
       );
     } catch (e) {
       if (!mounted) return;

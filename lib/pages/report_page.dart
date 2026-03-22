@@ -2972,25 +2972,32 @@ class _ReportPageState extends State<ReportPage> {
     );
   }
 
-  double _estimateExpenseBreakdownBlockHeightReport(int rowCount) {
-    return 52.0 + (rowCount * 20.0);
+  double _estimateExpenseBreakdownBlockHeightReport(
+    int rowCount, {
+    required bool showBullet,
+  }) {
+    // Block = optional bullet label + two-column table + outer bottom gap.
+    // Keep this close to rendered sizes so page breaks happen only when needed.
+    const baseTableHeight = 42.0; // header + total + borders/chrome
+    const rowHeight = 20.0;
+    const blockBottomGap = 6.0;
+    final bulletHeight = showBullet ? 18.0 : 0.0;
+    return bulletHeight + baseTableHeight + (rowCount * rowHeight) + blockBottomGap;
   }
 
   List<Map<String, dynamic>> _buildExpenseBreakdownBlocksReport(
     Map<String, List<Map<String, dynamic>>> grouped,
   ) {
-    const rowsPerBlock = 4;
     final blocks = <Map<String, dynamic>>[];
     for (final category in grouped.keys) {
       final rows = grouped[category] ?? const <Map<String, dynamic>>[];
-      for (int i = 0; i < rows.length; i += rowsPerBlock) {
-        final end = math.min(i + rowsPerBlock, rows.length);
-        blocks.add({
-          'category': category,
-          'rows': rows.sublist(i, end),
-          'showBullet': i == 0,
-        });
-      }
+      if (rows.isEmpty) continue;
+      // Keep each category table as one block by default.
+      blocks.add({
+        'category': category,
+        'rows': rows,
+        'showBullet': true,
+      });
     }
     return blocks;
   }
@@ -3268,19 +3275,76 @@ class _ReportPageState extends State<ReportPage> {
     final pagesBlocks = <List<Map<String, dynamic>>>[];
     var current = <Map<String, dynamic>>[];
     var remaining = firstPageCapacity;
-    var isFirstPage = true;
 
     for (final block in breakdownBlocks) {
-      final rows = block['rows'] as List<Map<String, dynamic>>;
-      final cost = _estimateExpenseBreakdownBlockHeightReport(rows.length);
-      if (current.isNotEmpty && cost > remaining) {
-        pagesBlocks.add(current);
-        current = <Map<String, dynamic>>[];
-        isFirstPage = false;
-        remaining = nextPageCapacity;
+      final category = (block['category'] ?? '').toString();
+      final rows = (block['rows'] as List<Map<String, dynamic>>?) ??
+          const <Map<String, dynamic>>[];
+      if (rows.isEmpty) continue;
+
+      int rowStart = 0;
+      bool isFirstChunkForCategory = true;
+
+      while (rowStart < rows.length) {
+        final rowsRemaining = rows.length - rowStart;
+        final fullChunkCost = _estimateExpenseBreakdownBlockHeightReport(
+          rowsRemaining,
+          showBullet: isFirstChunkForCategory,
+        );
+
+        // Rule: if the whole table chunk can't fit in current page and there
+        // is already content, move it to next page instead of splitting here.
+        if (current.isNotEmpty && fullChunkCost > remaining) {
+          pagesBlocks.add(current);
+          current = <Map<String, dynamic>>[];
+          remaining = nextPageCapacity;
+          continue;
+        }
+
+        // Whole remaining chunk fits: place it and move to next category.
+        if (fullChunkCost <= remaining) {
+          current.add({
+            'category': category,
+            'rows': rows.sublist(rowStart, rows.length),
+            'showBullet': isFirstChunkForCategory,
+          });
+          remaining -= fullChunkCost;
+          rowStart = rows.length;
+          break;
+        }
+
+        // At this point, page is empty but the full table still cannot fit.
+        // Split only as a fallback for very large single-category tables.
+        int rowsToTake = rowsRemaining;
+        while (rowsToTake > 1 &&
+            _estimateExpenseBreakdownBlockHeightReport(
+                  rowsToTake,
+                  showBullet: isFirstChunkForCategory,
+                ) >
+                remaining) {
+          rowsToTake--;
+        }
+        rowsToTake = math.max(1, rowsToTake);
+        final chunkEnd = rowStart + rowsToTake;
+
+        current.add({
+          'category': category,
+          'rows': rows.sublist(rowStart, chunkEnd),
+          'showBullet': isFirstChunkForCategory,
+        });
+        remaining -= _estimateExpenseBreakdownBlockHeightReport(
+          rowsToTake,
+          showBullet: isFirstChunkForCategory,
+        );
+        rowStart = chunkEnd;
+        isFirstChunkForCategory = false;
+
+        if (rowStart < rows.length) {
+          pagesBlocks.add(current);
+          current = <Map<String, dynamic>>[];
+          remaining = nextPageCapacity;
+        }
       }
-      current.add(block);
-      remaining -= cost;
     }
     if (current.isNotEmpty) {
       pagesBlocks.add(current);
@@ -3431,7 +3495,10 @@ class _ReportPageState extends State<ReportPage> {
                             fontSize: 10, color: const Color(0xFF404040))),
                     const SizedBox(width: 6),
                     _buildFormulaFractionReport(
-                        'Total Expenses', 'Approved Selling Area'),
+                      'Total Expenses',
+                      'Saleable Plot area',
+                      width: 124,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -6644,9 +6711,10 @@ class _ReportPageState extends State<ReportPage> {
 
     int _estimateWrapLinesForPlotCount(int count) {
       if (count <= 0) return 1;
-      // Balanced estimate to avoid unnecessary row pushes while still
-      // protecting against overflow.
-      const chipsPerLine = 8;
+      // Match actual wrap behavior more closely to avoid early page breaks.
+      // The rendered chips usually fit more items per line than this paginator
+      // previously assumed.
+      const chipsPerLine = 11;
       return math.max(1, (count / chipsPerLine).ceil());
     }
 
@@ -6665,16 +6733,18 @@ class _ReportPageState extends State<ReportPage> {
       }
 
       // 3.2 partner distribution row cost only (3.1 table stays on first page).
-      // Keep moderately conservative: only move rows that are likely to overflow.
-      return 1.15 + (layoutGroups * 0.50) + (wrapLines * 0.75);
+      // Keep mildly conservative, but do not push rows too early.
+      return 0.95 + (layoutGroups * 0.35) + (wrapLines * 0.48);
     }
 
     final chunks = <Map<String, int>>[];
     const firstPageCapacity = 18.0;
     const nextPageCapacity = 26.0;
-    final firstPageBaseCost = 6.8 + (partners.length * 0.85);
-    const nextPageBaseCost = 4.2;
-    const totalsRowCost = 1.5;
+    // Calibrated against rendered section heights to prevent premature
+    // continuation-page moves.
+    final firstPageBaseCost = 5.9 + (partners.length * 0.62);
+    const nextPageBaseCost = 3.6;
+    const totalsRowCost = 1.2;
     var start = 0;
     var remaining = firstPageCapacity - firstPageBaseCost;
     var isFirstPage = true;

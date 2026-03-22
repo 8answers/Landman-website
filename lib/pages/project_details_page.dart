@@ -349,9 +349,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   }
 
   List<Map<String, String>> _nonSellableAreas = [];
-  List<Map<String, String>> _amenityAreas = [
-    {'id': '', 'name': 'Amenity Area 1', 'area': '0.00', 'allInCost': '0.00'},
-  ];
+  List<Map<String, String>> _amenityAreas = [];
 
   // Controllers for non-sellable area names
   final Map<int, TextEditingController> _nonSellableNameControllers = {};
@@ -500,8 +498,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   final Map<int, GlobalKey> _layoutMenuAnchorKeys = {};
   final Set<String> _siteControlFlashKeys = <String>{};
   final Map<String, Timer> _siteControlFlashTimers = <String, Timer>{};
-  static const String _globalDataEntryTabPrefKey =
-      'nav_data_entry_active_tab';
+  final Set<String> _sitePressedZoomKeys = <String>{};
+  static const String _globalDataEntryTabPrefKey = 'nav_data_entry_active_tab';
 
   void _setStateSafe(VoidCallback fn) {
     if (mounted) {
@@ -550,9 +548,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
         _projectDataEntryTabPrefKey(widget.projectId),
       );
       final globalValue = prefs.getString(_globalDataEntryTabPrefKey);
-      final restoredTab =
-          _parseProjectTabName(projectScopedValue) ??
-              _parseProjectTabName(globalValue);
+      final restoredTab = _parseProjectTabName(projectScopedValue) ??
+          _parseProjectTabName(globalValue);
       if (restoredTab == null || !mounted) return;
       if (_activeTab != restoredTab) {
         setState(() {
@@ -853,6 +850,17 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   void _handleSiteControlTap(String key, VoidCallback action) {
     action();
     _flashSiteControl(key);
+  }
+
+  void _setSiteZoomPressed(String key, bool pressed) {
+    if (!mounted) return;
+    setState(() {
+      if (pressed) {
+        _sitePressedZoomKeys.add(key);
+      } else {
+        _sitePressedZoomKeys.remove(key);
+      }
+    });
   }
 
   void _handleMainScroll() {
@@ -1199,6 +1207,22 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     return decimalPart.isEmpty
         ? '${isNegative ? '-' : ''}$formattedInteger'
         : '${isNegative ? '-' : ''}$formattedInteger.$decimalPart';
+  }
+
+  // Helper for values that must always keep fixed decimal places (e.g. 0.00).
+  String _formatAmountForDisplayFixed(double amount, {int decimalPlaces = 2}) {
+    final isNegative = amount < 0;
+    final absAmount = amount.abs();
+    final fixed = absAmount.toStringAsFixed(decimalPlaces);
+    final parts = fixed.split('.');
+    final formattedInteger = _formatIntegerWithIndianNumbering(parts[0]);
+    final decimalPart = parts.length > 1 ? parts[1] : '';
+
+    if (decimalPlaces <= 0) {
+      return '${isNegative ? '-' : ''}$formattedInteger';
+    }
+
+    return '${isNegative ? '-' : ''}$formattedInteger.$decimalPart';
   }
 
   // Helper function to format area value, hiding decimals if they're all zeros
@@ -2674,17 +2698,10 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
         prefs.getBool('project_${widget.projectId}_non_sellable_area_expanded');
     _hasLoadedDataOnce =
         persistedFlag || _projectsLoadedThisSession.contains(widget.projectId);
-    if (!_hasLoadedDataOnce) {
-      _isAmenityAreaExpanded = persistedAmenityExpanded ?? true;
-      _isNonSellableAreaExpanded = persistedNonSellableExpanded ?? true;
-    } else {
-      if (persistedAmenityExpanded != null) {
-        _isAmenityAreaExpanded = persistedAmenityExpanded;
-      }
-      if (persistedNonSellableExpanded != null) {
-        _isNonSellableAreaExpanded = persistedNonSellableExpanded;
-      }
-    }
+    // Always restore to the user's last expansion state.
+    // If nothing is stored yet, default both sections to expanded.
+    _isAmenityAreaExpanded = persistedAmenityExpanded ?? true;
+    _isNonSellableAreaExpanded = persistedNonSellableExpanded ?? true;
     print(
         '_loadProjectData: Loaded _hasLoadedDataOnce=$_hasLoadedDataOnce, hideDefaultNonSellable=$hideDefaultNonSellable, hideDefaultAmenity=$hideDefaultAmenity from local storage');
 
@@ -2821,8 +2838,16 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
             };
           }).toList();
         } else {
-          // Start with empty list - user can add areas as needed
-          _nonSellableAreas = [];
+          // Show starter row unless user explicitly removed this section's
+          // default template row.
+          _nonSellableAreas = (!hideDefaultNonSellable)
+              ? [
+                  {
+                    'name': '',
+                    'area': '0.00',
+                  }
+                ]
+              : [];
         }
 
         if (amenityAreas.isNotEmpty) {
@@ -2847,16 +2872,18 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
             };
           }).toList();
         } else {
-          _amenityAreas = hideDefaultAmenity
-              ? []
-              : [
+          // Show starter row unless user explicitly removed this section's
+          // default template row.
+          _amenityAreas = (!hideDefaultAmenity)
+              ? [
                   {
                     'id': '',
                     'name': 'Amenity Area 1',
                     'area': '0.00',
-                    'allInCost': '0.00'
+                    'allInCost': '0.00',
                   }
-                ];
+                ]
+              : [];
         }
 
         // Create new controllers
@@ -3866,19 +3893,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       print('  - Layouts: ${_layouts.length}');
       print('  - Project managers: ${_projectManagers.length}');
       print('  - Agents: ${_agents.length}');
-
-      // Show default empty non-sellable area whenever no areas exist,
-      // unless user explicitly removed it (hideDefaultNonSellable == true).
-      if (_nonSellableAreas.isEmpty && !hideDefaultNonSellable) {
-        setState(() {
-          _nonSellableAreas = [
-            {'name': '', 'area': ''}
-          ];
-          _nonSellableNameControllers[0] = TextEditingController();
-          _nonSellableAreaControllers[0] = TextEditingController();
-          print('No non-sellable areas found - added default empty template');
-        });
-      }
 
       // Mark that we've loaded data once and persist to local storage
       _hasLoadedDataOnce = true;
@@ -7210,8 +7224,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   void _zoomLayoutImageViewerByStep(double step) {
     final matrix = _layoutImageViewerController.value.clone();
     final currentScale = matrix.getMaxScaleOnAxis();
-    final targetScale = (currentScale + step).clamp(0.5, 4.0);
+    final targetScale = (currentScale + step).clamp(1.0, 4.0);
     if ((targetScale - currentScale).abs() < 0.0001) {
+      return;
+    }
+    // Keep original size as the minimum zoom and re-center when returning to it.
+    if (targetScale <= 1.0001) {
+      _resetLayoutImageViewerTransform();
       return;
     }
     final scaleFactor = targetScale / currentScale;
@@ -7393,7 +7412,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     const double thicknessIconExtraWidth = 8;
     const double baseBottomActionIconGap = 35;
     const double baseBottomActionTopGap = 24;
-    const int toolCount = 8;
+    const int toolCount = 9;
 
     return Positioned.fill(
       child: Stack(
@@ -7541,12 +7560,20 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                       child: InteractiveViewer(
                                         transformationController:
                                             _layoutImageViewerController,
-                                        minScale: 0.5,
+                                        minScale: 1.0,
                                         maxScale: 4.0,
                                         panEnabled: !_isLayoutPenModeActive &&
                                             !_isLayoutEraserModeActive,
                                         scaleEnabled: !_isLayoutPenModeActive &&
                                             !_isLayoutEraserModeActive,
+                                        onInteractionEnd: (_) {
+                                          final scale =
+                                              _layoutImageViewerController.value
+                                                  .getMaxScaleOnAxis();
+                                          if (scale <= 1.0001) {
+                                            _resetLayoutImageViewerTransform();
+                                          }
+                                        },
                                         clipBehavior: Clip.hardEdge,
                                         child: SizedBox(
                                           width: imageBoxWidth,
@@ -7868,6 +7895,17 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                       onTap: () {
                                         _closeLayoutToolPickers();
                                         _zoomLayoutImageViewerByStep(-0.1);
+                                      },
+                                      width: optionWidth,
+                                      height: optionHeight,
+                                    ),
+                                    SizedBox(height: optionGap),
+                                    _buildLayoutImageViewerToolButton(
+                                      iconAssetPath:
+                                          'assets/images/Reset_view.svg',
+                                      onTap: () {
+                                        _closeLayoutToolPickers();
+                                        _resetLayoutImageViewerTransform();
                                       },
                                       width: optionWidth,
                                       height: optionHeight,
@@ -10410,6 +10448,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     }
     _siteControlFlashTimers.clear();
     _siteControlFlashKeys.clear();
+    _sitePressedZoomKeys.clear();
     _projectNameController.dispose();
     _projectAddressController.dispose();
     _googleMapsLinkController.dispose();
@@ -12142,8 +12181,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                           const SizedBox(width: 36),
                           // Amenity Area tab
                           GestureDetector(
-                            onTap: () =>
-                                _setActiveTab(ProjectTab.amenityArea),
+                            onTap: () => _setActiveTab(ProjectTab.amenityArea),
                             child: Stack(
                               clipBehavior: Clip.none,
                               alignment: Alignment.topCenter,
@@ -13266,6 +13304,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                                                       _nonSellableNameFocusNodes[newIndex] = FocusNode();
                                                                                       _nonSellableAreaFocusNodes[newIndex] = FocusNode();
                                                                                     });
+                                                                                    unawaited(_setHideDefaultNonSellableTemplate(false));
                                                                                     _onDataChanged();
                                                                                   },
                                                                                   child: Container(
@@ -13348,7 +13387,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                             : _buildExpensesContent())
                                                         : _activeTab ==
                                                                 ProjectTab.site
-                                                            ? (_isLoadingData
+                                                            ? ((_isLoadingData ||
+                                                                    _isSiteLayoutsDataLoading)
                                                                 ? _buildSiteLoadingSkeleton()
                                                                 : _buildSiteContent())
                                                             : _activeTab ==
@@ -13378,6 +13418,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                             if (_showStickySiteLayoutsToolbar &&
                                 _activeTab == ProjectTab.site &&
                                 !_isLoadingData &&
+                                !_isSiteLayoutsDataLoading &&
                                 _layouts.isNotEmpty)
                               Positioned(
                                 top: 0,
@@ -13939,15 +13980,15 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     ),
                     WidgetSpan(
                       alignment: PlaceholderAlignment.middle,
-                                      child: GestureDetector(
-                                        onTap: () {
-                                          setState(() {
-                                            _isAmenityAreaExpanded = true;
-                                          });
-                                          _setActiveTab(ProjectTab.about);
-                                          unawaited(
-                                            _persistAreaSectionExpansionState(
-                                              amenityExpanded: true,
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _isAmenityAreaExpanded = true;
+                          });
+                          _setActiveTab(ProjectTab.about);
+                          unawaited(
+                            _persistAreaSectionExpansionState(
+                              amenityExpanded: true,
                             ),
                           );
                         },
@@ -13998,7 +14039,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     const TextSpan(text: 'Total Plot Cost: '),
                     TextSpan(
                       text:
-                          '₹ ${_formatAmountForDisplay(_truncateToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
+                          '₹ ${_formatAmountForDisplayFixed(_truncateToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.w400,
@@ -14129,37 +14170,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                GestureDetector(
+                _buildPressedZoomControlButton(
+                  pressKey: 'amenity_zoom_out',
+                  iconPath: 'assets/images/Zoom_out.svg',
                   onTap: () {
                     setState(() {
                       _changeTableZoomByStep(-1);
                     });
                   },
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.25),
-                          blurRadius: 2,
-                          offset: const Offset(0, 0),
-                        ),
-                      ],
-                    ),
-                    child: SvgPicture.asset(
-                      'assets/images/Zoom_out.svg',
-                      width: 36,
-                      height: 36,
-                      fit: BoxFit.contain,
-                      placeholderBuilder: (context) => const SizedBox(
-                        width: 36,
-                        height: 36,
-                      ),
-                    ),
-                  ),
                 ),
                 const SizedBox(width: 8),
                 SizedBox(
@@ -14176,37 +14194,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                GestureDetector(
+                _buildPressedZoomControlButton(
+                  pressKey: 'amenity_zoom_in',
+                  iconPath: 'assets/images/Zoom_in.svg',
                   onTap: () {
                     setState(() {
                       _changeTableZoomByStep(1);
                     });
                   },
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.25),
-                          blurRadius: 2,
-                          offset: const Offset(0, 0),
-                        ),
-                      ],
-                    ),
-                    child: SvgPicture.asset(
-                      'assets/images/Zoom_in.svg',
-                      width: 36,
-                      height: 36,
-                      fit: BoxFit.contain,
-                      placeholderBuilder: (context) => const SizedBox(
-                        width: 36,
-                        height: 36,
-                      ),
-                    ),
-                  ),
                 ),
               ],
             ),
@@ -18465,7 +18460,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                     ),
                                     TextSpan(
                                       text:
-                                          '₹ ${_formatAmountForDisplay(_truncateToDecimals(_totalPlotCost, 2), decimalPlaces: 2)}',
+                                          '₹ ${_formatAmountForDisplayFixed(_truncateToDecimals(_totalPlotCost, 2), decimalPlaces: 2)}',
                                       style: GoogleFonts.inter(
                                         fontSize: 14,
                                         fontWeight: FontWeight.w400,
@@ -18634,6 +18629,46 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     );
   }
 
+  Widget _buildPressedZoomControlButton({
+    required String pressKey,
+    required String iconPath,
+    required VoidCallback onTap,
+  }) {
+    final isPressed = _sitePressedZoomKeys.contains(pressKey);
+    return GestureDetector(
+      onTapDown: (_) => _setSiteZoomPressed(pressKey, true),
+      onTapUp: (_) => _setSiteZoomPressed(pressKey, false),
+      onTapCancel: () => _setSiteZoomPressed(pressKey, false),
+      onTap: onTap,
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: isPressed ? const Color(0xFFEDEDED) : Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 2,
+              offset: const Offset(0, 0),
+              spreadRadius: 0,
+            ),
+          ],
+        ),
+        child: SvgPicture.asset(
+          iconPath,
+          width: 36,
+          height: 36,
+          fit: BoxFit.contain,
+          placeholderBuilder: (context) => const SizedBox(
+            width: 36,
+            height: 36,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSiteLayoutsToolbarRow() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -18776,38 +18811,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
               ),
             ),
             const SizedBox(width: 8),
-            GestureDetector(
+            _buildPressedZoomControlButton(
+              pressKey: 'site_zoom_out',
+              iconPath: 'assets/images/Zoom_out.svg',
               onTap: () => _handleSiteControlTap('site_zoom_out', () {
                 setState(() {
                   _changeTableZoomByStep(-1);
                 });
               }),
-              child: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: _siteControlBackground('site_zoom_out'),
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.25),
-                      blurRadius: 2,
-                      offset: const Offset(0, 0),
-                      spreadRadius: 0,
-                    ),
-                  ],
-                ),
-                child: SvgPicture.asset(
-                  'assets/images/Zoom_out.svg',
-                  width: 36,
-                  height: 36,
-                  fit: BoxFit.contain,
-                  placeholderBuilder: (context) => const SizedBox(
-                    width: 36,
-                    height: 36,
-                  ),
-                ),
-              ),
             ),
             const SizedBox(width: 8),
             SizedBox(
@@ -18824,38 +18835,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
               ),
             ),
             const SizedBox(width: 8),
-            GestureDetector(
+            _buildPressedZoomControlButton(
+              pressKey: 'site_zoom_in',
+              iconPath: 'assets/images/Zoom_in.svg',
               onTap: () => _handleSiteControlTap('site_zoom_in', () {
                 setState(() {
                   _changeTableZoomByStep(1);
                 });
               }),
-              child: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: _siteControlBackground('site_zoom_in'),
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.25),
-                      blurRadius: 2,
-                      offset: const Offset(0, 0),
-                      spreadRadius: 0,
-                    ),
-                  ],
-                ),
-                child: SvgPicture.asset(
-                  'assets/images/Zoom_in.svg',
-                  width: 36,
-                  height: 36,
-                  fit: BoxFit.contain,
-                  placeholderBuilder: (context) => const SizedBox(
-                    width: 36,
-                    height: 36,
-                  ),
-                ),
-              ),
             ),
           ],
         ),
@@ -18924,38 +18911,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      GestureDetector(
+                      _buildPressedZoomControlButton(
+                        pressKey: 'pm_zoom_out',
+                        iconPath: 'assets/images/Zoom_out.svg',
                         onTap: () => _handleSiteControlTap('pm_zoom_out', () {
                           setState(() {
                             _changeTableZoomByStep(-1);
                           });
                         }),
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: _siteControlBackground('pm_zoom_out'),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: SvgPicture.asset(
-                            'assets/images/Zoom_out.svg',
-                            width: 36,
-                            height: 36,
-                            fit: BoxFit.contain,
-                            placeholderBuilder: (context) => SizedBox(
-                              width: 36,
-                              height: 36,
-                            ),
-                          ),
-                        ),
                       ),
                       const SizedBox(width: 8),
                       SizedBox(
@@ -18972,38 +18935,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      GestureDetector(
+                      _buildPressedZoomControlButton(
+                        pressKey: 'pm_zoom_in',
+                        iconPath: 'assets/images/Zoom_in.svg',
                         onTap: () => _handleSiteControlTap('pm_zoom_in', () {
                           setState(() {
                             _changeTableZoomByStep(1);
                           });
                         }),
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: _siteControlBackground('pm_zoom_in'),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: SvgPicture.asset(
-                            'assets/images/Zoom_in.svg',
-                            width: 36,
-                            height: 36,
-                            fit: BoxFit.contain,
-                            placeholderBuilder: (context) => SizedBox(
-                              width: 36,
-                              height: 36,
-                            ),
-                          ),
-                        ),
                       ),
                     ],
                   ),
@@ -20723,39 +20662,15 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      GestureDetector(
+                      _buildPressedZoomControlButton(
+                        pressKey: 'agent_zoom_out',
+                        iconPath: 'assets/images/Zoom_out.svg',
                         onTap: () =>
                             _handleSiteControlTap('agent_zoom_out', () {
                           setState(() {
                             _changeTableZoomByStep(-1);
                           });
                         }),
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: _siteControlBackground('agent_zoom_out'),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: SvgPicture.asset(
-                            'assets/images/Zoom_out.svg',
-                            width: 36,
-                            height: 36,
-                            fit: BoxFit.contain,
-                            placeholderBuilder: (context) => SizedBox(
-                              width: 36,
-                              height: 36,
-                            ),
-                          ),
-                        ),
                       ),
                       const SizedBox(width: 8),
                       SizedBox(
@@ -20772,38 +20687,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      GestureDetector(
+                      _buildPressedZoomControlButton(
+                        pressKey: 'agent_zoom_in',
+                        iconPath: 'assets/images/Zoom_in.svg',
                         onTap: () => _handleSiteControlTap('agent_zoom_in', () {
                           setState(() {
                             _changeTableZoomByStep(1);
                           });
                         }),
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: _siteControlBackground('agent_zoom_in'),
-                            borderRadius: BorderRadius.circular(8),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.25),
-                                blurRadius: 2,
-                                offset: const Offset(0, 0),
-                                spreadRadius: 0,
-                              ),
-                            ],
-                          ),
-                          child: SvgPicture.asset(
-                            'assets/images/Zoom_in.svg',
-                            width: 36,
-                            height: 36,
-                            fit: BoxFit.contain,
-                            placeholderBuilder: (context) => SizedBox(
-                              width: 36,
-                              height: 36,
-                            ),
-                          ),
-                        ),
                       ),
                     ],
                   ),
@@ -24836,7 +24727,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                       ),
                     ),
                     Text(
-                      '₹ ${_formatAmountForDisplay(_truncateToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
+                      '₹ ${_formatAmountForDisplayFixed(_truncateToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.normal,
@@ -29449,9 +29340,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     final shouldOpenUpward =
         menuHeight > spaceBelow && spaceAbove >= menuHeight;
 
-    final rawTop = shouldOpenUpward
-        ? anchorTop - verticalGap - menuHeight
-        : topBelow;
+    final rawTop =
+        shouldOpenUpward ? anchorTop - verticalGap - menuHeight : topBelow;
     final maxTop = max(edgePadding, overlayHeight - menuHeight - edgePadding);
     final top = rawTop.clamp(edgePadding, maxTop).toDouble();
 

@@ -494,7 +494,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
   StreamSubscription<AuthState>? _authStateSubscription;
   static const Duration _oauthCallbackWaitTimeout = Duration(seconds: 6);
 
-  Future<void> _markRecentProjectsAsStartPage() async {
+  Future<void> _markRecentProjectsAsStartPage(
+      {bool forceRecent = false}) async {
     final prefs = await SharedPreferences.getInstance();
     final projectId = (prefs.getString('nav_project_id') ?? '').trim();
     final invitedRole =
@@ -513,6 +514,16 @@ class _AuthWrapperState extends State<AuthWrapper> {
       }
       return;
     }
+    if (forceRecent) {
+      await prefs.setString('nav_current_page', 'recentProjects');
+      await prefs.remove('nav_previous_page');
+      await prefs.setBool('nav_force_recent_on_next_open', false);
+      await prefs.remove('nav_open_invite_dashboard_once');
+      await prefs.remove('nav_invited_project_role');
+      await prefs.remove('nav_has_invite_context');
+      return;
+    }
+
     // Preserve last visited page for non-invite sessions as well.
     // Only initialize to Recent Projects when no page has ever been stored.
     final existingPage = (prefs.getString('nav_current_page') ?? '').trim();
@@ -538,6 +549,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
             '')
         .trim();
     if (projectId.isEmpty) return;
+    final hasInviteAttempt = (params['invite'] == '1') ||
+        (params['projectId'] ?? '').trim().isNotEmpty ||
+        ((authInviteContext['projectId'] ?? '').trim().isNotEmpty) ||
+        ((tokenInviteContext['projectId'] ?? '').trim().isNotEmpty);
 
     final invitedRole = (params['projectRole'] ??
             authInviteContext['projectRole'] ??
@@ -569,7 +584,25 @@ class _AuthWrapperState extends State<AuthWrapper> {
         await ProjectAccessService.resolveCurrentUserRoleForProject(
       projectId: projectId,
     );
-    if (resolvedRole == null) return;
+    if (resolvedRole == null) {
+      await prefs.remove('nav_project_id');
+      await prefs.remove('nav_project_name');
+      await prefs.remove('nav_project_owner_email');
+      await prefs.remove('nav_invited_project_role');
+      await prefs.remove('nav_has_invite_context');
+      await prefs.remove('nav_open_invite_dashboard_once');
+      await prefs.setString('nav_current_page', 'recentProjects');
+      await prefs.remove('nav_previous_page');
+      await prefs.setBool('nav_force_recent_on_next_open', false);
+      if (hasInviteAttempt) {
+        await prefs.setString(
+          'nav_access_denied_notice',
+          'Access denied. Contact admin to request project access.',
+        );
+      }
+      return;
+    }
+    await prefs.remove('nav_access_denied_notice');
     final currentUserId = Supabase.instance.client.auth.currentUser?.id;
     if (currentUserId != null && currentUserId.trim().isNotEmpty) {
       ProjectsListCacheService.invalidateUser(currentUserId);
@@ -587,6 +620,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
       await prefs.remove('nav_invited_project_role');
       await prefs.remove('nav_has_invite_context');
       await prefs.remove('nav_open_invite_dashboard_once');
+      if (hasInviteAttempt) {
+        await prefs.setString('nav_project_id', projectId);
+        await prefs.setString('nav_current_page', 'dashboard');
+        await prefs.remove('nav_previous_page');
+        await prefs.setBool('nav_force_recent_on_next_open', false);
+      }
       return;
     }
 
@@ -852,7 +891,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
       if (event == AuthChangeEvent.signedIn && session != null) {
         await _applyInviteAccessForCurrentUser();
-        await _markRecentProjectsAsStartPage();
+        await _markRecentProjectsAsStartPage(forceRecent: true);
         if (!mounted) return;
         setState(() {
           _isGoogleSignInInProgress = false;

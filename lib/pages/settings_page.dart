@@ -347,6 +347,7 @@ class SettingsPage extends StatefulWidget {
   final String? projectId;
   final String? projectName;
   final String? projectOwnerEmail;
+  final String? viewerRole;
   final bool isRestrictedViewer;
   final bool isAccessControlReadOnly;
   final bool allowAgentSectionEditing;
@@ -358,6 +359,7 @@ class SettingsPage extends StatefulWidget {
     this.projectId,
     this.projectName,
     this.projectOwnerEmail,
+    this.viewerRole,
     this.isRestrictedViewer = false,
     this.isAccessControlReadOnly = false,
     this.allowAgentSectionEditing = false,
@@ -370,6 +372,7 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  static const String _globalSettingsTabPrefKey = 'nav_settings_active_tab';
   static const String _landingPathEncoded = '/website_8answers%20copy%202/';
   static const String _landingPathDecoded = '/website_8answers copy 2/';
   static const double _projectBaseUnitDropdownWidth = 186;
@@ -434,23 +437,82 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _isRoleReadOnly(_AccessControlRole role) => !_canEditAccessRole(role);
 
+  String get _normalizedViewerRole {
+    final explicitRole = (widget.viewerRole ?? '').trim().toLowerCase();
+    if (explicitRole.isNotEmpty) return explicitRole;
+    if (widget.isRestrictedViewer) return 'partner';
+    if (widget.isAccessControlReadOnly) return 'project_manager';
+    if (widget.hideAccessControlSection) return 'agent';
+    return 'admin';
+  }
+
+  bool get _isLimitedDeleteRole {
+    final role = _normalizedViewerRole;
+    return role == 'partner' ||
+        role == 'project_manager' ||
+        role == 'agent' ||
+        role == 'paused';
+  }
+
   List<String> get _projectBaseUnitAreaOptions => _allProjectBaseUnitAreaOptions
       .where((option) => option == AreaUnitUtils.sqmUnitLabel)
       .toList();
+
+  String _settingsTabPrefKey() {
+    final projectId = widget.projectId?.trim();
+    if (projectId == null || projectId.isEmpty) {
+      return _globalSettingsTabPrefKey;
+    }
+    return '${_globalSettingsTabPrefKey}_$projectId';
+  }
+
+  Future<void> _restoreSettingsTabSelection() async {
+    final showAccessControlSection = !widget.hideAccessControlSection;
+    if (!showAccessControlSection) {
+      if (!_isAccessControlTabSelected) return;
+      if (!mounted) return;
+      setState(() {
+        _isAccessControlTabSelected = false;
+      });
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final isAccessControlSelected =
+        prefs.getBool(_settingsTabPrefKey()) ?? false;
+    if (!mounted || _isAccessControlTabSelected == isAccessControlSelected) {
+      return;
+    }
+    setState(() {
+      _isAccessControlTabSelected = isAccessControlSelected;
+    });
+  }
+
+  Future<void> _persistSettingsTabSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_settingsTabPrefKey(), _isAccessControlTabSelected);
+  }
 
   @override
   void initState() {
     super.initState();
     _loadProjectBaseUnitArea();
     _loadAccessControlData();
+    _restoreSettingsTabSelection();
   }
 
   @override
   void didUpdateWidget(covariant SettingsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.projectId != oldWidget.projectId) {
+    final projectIdChanged = widget.projectId != oldWidget.projectId;
+    final accessVisibilityChanged =
+        widget.hideAccessControlSection != oldWidget.hideAccessControlSection;
+    if (projectIdChanged) {
       _loadProjectBaseUnitArea();
       _loadAccessControlData();
+    }
+    if (projectIdChanged || accessVisibilityChanged) {
+      _restoreSettingsTabSelection();
     }
   }
 
@@ -577,9 +639,9 @@ class _SettingsPageState extends State<SettingsPage> {
                         Row(
                           children: [
                             const Icon(
-                              Icons.warning,
+                              Icons.warning_amber_rounded,
                               color: Colors.red,
-                              size: 24,
+                              size: 16,
                             ),
                             const SizedBox(width: 16),
                             Text(
@@ -594,13 +656,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                         GestureDetector(
                           onTap: _removeDeleteDialog,
-                          child: Transform.rotate(
-                            angle: 0.785398, // 45 degrees
-                            child: const Icon(
-                              Icons.add,
-                              size: 24,
-                              color: Color(0xFF0C8CE9),
-                            ),
+                          child: const Icon(
+                            Icons.close,
+                            size: 16,
+                            color: Color(0xFF0C8CE9),
                           ),
                         ),
                       ],
@@ -610,29 +669,59 @@ class _SettingsPageState extends State<SettingsPage> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        RichText(
-                          text: TextSpan(
+                        if (_isLimitedDeleteRole) ...[
+                          Text(
+                            'After deleting you will no longer have access to this project.',
                             style: GoogleFonts.inter(
                               fontSize: 14,
                               fontWeight: FontWeight.normal,
                               color: Colors.black.withOpacity(0.8),
                             ),
-                            children: const [
-                              TextSpan(
-                                  text: 'This will permanently delete the '),
-                              TextSpan(text: 'project and all associated data'),
-                            ],
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'This action cannot be undone.',
-                          style: GoogleFonts.inter(
-                            fontSize: 14,
-                            fontWeight: FontWeight.normal,
-                            color: Colors.black.withOpacity(0.8),
+                          const SizedBox(height: 8),
+                          Text(
+                            'To regain access to this project, please contact the admin.',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.normal,
+                              color: const Color(0xFF323232),
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'This action cannot be undone.',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.normal,
+                              color: Colors.black.withOpacity(0.8),
+                            ),
+                          ),
+                        ] else ...[
+                          RichText(
+                            text: TextSpan(
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.normal,
+                                color: Colors.black.withOpacity(0.8),
+                              ),
+                              children: const [
+                                TextSpan(
+                                    text: 'This will permanently delete the '),
+                                TextSpan(
+                                    text: 'project and all associated data'),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'This action cannot be undone.',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.normal,
+                              color: Colors.black.withOpacity(0.8),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 24),
@@ -671,9 +760,11 @@ class _SettingsPageState extends State<SettingsPage> {
                             borderRadius: BorderRadius.circular(8),
                             boxShadow: [
                               BoxShadow(
-                                color: _deleteConfirmFocusNode.hasFocus
-                                    ? const Color(0xFF0C8CE9)
-                                    : const Color(0xFFFF0000),
+                                color: _isLimitedDeleteRole
+                                    ? const Color(0xFFFF0000)
+                                    : (_deleteConfirmFocusNode.hasFocus
+                                        ? const Color(0xFF0C8CE9)
+                                        : const Color(0xFFFF0000)),
                                 blurRadius: 2,
                                 spreadRadius: 0,
                                 offset: const Offset(0, 0),
@@ -742,9 +833,19 @@ class _SettingsPageState extends State<SettingsPage> {
                                 'delete') {
                               if (widget.projectId != null) {
                                 try {
-                                  await ProjectStorageService.deleteProject(
-                                      widget.projectId!);
+                                  await ProjectAccessService
+                                      .deleteProjectForCurrentUser(
+                                    projectId: widget.projectId!,
+                                  );
                                   _removeDeleteDialog();
+                                  if (mounted) {
+                                    final message = _isLimitedDeleteRole
+                                        ? 'Project removed from your list'
+                                        : 'Project deleted';
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text(message)),
+                                    );
+                                  }
                                   // Notify parent that project was deleted
                                   if (widget.onProjectDeleted != null) {
                                     widget.onProjectDeleted!();
@@ -1138,6 +1239,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _AccessControlRole.projectManager: <_AccessInviteEntry>[],
         _AccessControlRole.agent: <_AccessInviteEntry>[],
       };
+      final activeMemberEmails = <String>{};
       final roleSeenEmails = <_AccessControlRole, Set<String>>{
         _AccessControlRole.admin: <String>{},
         _AccessControlRole.partner: <String>{},
@@ -1240,6 +1342,21 @@ class _SettingsPageState extends State<SettingsPage> {
       }
 
       try {
+        final members = await Supabase.instance.client
+            .from('project_members')
+            .select('invited_email, status')
+            .eq('project_id', projectId)
+            .eq('status', 'active');
+        for (final row in members) {
+          final email = (row['invited_email'] ?? '').toString().trim();
+          if (email.isEmpty) continue;
+          activeMemberEmails.add(email.toLowerCase());
+        }
+      } catch (_) {
+        // Best-effort lookup used only to filter stale paused invite rows.
+      }
+
+      try {
         final invites = await Supabase.instance.client
             .from('project_access_invites')
             .select('invited_email, role, status, requested_at')
@@ -1249,9 +1366,17 @@ class _SettingsPageState extends State<SettingsPage> {
           final role = _roleFromDbValue((row['role'] ?? '').toString());
           if (role == null) continue;
           final email = (row['invited_email'] ?? '').toString().trim();
+          final normalizedEmail = email.toLowerCase();
           final status = _inviteStatusFromDb((row['status'] ?? '').toString());
+          final isPausedOrRevokedInvite = status == _AccessInviteStatus.paused;
+          if (isPausedOrRevokedInvite &&
+              normalizedEmail.isNotEmpty &&
+              !activeMemberEmails.contains(normalizedEmail)) {
+            // Ignore stale revoked/paused invite rows when membership no longer exists.
+            continue;
+          }
           final isOwnAccount = currentUserEmail.isNotEmpty &&
-              email.toLowerCase() == currentUserEmail.toLowerCase();
+              normalizedEmail == currentUserEmail.toLowerCase();
           final visibleToRestrictedViewer =
               role == _AccessControlRole.partner &&
                   (status == _AccessInviteStatus.accepted ||
@@ -1261,7 +1386,6 @@ class _SettingsPageState extends State<SettingsPage> {
               !isOwnAccount) {
             continue;
           }
-          final normalizedEmail = email.toLowerCase();
           if (email.isNotEmpty &&
               roleSeenEmails[role]!.contains(normalizedEmail)) {
             continue;
@@ -2422,13 +2546,28 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildGeneralTabContent() {
+    const deleteSummaryText =
+        'Permanently remove this project and all associated data. This action cannot be undone.';
+    final deleteSummaryStyle = GoogleFonts.inter(
+      fontSize: 14,
+      fontWeight: FontWeight.w500,
+      color: Colors.black.withOpacity(0.8),
+    );
+    final textPainter = TextPainter(
+      text: TextSpan(text: deleteSummaryText, style: deleteSummaryStyle),
+      maxLines: 1,
+      textDirection: Directionality.of(context),
+    )..layout();
+    final maxAllowedWidth = MediaQuery.of(context).size.width - 48;
+    final generalCardWidth =
+        (textPainter.width + 32 + 18).clamp(617.0, maxAllowedWidth).toDouble();
     return Padding(
       padding: const EdgeInsets.only(left: 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 617,
+            width: generalCardWidth,
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFFF8F9FA),
@@ -2475,7 +2614,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 36),
           Container(
-            width: 617,
+            width: generalCardWidth,
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFFF8F9FA),
@@ -2501,12 +2640,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Permanently remove this project and all associated data. This action cannot be undone.',
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.black.withOpacity(0.8),
-                  ),
+                  deleteSummaryText,
+                  maxLines: 1,
+                  softWrap: false,
+                  style: deleteSummaryStyle,
                 ),
                 const SizedBox(height: 24),
                 GestureDetector(
@@ -3294,6 +3431,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     setState(() {
                       _isAccessControlTabSelected = false;
                     });
+                    _persistSettingsTabSelection();
                   }
                 },
                 child: SizedBox(
@@ -3339,6 +3477,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       setState(() {
                         _isAccessControlTabSelected = true;
                       });
+                      _persistSettingsTabSelection();
                     }
                   },
                   child: SizedBox(

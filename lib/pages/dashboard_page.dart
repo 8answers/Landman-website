@@ -286,6 +286,7 @@ class _DashboardPageState extends State<DashboardPage> {
   String _selectedCompensationLayoutFilter = 'All';
   final Set<String> _dashboardControlFlashKeys = <String>{};
   final Map<String, Timer> _dashboardControlFlashTimers = <String, Timer>{};
+  final Set<String> _dashboardPressedZoomKeys = <String>{};
 
   String _dashboardTabPrefKeyForProject(String? projectId) {
     final normalizedProjectId = (projectId ?? '').trim();
@@ -332,9 +333,8 @@ class _DashboardPageState extends State<DashboardPage> {
       final projectScoped =
           prefs.getString(_dashboardTabPrefKeyForProject(widget.projectId));
       final global = prefs.getString(_globalDashboardTabPrefKey);
-      final restored =
-          _parseDashboardTabName(projectScoped) ??
-              _parseDashboardTabName(global);
+      final restored = _parseDashboardTabName(projectScoped) ??
+          _parseDashboardTabName(global);
       if (restored == null || !mounted) return;
       final normalized = _normalizeDashboardTabForRole(restored);
       if (_activeTab != normalized) {
@@ -597,6 +597,38 @@ class _DashboardPageState extends State<DashboardPage> {
     return true;
   }
 
+  Future<List<Map<String, dynamic>>> _fetchAllPlotsForLayouts({
+    required List<String> layoutIds,
+    String columns = '*',
+    int pageSize = 1000,
+  }) async {
+    if (layoutIds.isEmpty) return const <Map<String, dynamic>>[];
+
+    final allPlots = <Map<String, dynamic>>[];
+    var from = 0;
+
+    while (true) {
+      final to = from + pageSize - 1;
+      final page = await _supabase
+          .from('plots')
+          .select(columns)
+          .inFilter('layout_id', layoutIds)
+          .order('created_at', ascending: true)
+          .order('id', ascending: true)
+          .range(from, to);
+
+      final rows = List<Map<String, dynamic>>.from(page);
+      if (rows.isEmpty) break;
+
+      allPlots.addAll(rows);
+      if (rows.length < pageSize) break;
+
+      from += pageSize;
+    }
+
+    return allPlots;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -669,6 +701,7 @@ class _DashboardPageState extends State<DashboardPage> {
     }
     _dashboardControlFlashTimers.clear();
     _dashboardControlFlashKeys.clear();
+    _dashboardPressedZoomKeys.clear();
     _scrollController.removeListener(_handleMainScroll);
     _scrollController.dispose();
     _partnersTableScrollController.dispose();
@@ -1344,14 +1377,11 @@ class _DashboardPageState extends State<DashboardPage> {
       // Fetch plots - optimized: single query for all plots
       List<Map<String, dynamic>> allPlots = [];
       if (layoutIds.isNotEmpty) {
-        // Use 'in' filter to get all plots in one query instead of multiple
-        final plots = await _supabase
-            .from('plots')
-            .select(
-                'id, layout_id, area, status, sale_price, buyer_name, agent_name, sale_date, payments')
-            .inFilter('layout_id', layoutIds)
-            .order('created_at', ascending: true);
-        allPlots = List<Map<String, dynamic>>.from(plots);
+        allPlots = await _fetchAllPlotsForLayouts(
+          layoutIds: layoutIds,
+          columns:
+              'id, layout_id, area, status, sale_price, buyer_name, agent_name, sale_date, payments',
+        );
       }
       final dashboardPlots =
           allPlots.where(_shouldIncludePlotInDashboard).toList();
@@ -1718,12 +1748,8 @@ class _DashboardPageState extends State<DashboardPage> {
         return;
       }
 
-      // Optimize: Fetch all plots in one query, ordered by creation time to maintain consistent order
-      final allPlots = await _supabase
-          .from('plots')
-          .select('*')
-          .inFilter('layout_id', layoutIds)
-          .order('created_at', ascending: true);
+      // Fetch all plots for these layouts with pagination to avoid row truncation.
+      final allPlots = await _fetchAllPlotsForLayouts(layoutIds: layoutIds);
 
       // Get all plot IDs to fetch partners in one query
       final plotIds = allPlots.map((p) => p['id'] as String).toList();
@@ -1861,11 +1887,10 @@ class _DashboardPageState extends State<DashboardPage> {
       final layoutIds = layoutIdToName.keys.toList(growable: false);
 
       final plots = layoutIds.isNotEmpty
-          ? await _supabase
-              .from('plots')
-              .select('id, plot_number, layout_id, status')
-              .inFilter('layout_id', layoutIds)
-              .order('created_at', ascending: true)
+          ? await _fetchAllPlotsForLayouts(
+              layoutIds: layoutIds,
+              columns: 'id, plot_number, layout_id, status',
+            )
           : <Map<String, dynamic>>[];
 
       final plotIds = plots
@@ -3176,8 +3201,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       GestureDetector(
                         onTap: () {
                           _setActiveDashboardTab(DashboardTab.profitRoi);
-                          if (_dashboardData != null &&
-                              _siteLayouts.isEmpty) {
+                          if (_dashboardData != null && _siteLayouts.isEmpty) {
                             setState(() {
                               _isSiteDataLoading = true;
                             });
@@ -4136,6 +4160,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final salesTillDate = _dashboardData!['totalSalesValue'] as double;
     final hasPendingPlots =
         ((_dashboardData!['pendingPlots'] as int?) ?? 0) > 0;
+    final soldPlots = (_dashboardData!['soldPlots'] as int?) ?? 0;
 
     // Calculate Gross Profit using the same logic as _calculateTotalGrossProfit()
     // This only counts cost of sold plots, not all plots
@@ -4224,6 +4249,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         'Profit Margin (%)',
                         profitMargin,
                         width: 265,
+                        overrideText: soldPlots > 0 ? null : '-',
                       ),
                       const SizedBox(width: 16),
                       _buildSummaryPercentCard(
@@ -5911,6 +5937,7 @@ class _DashboardPageState extends State<DashboardPage> {
     double value, {
     double width = 265,
     Color valueColor = Colors.black,
+    String? overrideText,
   }) {
     final valueStyle = GoogleFonts.inter(
       fontSize: 20,
@@ -5921,19 +5948,26 @@ class _DashboardPageState extends State<DashboardPage> {
     return _buildSummaryCard(
       width: width,
       label: label,
-      value: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            _formatNumberWithDecimals(value, 2),
-            style: valueStyle,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(width: 4),
-          Text('%', style: valueStyle),
-        ],
-      ),
+      value: overrideText != null
+          ? Text(
+              overrideText,
+              style: valueStyle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _formatNumberWithDecimals(value, 2),
+                  style: valueStyle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(width: 4),
+                Text('%', style: valueStyle),
+              ],
+            ),
     );
   }
 
@@ -9863,15 +9897,39 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Widget _buildZoomButton(String iconUrl,
       {String? flashKey, VoidCallback? onTap}) {
+    final isPressed =
+        flashKey != null && _dashboardPressedZoomKeys.contains(flashKey);
     return GestureDetector(
+      onTapDown: flashKey == null
+          ? null
+          : (_) {
+              if (!mounted) return;
+              setState(() {
+                _dashboardPressedZoomKeys.add(flashKey);
+              });
+            },
+      onTapCancel: flashKey == null
+          ? null
+          : () {
+              if (!mounted) return;
+              setState(() {
+                _dashboardPressedZoomKeys.remove(flashKey);
+              });
+            },
+      onTapUp: flashKey == null
+          ? null
+          : (_) {
+              if (!mounted) return;
+              setState(() {
+                _dashboardPressedZoomKeys.remove(flashKey);
+              });
+            },
       onTap: onTap,
       child: Container(
         width: 36,
         height: 36,
         decoration: BoxDecoration(
-          color: flashKey == null
-              ? Colors.white
-              : _dashboardControlBackground(flashKey),
+          color: isPressed ? const Color(0xFFEDEDED) : Colors.white,
           borderRadius: BorderRadius.circular(8),
           boxShadow: [
             BoxShadow(
@@ -14195,7 +14253,11 @@ class _DashboardPageState extends State<DashboardPage> {
         plots.fold<double>(0.0, (sum, plot) => sum + rowHeightForPlot(plot));
     final scaledHeight = (baseHeight * _tableZoomLevel)
         .clamp(baseHeaderHeight * _tableZoomLevel, double.infinity);
-    final tableViewportHeight = math.max(baseHeight, scaledHeight).toDouble();
+    // Keep scrollbar 8px below the last visible row content.
+    const scrollbarReservedHeight = 16.0;
+    final tableViewportHeight =
+        (math.max(baseHeight, scaledHeight) + scrollbarReservedHeight)
+            .toDouble();
 
     return Container(
       decoration: BoxDecoration(
@@ -14469,7 +14531,11 @@ class _DashboardPageState extends State<DashboardPage> {
         plots.fold<double>(0.0, (sum, plot) => sum + rowHeightForPlot(plot));
     final scaledHeight = (baseHeight * _tableZoomLevel)
         .clamp(baseHeaderHeight * _tableZoomLevel, double.infinity);
-    final tableViewportHeight = math.max(baseHeight, scaledHeight).toDouble();
+    // Keep scrollbar 8px below the last visible row content.
+    const scrollbarReservedHeight = 16.0;
+    final tableViewportHeight =
+        (math.max(baseHeight, scaledHeight) + scrollbarReservedHeight)
+            .toDouble();
 
     return Container(
       decoration: BoxDecoration(

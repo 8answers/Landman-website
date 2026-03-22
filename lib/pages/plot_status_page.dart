@@ -264,6 +264,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       1.0; // Table zoom level (1.0 = 100%, 0.5 = 50%, 1.2 = 120%, etc.)
   final Set<String> _layoutControlFlashKeys = <String>{};
   final Map<String, Timer> _layoutControlFlashTimers = <String, Timer>{};
+  final Set<String> _layoutPressedZoomKeys = <String>{};
   String _areaUnit = AreaUnitService.defaultUnit;
   bool get _isSqm => AreaUnitUtils.isSqm(_areaUnit);
   String get _areaUnitSuffix => AreaUnitUtils.unitSuffix(_isSqm);
@@ -307,9 +308,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       final projectScoped =
           prefs.getString(_plotStatusTabPrefKeyForProject(widget.projectId));
       final global = prefs.getString(_globalPlotStatusTabPrefKey);
-      final restored =
-          _parsePlotStatusTabName(projectScoped) ??
-              _parsePlotStatusTabName(global);
+      final restored = _parsePlotStatusTabName(projectScoped) ??
+          _parsePlotStatusTabName(global);
       if (restored == null || !mounted) return;
       if (_activeContentTab != restored) {
         setState(() {
@@ -369,6 +369,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   void _handleLayoutControlTap(String key, VoidCallback action) {
     action();
     _flashLayoutControl(key);
+  }
+
+  void _setLayoutZoomPressed(String key, bool pressed) {
+    if (!mounted) return;
+    setState(() {
+      if (pressed) {
+        _layoutPressedZoomKeys.add(key);
+      } else {
+        _layoutPressedZoomKeys.remove(key);
+      }
+    });
   }
 
   bool get _isEditingAmenityArea =>
@@ -707,6 +718,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     _layoutControlFlashTimers.clear();
     _layoutControlFlashKeys.clear();
+    _layoutPressedZoomKeys.clear();
     _searchController.dispose();
     for (var controller in _salePriceControllers.values) {
       controller.dispose();
@@ -3295,8 +3307,13 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     void zoomByStep(double delta) {
       final matrix = viewerController.value.clone();
       final currentScale = matrix.getMaxScaleOnAxis();
-      final targetScale = (currentScale + delta).clamp(0.5, 4.0);
+      final targetScale = (currentScale + delta).clamp(1.0, 4.0);
       if ((targetScale - currentScale).abs() < 0.0001) {
+        return;
+      }
+      // Keep original size as the minimum zoom and re-center when returning to it.
+      if (targetScale <= 1.0001) {
+        viewerController.value = Matrix4.identity();
         return;
       }
       final scaleFactor = targetScale / currentScale;
@@ -3335,7 +3352,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             const baseCloseIconSize = 42.0;
             const baseCloseToToolsGap = 63.0;
             const baseBottomActionsGap = 24.0;
-            const toolCount = 8;
+            const toolCount = 9;
             const railGapFromImage = 20.0;
             const panelWidth = 95.0;
 
@@ -4096,10 +4113,19 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                           child: InteractiveViewer(
                                             transformationController:
                                                 viewerController,
-                                            minScale: 0.5,
+                                            minScale: 1.0,
                                             maxScale: 4.0,
                                             panEnabled: isPanModeActive,
                                             scaleEnabled: isPanModeActive,
+                                            onInteractionEnd: (_) {
+                                              final scale = viewerController
+                                                  .value
+                                                  .getMaxScaleOnAxis();
+                                              if (scale <= 1.0001) {
+                                                viewerController.value =
+                                                    Matrix4.identity();
+                                              }
+                                            },
                                             clipBehavior: Clip.hardEdge,
                                             child: SizedBox(
                                               width: imageBoxWidth,
@@ -4455,6 +4481,20 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                             closeToolPickers();
                                             setDialogState(() {
                                               zoomByStep(-0.1);
+                                            });
+                                          },
+                                          width: optionWidth,
+                                          height: optionHeight,
+                                        ),
+                                        SizedBox(height: optionGap),
+                                        _buildLayoutImageViewerToolButton(
+                                          iconAssetPath:
+                                              'assets/images/Reset_view.svg',
+                                          onTap: () {
+                                            closeToolPickers();
+                                            setDialogState(() {
+                                              viewerController.value =
+                                                  Matrix4.identity();
                                             });
                                           },
                                           width: optionWidth,
@@ -6302,6 +6342,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                       const SizedBox(width: 8),
                                                       // Zoom out button
                                                       GestureDetector(
+                                                        onTapDown: (_) =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_out',
+                                                                true),
+                                                        onTapUp: (_) =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_out',
+                                                                false),
+                                                        onTapCancel: () =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_out',
+                                                                false),
                                                         onTap: () =>
                                                             _handleLayoutControlTap(
                                                           'plot_zoom_out',
@@ -6320,8 +6372,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                           height: 36,
                                                           decoration:
                                                               BoxDecoration(
-                                                            color: _layoutControlBackground(
-                                                                'plot_zoom_out'),
+                                                            color: _layoutPressedZoomKeys
+                                                                    .contains(
+                                                                        'plot_zoom_out')
+                                                                ? const Color(
+                                                                    0xFFEDEDED)
+                                                                : Colors.white,
                                                             borderRadius:
                                                                 BorderRadius
                                                                     .circular(
@@ -6375,6 +6431,18 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                       const SizedBox(width: 8),
                                                       // Zoom in button
                                                       GestureDetector(
+                                                        onTapDown: (_) =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_in',
+                                                                true),
+                                                        onTapUp: (_) =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_in',
+                                                                false),
+                                                        onTapCancel: () =>
+                                                            _setLayoutZoomPressed(
+                                                                'plot_zoom_in',
+                                                                false),
                                                         onTap: () =>
                                                             _handleLayoutControlTap(
                                                           'plot_zoom_in',
@@ -6393,8 +6461,12 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                           height: 36,
                                                           decoration:
                                                               BoxDecoration(
-                                                            color: _layoutControlBackground(
-                                                                'plot_zoom_in'),
+                                                            color: _layoutPressedZoomKeys
+                                                                    .contains(
+                                                                        'plot_zoom_in')
+                                                                ? const Color(
+                                                                    0xFFEDEDED)
+                                                                : Colors.white,
                                                             borderRadius:
                                                                 BorderRadius
                                                                     .circular(

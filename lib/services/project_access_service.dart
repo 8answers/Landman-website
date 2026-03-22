@@ -1,5 +1,23 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+enum ProjectDeleteOutcome {
+  deletedForEveryone,
+  removedForCurrentUser,
+}
+
+class ProjectDeleteResult {
+  const ProjectDeleteResult({
+    required this.outcome,
+    required this.role,
+  });
+
+  final ProjectDeleteOutcome outcome;
+  final String role;
+
+  bool get deletedForEveryone =>
+      outcome == ProjectDeleteOutcome.deletedForEveryone;
+}
+
 class ProjectAccessService {
   ProjectAccessService._();
 
@@ -80,6 +98,124 @@ class ProjectAccessService {
       _hasAccessControlTables = false;
       return false;
     }
+  }
+
+  static Future<ProjectDeleteResult> deleteProjectForCurrentUser({
+    required String projectId,
+  }) async {
+    final normalizedProjectId = projectId.trim();
+    final currentUser = _supabase.auth.currentUser;
+    final userId = (currentUser?.id ?? '').trim();
+    final email = _normalizeEmail(currentUser?.email);
+    if (normalizedProjectId.isEmpty || userId.isEmpty) {
+      throw Exception('User not authenticated');
+    }
+
+    final resolvedRole = await resolveCurrentUserRoleForProject(
+      projectId: normalizedProjectId,
+    );
+    final normalizedRole = (resolvedRole ?? '').trim().toLowerCase();
+    final canDeleteForEveryone =
+        normalizedRole == 'owner' || normalizedRole == 'admin';
+
+    if (canDeleteForEveryone) {
+      await _supabase
+          .from('projects')
+          .delete()
+          .eq('id', normalizedProjectId);
+      return ProjectDeleteResult(
+        outcome: ProjectDeleteOutcome.deletedForEveryone,
+        role: normalizedRole,
+      );
+    }
+
+    if (!await hasAccessControlTables()) {
+      throw Exception(
+          'Project access control tables are missing. Cannot remove user access.');
+    }
+
+    var membershipUpdatedOrRemoved = false;
+    var inviteUpdatedOrRemoved = false;
+
+    try {
+      await _supabase
+          .from('project_members')
+          .delete()
+          .eq('project_id', normalizedProjectId)
+          .eq('user_id', userId);
+      membershipUpdatedOrRemoved = true;
+    } catch (_) {
+      // Fallback to status update if delete policy is not available.
+      try {
+        await _supabase
+            .from('project_members')
+            .update(<String, dynamic>{
+              'status': 'inactive',
+              'updated_at': DateTime.now().toIso8601String(),
+            })
+            .eq('project_id', normalizedProjectId)
+            .eq('user_id', userId);
+        membershipUpdatedOrRemoved = true;
+      } catch (_) {
+        membershipUpdatedOrRemoved = false;
+      }
+    }
+
+    if (email.isNotEmpty) {
+      try {
+        await _supabase
+            .from('project_access_invites')
+            .delete()
+            .eq('project_id', normalizedProjectId)
+            .eq('accepted_user_id', userId);
+        inviteUpdatedOrRemoved = true;
+      } catch (_) {
+        // Continue with invited_email-based fallback below.
+      }
+      try {
+        await _supabase
+            .from('project_access_invites')
+            .delete()
+            .eq('project_id', normalizedProjectId)
+            .eq('invited_email', email);
+        inviteUpdatedOrRemoved = true;
+      } catch (_) {
+        // Fallback to revoked status if delete policy is not available.
+        try {
+          await _supabase
+              .from('project_access_invites')
+              .update(<String, dynamic>{
+                'status': 'revoked',
+                'updated_at': DateTime.now().toIso8601String(),
+              })
+              .eq('project_id', normalizedProjectId)
+              .eq('invited_email', email);
+          inviteUpdatedOrRemoved = true;
+        } catch (_) {
+          inviteUpdatedOrRemoved = false;
+        }
+      }
+    } else {
+      try {
+        await _supabase
+            .from('project_access_invites')
+            .delete()
+            .eq('project_id', normalizedProjectId)
+            .eq('accepted_user_id', userId);
+        inviteUpdatedOrRemoved = true;
+      } catch (_) {
+        inviteUpdatedOrRemoved = false;
+      }
+    }
+
+    if (!membershipUpdatedOrRemoved && !inviteUpdatedOrRemoved) {
+      throw Exception('Unable to remove your project access.');
+    }
+
+    return ProjectDeleteResult(
+      outcome: ProjectDeleteOutcome.removedForCurrentUser,
+      role: normalizedRole,
+    );
   }
 
   static Future<bool> createOrUpdateInvite({
