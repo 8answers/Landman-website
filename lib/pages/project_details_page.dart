@@ -14378,7 +14378,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                         ),
                         TextSpan(
                           text:
-                              '₹ ${_formatAmountForDisplay(_roundToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
+                              '₹ ${_formatAmountForDisplayFixed(_roundToDecimals(totalPlotCost, 2), decimalPlaces: 2)}',
                           style: TextStyle(
                             fontWeight: FontWeight.w400,
                             color: Colors.black.withOpacity(0.75),
@@ -26002,11 +26002,10 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                               children: [
                                 const TextSpan(text: '₹ '),
                                 TextSpan(
-                                  text: totalPlotCost == 0.0
-                                      ? '0.00'
-                                      : _formatAmountForDisplay(
-                                          _roundToDecimals(totalPlotCost, 2),
-                                          decimalPlaces: 2),
+                                  text: _formatAmountForDisplayFixed(
+                                    _roundToDecimals(totalPlotCost, 2),
+                                    decimalPlaces: 2,
+                                  ),
                                   style: GoogleFonts.inter(
                                     fontSize: 14,
                                     fontWeight: FontWeight.normal,
