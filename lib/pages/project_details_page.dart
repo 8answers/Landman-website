@@ -28957,21 +28957,27 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       ),
     );
 
-    // Calculate menu position (below and aligned to right of three dots button)
+    // Calculate menu position with auto above/below behavior (match dropdown UX).
     final menuWidth = 165.0;
-    final leftPosition = offset.dx + renderBox.size.width - menuWidth - 12;
-    final topPosition = offset.dy + renderBox.size.height + 8;
+    final menuHeight = 52.0;
+    final menuPosition = _calculateLayoutMenuPosition(
+      overlayBox: overlayBox,
+      offset: offset,
+      triggerSize: renderBox.size,
+      menuWidth: menuWidth,
+      menuHeight: menuHeight,
+    );
 
     // Create menu
     overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
-        left: leftPosition,
-        top: topPosition,
+        left: menuPosition.dx,
+        top: menuPosition.dy,
         child: Material(
           color: Colors.transparent,
           child: Container(
             width: menuWidth,
-            height: 52,
+            height: menuHeight,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: const Color(0xFFF8F9FA),
@@ -29336,21 +29342,27 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       ),
     );
 
-    // Match "Select category" dropdown placement: open directly below trigger.
+    // Match partners dropdown behavior: auto above/below by available space.
     final menuWidth = 165.0;
-    final leftPosition = offset.dx + renderBox.size.width - menuWidth - 12;
-    final topPosition = offset.dy + renderBox.size.height + 8;
+    final menuHeight = 52.0;
+    final menuPosition = _calculateLayoutMenuPosition(
+      overlayBox: overlayBox,
+      offset: offset,
+      triggerSize: renderBox.size,
+      menuWidth: menuWidth,
+      menuHeight: menuHeight,
+    );
 
     // Create menu
     overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
-        left: leftPosition,
-        top: topPosition,
+        left: menuPosition.dx,
+        top: menuPosition.dy,
         child: Material(
           color: Colors.transparent,
           child: Container(
             width: menuWidth,
-            height: 52,
+            height: menuHeight,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: const Color(0xFFF8F9FA),
@@ -29409,6 +29421,41 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     _currentLayoutMenuEntry = overlayEntry;
     _currentLayoutMenuBackdropEntry = backdropEntry;
     _openLayoutMenuIndex = -1; // Use -1 to indicate "delete all" menu
+  }
+
+  Offset _calculateLayoutMenuPosition({
+    required RenderBox overlayBox,
+    required Offset offset,
+    required Size triggerSize,
+    required double menuWidth,
+    required double menuHeight,
+  }) {
+    const double edgePadding = 8.0;
+    const double verticalGap = 8.0;
+    const double rightInset = 12.0;
+
+    final overlayWidth = overlayBox.size.width;
+    final overlayHeight = overlayBox.size.height;
+
+    final rawLeft = offset.dx + triggerSize.width - menuWidth - rightInset;
+    final maxLeft = max(edgePadding, overlayWidth - menuWidth - edgePadding);
+    final left = rawLeft.clamp(edgePadding, maxLeft).toDouble();
+
+    final anchorTop = offset.dy;
+    final anchorBottom = offset.dy + triggerSize.height;
+    final topBelow = anchorBottom + verticalGap;
+    final spaceBelow = overlayHeight - topBelow - edgePadding;
+    final spaceAbove = anchorTop - verticalGap - edgePadding;
+    final shouldOpenUpward =
+        menuHeight > spaceBelow && spaceAbove >= menuHeight;
+
+    final rawTop = shouldOpenUpward
+        ? anchorTop - verticalGap - menuHeight
+        : topBelow;
+    final maxTop = max(edgePadding, overlayHeight - menuHeight - edgePadding);
+    final top = rawTop.clamp(edgePadding, maxTop).toDouble();
+
+    return Offset(left, top);
   }
 
   void _showDeleteAllLayoutsDialog(BuildContext context) {
