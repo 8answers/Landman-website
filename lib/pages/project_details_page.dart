@@ -1325,7 +1325,16 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     _onDataChanged();
   }
 
+  void _clearFocusedInputSelection() {
+    FocusManager.instance.primaryFocus
+        ?.unfocus(disposition: UnfocusDisposition.scope);
+    if (_tableCellExitFocusNode.canRequestFocus) {
+      FocusScope.of(context).requestFocus(_tableCellExitFocusNode);
+    }
+  }
+
   void _removeAmenityAreaRow(int index) {
+    _clearFocusedInputSelection();
     setState(() {
       _amenityNameControllers[index]?.dispose();
       _amenityAreaControllers[index]?.dispose();
@@ -13192,6 +13201,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                                                         const SizedBox(width: 8),
                                                                                         GestureDetector(
                                                                                           onTap: () {
+                                                                                            _clearFocusedInputSelection();
                                                                                             setState(() {
                                                                                               _nonSellableNameControllers[index]?.dispose();
                                                                                               _nonSellableAreaControllers[index]?.dispose();
@@ -18420,7 +18430,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                     ),
                                     TextSpan(
                                       text:
-                                          '₹ ${_formatAmountForDisplay(_allInCostPerDisplayUnit, decimalPlaces: 2)} /$_areaUnitSuffix',
+                                          '₹ /$_areaUnitSuffix ${_formatAmountForDisplay(_allInCostPerDisplayUnit, decimalPlaces: 2)}',
                                       style: GoogleFonts.inter(
                                         fontSize: 14,
                                         fontWeight: FontWeight.w400,
