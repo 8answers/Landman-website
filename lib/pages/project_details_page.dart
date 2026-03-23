@@ -288,6 +288,11 @@ enum _ExpenseUndoSource {
   category,
 }
 
+enum _LayoutViewerCloseDecision {
+  save,
+  discard,
+}
+
 class _LayoutUndoSnapshot {
   final String layoutName;
   final List<Map<String, dynamic>> plots;
@@ -2688,14 +2693,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     final localHideDefaultNonSellable = localPrefs
             .getBool('project_${widget.projectId}_hide_default_non_sellable') ??
         false;
-    final localHideDefaultAmenity =
-        localPrefs.getBool('project_${widget.projectId}_hide_default_amenity') ??
-            false;
+    final localHideDefaultAmenity = localPrefs
+            .getBool('project_${widget.projectId}_hide_default_amenity') ??
+        false;
     final persistedAmenityExpanded =
         localPrefs.getBool('project_${widget.projectId}_amenity_area_expanded');
-    final persistedNonSellableExpanded =
-        localPrefs
-            .getBool('project_${widget.projectId}_non_sellable_area_expanded');
+    final persistedNonSellableExpanded = localPrefs
+        .getBool('project_${widget.projectId}_non_sellable_area_expanded');
     _hasLoadedDataOnce =
         persistedFlag || _projectsLoadedThisSession.contains(widget.projectId);
     // Always restore to the user's last expansion state.
@@ -2730,6 +2734,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
         }
         return fallback;
       }
+
       final hideDefaultNonSellable = readProjectBoolFlag(
         'hide_default_non_sellable_template',
         localHideDefaultNonSellable,
@@ -4021,10 +4026,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('project_${projectId}_hide_default_non_sellable', hide);
     try {
-      await _supabase
-          .from('projects')
-          .update({'hide_default_non_sellable_template': hide})
-          .eq('id', projectId);
+      await _supabase.from('projects').update(
+          {'hide_default_non_sellable_template': hide}).eq('id', projectId);
     } catch (error) {
       debugPrint(
         '_setHideDefaultNonSellableTemplate: failed to persist remotely: $error',
@@ -4040,8 +4043,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     try {
       await _supabase
           .from('projects')
-          .update({'hide_default_amenity_template': hide})
-          .eq('id', projectId);
+          .update({'hide_default_amenity_template': hide}).eq('id', projectId);
     } catch (error) {
       debugPrint(
         '_setHideDefaultAmenityTemplate: failed to persist remotely: $error',
@@ -5558,12 +5560,54 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       uploadInput.multiple = false;
       uploadInput.accept =
           '.png,.jpg,.jpeg,.webp,.gif,.svg,image/png,image/jpeg,image/webp,image/gif,image/svg+xml';
-      uploadInput.click();
+      final fileSelectionCompleter = Completer<html.File?>();
+      StreamSubscription<html.Event>? changeSub;
+      StreamSubscription<html.Event>? inputSub;
+      StreamSubscription<html.Event>? blurSub;
+      StreamSubscription<html.Event>? focusSub;
+      Timer? fallbackCancelTimer;
+      Timer? focusResolveTimer;
+      var windowLostFocus = false;
 
-      await uploadInput.onChange.first;
-      final files = uploadInput.files;
-      if (files == null || files.isEmpty) return;
-      final file = files.first;
+      void resolveFromPickerState() {
+        if (fileSelectionCompleter.isCompleted) return;
+        final files = uploadInput.files;
+        if (files == null || files.isEmpty) {
+          fileSelectionCompleter.complete(null);
+          return;
+        }
+        fileSelectionCompleter.complete(files.first);
+      }
+
+      changeSub = uploadInput.onChange.listen((_) => resolveFromPickerState());
+      inputSub = uploadInput.onInput.listen((_) => resolveFromPickerState());
+      blurSub = html.window.onBlur.listen((_) {
+        windowLostFocus = true;
+      });
+      focusSub = html.window.onFocus.listen((_) {
+        if (!windowLostFocus) return;
+        // Delay cancel resolution briefly to let picker events land first.
+        focusResolveTimer?.cancel();
+        focusResolveTimer = Timer(const Duration(milliseconds: 350), () {
+          resolveFromPickerState();
+        });
+      });
+      fallbackCancelTimer = Timer(const Duration(seconds: 12), () {
+        resolveFromPickerState();
+      });
+
+      html.document.body?.append(uploadInput);
+      uploadInput.click();
+      final file = await fileSelectionCompleter.future;
+      await changeSub.cancel();
+      await inputSub.cancel();
+      await blurSub.cancel();
+      await focusSub.cancel();
+      fallbackCancelTimer.cancel();
+      focusResolveTimer?.cancel();
+      uploadInput.remove();
+
+      if (file == null) return;
       final fileName = file.name;
       final allowedImageExtensions = <String>{
         'png',
@@ -6149,19 +6193,20 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     return 'NA';
   }
 
-  Future<bool> _showLayoutViewerTopOverlayDialog({
-    required Widget Function(void Function(bool result) closeDialog)
+  Future<T?> _showLayoutViewerTopOverlayDialog<T>({
+    required Widget Function(void Function(T? result) closeDialog)
         dialogBuilder,
+    T? dismissResult,
   }) async {
-    if (!mounted) return false;
+    if (!mounted) return null;
     final rootOverlay = Overlay.of(context, rootOverlay: true);
-    if (rootOverlay == null) return false;
+    if (rootOverlay == null) return null;
 
-    final completer = Completer<bool>();
+    final completer = Completer<T?>();
     OverlayEntry? backdropEntry;
     OverlayEntry? dialogEntry;
 
-    void closeDialog(bool result) {
+    void closeDialog(T? result) {
       if (completer.isCompleted) return;
       dialogEntry?.remove();
       backdropEntry?.remove();
@@ -6172,7 +6217,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       builder: (_) => Positioned.fill(
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () => closeDialog(false),
+          onTap: () => closeDialog(dismissResult),
           child: Container(color: Colors.black.withValues(alpha: 0.5)),
         ),
       ),
@@ -6202,7 +6247,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
 
   Future<bool> _showDeleteLayoutImageTopDialog() async {
     final layoutLabel = _activeLayoutLabelForImageDialog();
-    return _showLayoutViewerTopOverlayDialog(
+    final result = await _showLayoutViewerTopOverlayDialog<bool>(
       dialogBuilder: (closeDialog) => Container(
         width: 538,
         padding: const EdgeInsets.all(16),
@@ -6358,11 +6403,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
           ],
         ),
       ),
+      dismissResult: false,
     );
+    return result ?? false;
   }
 
-  Future<bool> _showUnsavedLayoutEditsTopDialog() async {
-    return _showLayoutViewerTopOverlayDialog(
+  Future<_LayoutViewerCloseDecision?> _showUnsavedLayoutEditsTopDialog() async {
+    return _showLayoutViewerTopOverlayDialog<_LayoutViewerCloseDecision>(
       dialogBuilder: (closeDialog) => Container(
         width: 538,
         padding: const EdgeInsets.all(16),
@@ -6393,7 +6440,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ),
                 ),
                 GestureDetector(
-                  onTap: () => closeDialog(false),
+                  onTap: () => closeDialog(null),
                   child: const Icon(
                     Icons.close,
                     size: 22,
@@ -6425,7 +6472,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 GestureDetector(
-                  onTap: () => closeDialog(false),
+                  onTap: () => closeDialog(_LayoutViewerCloseDecision.discard),
                   child: Container(
                     height: 44,
                     padding:
@@ -6443,7 +6490,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                     ),
                     child: Center(
                       child: Text(
-                        'Cancel',
+                        'Discard',
                         style: GoogleFonts.inter(
                           fontSize: 14,
                           fontWeight: FontWeight.normal,
@@ -6454,7 +6501,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ),
                 ),
                 GestureDetector(
-                  onTap: () => closeDialog(true),
+                  onTap: () => closeDialog(_LayoutViewerCloseDecision.save),
                   child: Container(
                     height: 44,
                     padding:
@@ -6487,6 +6534,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
           ],
         ),
       ),
+      dismissResult: null,
     );
   }
 
@@ -6499,9 +6547,11 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
 
   Future<void> _requestCloseLayoutImageViewer() async {
     if (_isSavingLayoutViewerEdits || _isDeletingLayoutViewerImage) return;
-    if (_hasPendingLayoutViewerEdits) {
-      final shouldSave = await _showUnsavedLayoutEditsTopDialog();
-      if (!shouldSave) return;
+    final decision = await _showUnsavedLayoutEditsTopDialog();
+    if (decision == null) return;
+    if (decision == _LayoutViewerCloseDecision.discard) {
+      _closeLayoutImageViewerDiscardEdits();
+      return;
     }
     await _closeLayoutImageViewerAndPersistEdits();
   }
@@ -6528,6 +6578,16 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       _isSavingLayoutViewerEdits = false;
     }
 
+    _finalizeLayoutImageViewerClose();
+  }
+
+  void _closeLayoutImageViewerDiscardEdits() {
+    _layoutViewerAutosaveTimer?.cancel();
+    _isSavingLayoutViewerEdits = false;
+    _finalizeLayoutImageViewerClose();
+  }
+
+  void _finalizeLayoutImageViewerClose() {
     _removeLayoutImageViewerOverlayEntry();
     _setStateSafe(() {
       _isLayoutImageViewerOpen = false;
@@ -6689,7 +6749,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       _hasPendingLayoutViewerEdits = false;
     } else {
       _hasPendingLayoutViewerEdits = true;
-      _scheduleLayoutViewerAutosave();
     }
 
     if (!isAmenityImage) {
@@ -6920,7 +6979,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   void _markLayoutViewerEditsDirty() {
     _hasPendingLayoutViewerEdits = true;
     _layoutViewerEditRevision++;
-    _scheduleLayoutViewerAutosave();
   }
 
   void _scheduleLayoutViewerAutosave() {
@@ -25972,7 +26030,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                 color: Colors.black,
                               ),
                               children: [
-                                TextSpan(text: '₹/$_areaUnitSuffix '),
+                                TextSpan(text: '₹/$_areaUnitSuffix'),
                                 TextSpan(
                                   text: isEmpty
                                       ? '0.00'

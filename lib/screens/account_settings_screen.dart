@@ -1595,12 +1595,28 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
     NavigationPage sourcePage,
     ProjectSaveStatusType status,
   ) {
+    final isDataEntryContextSource = sourcePage == NavigationPage.dataEntry ||
+        sourcePage == NavigationPage.projectDetails;
     // Pages are retained in an IndexedStack; hidden pages can still emit
     // callbacks. Ignore save-status events from non-visible pages so the
     // sidebar status reflects the active screen only.
-    if (_currentPage != sourcePage) return;
-    final isDataEntryContext = sourcePage == NavigationPage.dataEntry ||
-        sourcePage == NavigationPage.projectDetails;
+    if (_currentPage != sourcePage) {
+      // If Data Entry finishes saving after user already moved to Dashboard,
+      // force a dashboard refresh so latest edits appear without manual reload.
+      final shouldRefreshDashboardFromBackgroundSave =
+          _currentPage == NavigationPage.dashboard &&
+              isDataEntryContextSource &&
+              status == ProjectSaveStatusType.saved;
+      if (shouldRefreshDashboardFromBackgroundSave) {
+        _setStateSafely(() {
+          _projectDataVersion++;
+          _projectDataDirty = false;
+        });
+        _refreshErrorBadgesFromStoredData();
+      }
+      return;
+    }
+    final isDataEntryContext = isDataEntryContextSource;
     final normalizedStatus =
         (isDataEntryContext && status == ProjectSaveStatusType.notSaved)
             ? ProjectSaveStatusType.saving
@@ -1734,6 +1750,11 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
         page == NavigationPage.projectDetails;
     final shouldWaitForDataEntrySave =
         isLeavingDataEntryContext && page == NavigationPage.dashboard;
+    final shouldForceDashboardRefreshOnEntry = shouldWaitForDataEntrySave &&
+        (_projectDataDirty ||
+            _saveStatus == ProjectSaveStatusType.saving ||
+            _saveStatus == ProjectSaveStatusType.notSaved ||
+            _saveStatus == ProjectSaveStatusType.connectionLost);
 
     if (isLeavingDataEntryContext) {
       // Commit any focused text edit so ProjectDetails autosave can run.
@@ -1781,12 +1802,22 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
           setState(() {
             _previousPage = _currentPage;
             _currentPage = page;
+            if (page == NavigationPage.dashboard &&
+                shouldForceDashboardRefreshOnEntry) {
+              _projectDataVersion++;
+              _isDashboardPageLoading = true;
+            }
           });
           _recordPageVisit(_currentPage);
         } else {
           // Already in project details context, just switch pages
           setState(() {
             _currentPage = page;
+            if (page == NavigationPage.dashboard &&
+                shouldForceDashboardRefreshOnEntry) {
+              _projectDataVersion++;
+              _isDashboardPageLoading = true;
+            }
           });
           _recordPageVisit(_currentPage);
         }

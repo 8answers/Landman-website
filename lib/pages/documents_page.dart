@@ -860,6 +860,22 @@ class _DocumentsPageState extends State<DocumentsPage> {
 
       final parentId = _resolveParentIdForNewFolder();
 
+      // Keep user-created folders under Uploaded Documents section.
+      // Reserved names are used by system folders.
+      if ((parentId == null || parentId.isEmpty) &&
+          _isReservedSystemFolderName(effectiveName)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '"$effectiveName" is a system folder name. Please use a different name.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
       // Insert folder into Supabase
       final response = await _supabase
           .from('documents')
@@ -3242,10 +3258,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
 
   String? _resolveParentIdForNewFolder() {
     final currentFolderId = _currentFolderId;
-    // Starting page: create under Uploaded Documents (root-level, parent null).
+    // Starting page: create under Uploaded Documents root.
     if (currentFolderId == null || currentFolderId.isEmpty) return null;
-
-    // Inside any folder: create inside the currently opened folder.
+    // Inside a folder: create in the currently opened folder.
     return currentFolderId;
   }
 
@@ -3341,6 +3356,29 @@ class _DocumentsPageState extends State<DocumentsPage> {
         .any((name) => name.toLowerCase() == normalizedName);
   }
 
+  bool _isReservedSystemFolderName(String name) {
+    final normalized = name.trim().toLowerCase();
+    return _pinnedRootFolderOrder
+        .any((systemName) => systemName.toLowerCase() == normalized);
+  }
+
+  bool _isInUploadedDocumentsSection(Map<String, dynamic> doc) {
+    // Root-level pinned system folders are never part of Uploaded Documents.
+    if (_isRootFolder(doc) && _isPinnedRootFolder(doc)) return false;
+
+    final rootFolderId = _rootFolderIdForDocument(doc);
+    if (rootFolderId == null || rootFolderId.isEmpty) return true;
+
+    final rootFolder = _documents.firstWhere(
+      (item) => (item['id'] ?? '').toString() == rootFolderId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (rootFolder.isEmpty) return true;
+
+    // Anything under pinned roots belongs to system folders.
+    return !_isPinnedRootFolder(rootFolder);
+  }
+
   List<Map<String, dynamic>> _arrangeDocumentsForDisplay(
       List<Map<String, dynamic>> source) {
     if (_currentFolderId != null) return source;
@@ -3413,29 +3451,19 @@ class _DocumentsPageState extends State<DocumentsPage> {
     final leadingPinnedRootFolderCount =
         _leadingPinnedRootFolderCount(documents);
     final hasUploadedDocuments = _documents.any((doc) {
-      final isFile = (doc['type'] ?? '').toString().toLowerCase() == 'file';
-      if (!isFile) return false;
       if (widget.isAgentView && !_isDocumentVisibleToAgent(doc)) return false;
-
-      final rootFolderId = _rootFolderIdForDocument(doc);
-      if (rootFolderId == null || rootFolderId.isEmpty) return true;
-
-      final rootFolder = _documents.firstWhere(
-        (item) => (item['id'] ?? '').toString() == rootFolderId,
-        orElse: () => <String, dynamic>{},
-      );
-      if (rootFolder.isEmpty) return true;
-
-      // Files under pinned roots belong to Site Images, not Uploaded Documents.
-      return !_isPinnedRootFolder(rootFolder);
+      return _isInUploadedDocumentsSection(doc);
     });
     final showSiteImagesHeading =
         _currentFolderId == null && leadingPinnedRootFolderCount > 0;
+    final hasUploadedSectionEntries = _currentFolderId == null
+        ? documents.length > leadingPinnedRootFolderCount
+        : documents.isNotEmpty;
     final forcePinnedFoldersToFirstRow = _currentFolderId == null &&
         leadingPinnedRootFolderCount > 0 &&
         documents.length > leadingPinnedRootFolderCount;
     final showUploadedDocsEmptySection = _currentFolderId == null &&
-        !hasUploadedDocuments &&
+        !hasUploadedSectionEntries &&
         documents.isNotEmpty &&
         !_showAddFolderDialog;
     final folderPath = _getFolderPath(_currentFolderId);
@@ -3612,18 +3640,12 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                         style:
                                                             breadcrumbTextStyle
                                                                 .copyWith(
-                                                          color: breadcrumbRootLabel ==
-                                                                  'System folders'
+                                                          color: folderPath
+                                                                  .isEmpty
                                                               ? Colors.black
+                                                              : Colors.black
                                                                   .withOpacity(
-                                                                      0.5)
-                                                              : (folderPath
-                                                                          .length ==
-                                                                      1
-                                                                  ? Colors.black
-                                                                  : Colors.black
-                                                                      .withOpacity(
-                                                                          0.5)),
+                                                                      0.5),
                                                         ),
                                                       ),
                                                     ),
@@ -4275,7 +4297,6 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                             );
                                           }(),
                                           if (forcePinnedFoldersToFirstRow &&
-                                              hasUploadedDocuments &&
                                               index ==
                                                   leadingPinnedRootFolderCount -
                                                       1) ...[
@@ -4381,14 +4402,10 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                               breadcrumbRootLabel,
                                               style:
                                                   breadcrumbTextStyle.copyWith(
-                                                color: breadcrumbRootLabel ==
-                                                        'System folders'
+                                                color: folderPath.isEmpty
                                                     ? Colors.black
-                                                        .withOpacity(0.5)
-                                                    : (folderPath.length == 1
-                                                        ? Colors.black
-                                                        : Colors.black
-                                                            .withOpacity(0.5)),
+                                                    : Colors.black
+                                                        .withOpacity(0.5),
                                               ),
                                             ),
                                           ),

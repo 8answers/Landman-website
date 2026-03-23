@@ -154,6 +154,11 @@ enum PlotStatusContentTab {
   amenityArea,
 }
 
+enum _LayoutViewerCloseDecision {
+  save,
+  discard,
+}
+
 class PlotStatusPage extends StatefulWidget {
   final List<Map<String, dynamic>>? layouts;
   final List<Map<String, dynamic>>? agents;
@@ -2536,12 +2541,53 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ..multiple = false
         ..accept =
             '.png,.jpg,.jpeg,.webp,.gif,.svg,image/png,image/jpeg,image/webp,image/gif,image/svg+xml';
-      uploadInput.click();
+      final fileSelectionCompleter = Completer<html.File?>();
+      StreamSubscription<html.Event>? changeSub;
+      StreamSubscription<html.Event>? inputSub;
+      StreamSubscription<html.Event>? blurSub;
+      StreamSubscription<html.Event>? focusSub;
+      Timer? fallbackCancelTimer;
+      Timer? focusResolveTimer;
+      var windowLostFocus = false;
 
-      await uploadInput.onChange.first;
-      final files = uploadInput.files;
-      if (files == null || files.isEmpty) return;
-      final file = files.first;
+      void resolveFromPickerState() {
+        if (fileSelectionCompleter.isCompleted) return;
+        final files = uploadInput.files;
+        if (files == null || files.isEmpty) {
+          fileSelectionCompleter.complete(null);
+          return;
+        }
+        fileSelectionCompleter.complete(files.first);
+      }
+
+      changeSub = uploadInput.onChange.listen((_) => resolveFromPickerState());
+      inputSub = uploadInput.onInput.listen((_) => resolveFromPickerState());
+      blurSub = html.window.onBlur.listen((_) {
+        windowLostFocus = true;
+      });
+      focusSub = html.window.onFocus.listen((_) {
+        if (!windowLostFocus) return;
+        focusResolveTimer?.cancel();
+        focusResolveTimer = Timer(const Duration(milliseconds: 350), () {
+          resolveFromPickerState();
+        });
+      });
+      fallbackCancelTimer = Timer(const Duration(seconds: 12), () {
+        resolveFromPickerState();
+      });
+
+      html.document.body?.append(uploadInput);
+      uploadInput.click();
+      final file = await fileSelectionCompleter.future;
+      await changeSub.cancel();
+      await inputSub.cancel();
+      await blurSub.cancel();
+      await focusSub.cancel();
+      fallbackCancelTimer.cancel();
+      focusResolveTimer?.cancel();
+      uploadInput.remove();
+
+      if (file == null) return;
       final fileName = file.name;
       final extension = _getLayoutImageExtension(fileName);
       final allowedImageExtensions = <String>{
@@ -2817,12 +2863,53 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         ..multiple = false
         ..accept =
             '.png,.jpg,.jpeg,.webp,.gif,.svg,image/png,image/jpeg,image/webp,image/gif,image/svg+xml';
-      uploadInput.click();
+      final fileSelectionCompleter = Completer<html.File?>();
+      StreamSubscription<html.Event>? changeSub;
+      StreamSubscription<html.Event>? inputSub;
+      StreamSubscription<html.Event>? blurSub;
+      StreamSubscription<html.Event>? focusSub;
+      Timer? fallbackCancelTimer;
+      Timer? focusResolveTimer;
+      var windowLostFocus = false;
 
-      await uploadInput.onChange.first;
-      final files = uploadInput.files;
-      if (files == null || files.isEmpty) return;
-      final file = files.first;
+      void resolveFromPickerState() {
+        if (fileSelectionCompleter.isCompleted) return;
+        final files = uploadInput.files;
+        if (files == null || files.isEmpty) {
+          fileSelectionCompleter.complete(null);
+          return;
+        }
+        fileSelectionCompleter.complete(files.first);
+      }
+
+      changeSub = uploadInput.onChange.listen((_) => resolveFromPickerState());
+      inputSub = uploadInput.onInput.listen((_) => resolveFromPickerState());
+      blurSub = html.window.onBlur.listen((_) {
+        windowLostFocus = true;
+      });
+      focusSub = html.window.onFocus.listen((_) {
+        if (!windowLostFocus) return;
+        focusResolveTimer?.cancel();
+        focusResolveTimer = Timer(const Duration(milliseconds: 350), () {
+          resolveFromPickerState();
+        });
+      });
+      fallbackCancelTimer = Timer(const Duration(seconds: 12), () {
+        resolveFromPickerState();
+      });
+
+      html.document.body?.append(uploadInput);
+      uploadInput.click();
+      final file = await fileSelectionCompleter.future;
+      await changeSub.cancel();
+      await inputSub.cancel();
+      await blurSub.cancel();
+      await focusSub.cancel();
+      fallbackCancelTimer.cancel();
+      focusResolveTimer?.cancel();
+      uploadInput.remove();
+
+      if (file == null) return;
       final fileName = file.name;
       final extension = _getLayoutImageExtension(fileName);
       final allowedImageExtensions = <String>{
@@ -3586,8 +3673,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               });
             }
 
-            Future<bool> showUnsavedEditsDialog() async {
-              final result = await showDialog<bool>(
+            Future<_LayoutViewerCloseDecision?> showUnsavedEditsDialog() async {
+              final result = await showDialog<_LayoutViewerCloseDecision>(
                 context: dialogContext,
                 barrierDismissible: true,
                 barrierColor: Colors.black.withOpacity(0.5),
@@ -3631,7 +3718,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     ),
                                     GestureDetector(
                                       onTap: () =>
-                                          Navigator.of(popupContext).pop(false),
+                                          Navigator.of(popupContext).pop(null),
                                       child: const Icon(
                                         Icons.close,
                                         size: 22,
@@ -3665,7 +3752,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                   children: [
                                     GestureDetector(
                                       onTap: () =>
-                                          Navigator.of(popupContext).pop(false),
+                                          Navigator.of(popupContext).pop(
+                                        _LayoutViewerCloseDecision.discard,
+                                      ),
                                       child: Container(
                                         height: 44,
                                         padding: const EdgeInsets.symmetric(
@@ -3685,7 +3774,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                         ),
                                         child: Center(
                                           child: Text(
-                                            'Cancel',
+                                            'Discard',
                                             style: GoogleFonts.inter(
                                               fontSize: 14,
                                               fontWeight: FontWeight.normal,
@@ -3697,7 +3786,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     ),
                                     GestureDetector(
                                       onTap: () =>
-                                          Navigator.of(popupContext).pop(true),
+                                          Navigator.of(popupContext).pop(
+                                        _LayoutViewerCloseDecision.save,
+                                      ),
                                       child: Container(
                                         height: 44,
                                         padding: const EdgeInsets.symmetric(
@@ -3738,7 +3829,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   );
                 },
               );
-              return result ?? false;
+              return result;
             }
 
             Future<bool> showDeleteImageDialog() async {
@@ -4570,12 +4661,16 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                       'assets/images/Layout_close.svg',
                                   onTap: () async {
                                     closeToolPickers();
-                                    if (hasPendingEdits) {
-                                      final shouldSave =
-                                          await showUnsavedEditsDialog();
-                                      if (!shouldSave) return;
+                                    final closeDecision =
+                                        await showUnsavedEditsDialog();
+                                    if (closeDecision == null) return;
+                                    if (closeDecision ==
+                                        _LayoutViewerCloseDecision.save) {
+                                      await persistEditsIfNeeded();
+                                      if (hasPendingEdits) return;
+                                    } else {
+                                      skipPersistOnClose = true;
                                     }
-                                    await persistEditsIfNeeded();
                                     if (dialogContext.mounted) {
                                       Navigator.of(dialogContext).pop();
                                     }
