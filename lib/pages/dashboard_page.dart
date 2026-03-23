@@ -3458,8 +3458,8 @@ class _DashboardPageState extends State<DashboardPage> {
                             .copyWith(scrollbars: false),
                         child: ScrollbarTheme(
                           data: ScrollbarThemeData(
-                            crossAxisMargin: 0,
-                            mainAxisMargin: 0,
+                            crossAxisMargin: 8,
+                            mainAxisMargin: 8,
                             thickness: MaterialStateProperty.all(7),
                             thumbColor: MaterialStateProperty.resolveWith(
                               (states) {

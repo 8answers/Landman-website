@@ -1100,6 +1100,34 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             .eq('project_id', widget.projectId!)
             .order('created_at', ascending: true);
 
+        final existingDocumentIds = <String>{};
+        final existingDocumentPaths = <String>{};
+        final staleLayoutImageMetaIds = <String>{};
+        try {
+          final docs = await _supabase
+              .from('documents')
+              .select('id,file_url')
+              .eq('project_id', widget.projectId!)
+              .eq('type', 'file')
+              .limit(3000);
+          if (docs is List) {
+            for (final raw in docs) {
+              if (raw is! Map) continue;
+              final row = Map<String, dynamic>.from(raw);
+              final docId = (row['id'] ?? '').toString().trim();
+              final docPath = _resolveDocumentStoragePath(
+                (row['file_url'] ?? '').toString(),
+              );
+              if (docId.isNotEmpty) {
+                existingDocumentIds.add(docId);
+              }
+              if (docPath.isNotEmpty) {
+                existingDocumentPaths.add(docPath);
+              }
+            }
+          }
+        } catch (_) {}
+
         print('📥 LOADED LAYOUTS FROM DB: ${layouts.length} layouts');
         for (var i = 0; i < layouts.length; i++) {
           print(
@@ -1172,6 +1200,26 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
           for (final layout in layouts) {
             final layoutId = (layout['id'] ?? '').toString();
+            final layoutImageNameRaw =
+                (layout['layout_image_name'] ?? '').toString().trim();
+            final layoutImagePathRaw =
+                (layout['layout_image_path'] ?? '').toString().trim();
+            final layoutImageDocIdRaw =
+                (layout['layout_image_doc_id'] ?? '').toString().trim();
+            final layoutImageExtensionRaw =
+                (layout['layout_image_extension'] ?? '').toString().trim();
+            final layoutImagePathResolved =
+                _resolveDocumentStoragePath(layoutImagePathRaw);
+            final hasDbImageMeta = layoutImageDocIdRaw.isNotEmpty ||
+                layoutImagePathResolved.isNotEmpty;
+            final dbImageMetaValid = !hasDbImageMeta ||
+                (layoutImageDocIdRaw.isNotEmpty &&
+                    existingDocumentIds.contains(layoutImageDocIdRaw)) ||
+                (layoutImagePathResolved.isNotEmpty &&
+                    existingDocumentPaths.contains(layoutImagePathResolved));
+            if (!dbImageMetaValid && layoutId.isNotEmpty) {
+              staleLayoutImageMetaIds.add(layoutId);
+            }
             final layoutPlots =
                 plotsByLayoutId[layoutId] ?? const <Map<String, dynamic>>[];
             final plotsData = layoutPlots.map((plot) {
@@ -1205,17 +1253,31 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             layoutsData.add({
               'id': layoutId,
               'name': (layout['name'] ?? '').toString(),
-              'layoutImageName':
-                  (layout['layout_image_name'] ?? '').toString().trim(),
+              'layoutImageName': dbImageMetaValid ? layoutImageNameRaw : '',
               'layoutImagePath':
-                  (layout['layout_image_path'] ?? '').toString().trim(),
-              'layoutImageDocId':
-                  (layout['layout_image_doc_id'] ?? '').toString().trim(),
+                  dbImageMetaValid ? layoutImagePathResolved : '',
+              'layoutImageDocId': dbImageMetaValid ? layoutImageDocIdRaw : '',
               'layoutImageExtension':
-                  (layout['layout_image_extension'] ?? '').toString().trim(),
+                  dbImageMetaValid ? layoutImageExtensionRaw : '',
               'plots': plotsData,
             });
           }
+        }
+
+        if (staleLayoutImageMetaIds.isNotEmpty) {
+          try {
+            await _supabase
+                .from('layouts')
+                .update({
+                  'layout_image_name': '',
+                  'layout_image_path': '',
+                  'layout_image_doc_id': '',
+                  'layout_image_extension': '',
+                })
+                .eq('project_id', widget.projectId!)
+                .inFilter(
+                    'id', staleLayoutImageMetaIds.toList(growable: false));
+          } catch (_) {}
         }
 
         print('📥 TOTAL LAYOUTS FROM DB TO ADD: ${layoutsData.length} layouts');
@@ -1947,6 +2009,101 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     return _ensureRootDocumentsFolderIdByName(_amenityDocumentsFolderName);
   }
 
+  Future<String?> _ensureLayoutImageSubfolderId({
+    required String projectId,
+    required String layoutsFolderId,
+    required String layoutId,
+    required String layoutName,
+  }) async {
+    final normalizedLayoutId = layoutId.trim();
+    if (normalizedLayoutId.isEmpty) return null;
+
+    final preferredName = layoutName.trim().isNotEmpty
+        ? layoutName.trim()
+        : 'Layout ${normalizedLayoutId.substring(0, math.min(6, normalizedLayoutId.length))}';
+
+    try {
+      final sameNameRows = await _supabase
+          .from('documents')
+          .select('id,name')
+          .eq('project_id', projectId)
+          .eq('type', 'folder')
+          .eq('parent_id', layoutsFolderId)
+          .eq('name', preferredName)
+          .limit(1);
+      if (sameNameRows is List && sameNameRows.isNotEmpty) {
+        final existingId = (sameNameRows.first['id'] ?? '').toString().trim();
+        if (existingId.isNotEmpty) return existingId;
+      }
+    } catch (_) {}
+
+    try {
+      final existingFolders = await _supabase
+          .from('documents')
+          .select('id,name')
+          .eq('project_id', projectId)
+          .eq('type', 'folder')
+          .eq('parent_id', layoutsFolderId)
+          .order('created_at', ascending: false)
+          .limit(200);
+
+      if (existingFolders is List && existingFolders.isNotEmpty) {
+        for (final raw in existingFolders) {
+          if (raw is! Map) continue;
+          final candidateId = (raw['id'] ?? '').toString().trim();
+          if (candidateId.isEmpty) continue;
+          final fileRows = await _supabase
+              .from('documents')
+              .select('file_url')
+              .eq('project_id', projectId)
+              .eq('type', 'file')
+              .eq('parent_id', candidateId)
+              .order('created_at', ascending: false)
+              .limit(30);
+          for (final fileRaw in fileRows) {
+            if (fileRaw is! Map) continue;
+            final fileUrl = (fileRaw['file_url'] ?? '').toString().trim();
+            final resolvedLayoutId = _layoutIdFromStoragePath(fileUrl);
+            if (resolvedLayoutId == normalizedLayoutId) {
+              return candidateId;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    try {
+      final inserted = await _supabase
+          .from('documents')
+          .insert({
+            'project_id': projectId,
+            'name': preferredName,
+            'type': 'folder',
+            'parent_id': layoutsFolderId,
+          })
+          .select('id')
+          .single();
+      final insertedId = (inserted['id'] ?? '').toString().trim();
+      return insertedId.isEmpty ? null : insertedId;
+    } catch (_) {
+      try {
+        final retry = await _supabase
+            .from('documents')
+            .select('id')
+            .eq('project_id', projectId)
+            .eq('type', 'folder')
+            .eq('parent_id', layoutsFolderId)
+            .eq('name', preferredName)
+            .limit(1);
+        if (retry is List && retry.isNotEmpty) {
+          final retryId = (retry.first['id'] ?? '').toString().trim();
+          if (retryId.isNotEmpty) return retryId;
+        }
+      } catch (_) {}
+      return null;
+    }
+  }
+
   Future<String?> _resolveLayoutIdForDocument(int layoutIndex) async {
     if (layoutIndex < 0 || layoutIndex >= _layouts.length) return null;
 
@@ -1977,7 +2134,6 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
   Future<Map<String, dynamic>?> _findLatestLayoutDocumentRow({
     required String projectId,
-    required String folderId,
     required String layoutId,
   }) async {
     final rows = await _supabase
@@ -1985,9 +2141,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         .select('id,name,file_url,extension,created_at')
         .eq('project_id', projectId)
         .eq('type', 'file')
-        .eq('parent_id', folderId)
         .order('created_at', ascending: false)
-        .limit(200);
+        .limit(500);
 
     for (final raw in rows) {
       if (raw is! Map) continue;
@@ -1999,6 +2154,102 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       }
     }
     return null;
+  }
+
+  Future<Map<String, String>> _resolveDocumentDeletionTargets({
+    required String projectId,
+    required String docId,
+    required String urlOrPath,
+  }) async {
+    var resolvedDocId = docId.trim();
+    var resolvedStoragePath = _resolveDocumentStoragePath(urlOrPath);
+    var parentFolderId = '';
+
+    if (resolvedDocId.isNotEmpty) {
+      final byId = await _supabase
+          .from('documents')
+          .select('id,file_url,parent_id')
+          .eq('id', resolvedDocId)
+          .maybeSingle();
+      if (byId != null) {
+        resolvedDocId = (byId['id'] ?? resolvedDocId).toString().trim();
+        final byIdPath = _resolveDocumentStoragePath(
+          (byId['file_url'] ?? '').toString(),
+        );
+        if (byIdPath.isNotEmpty) {
+          resolvedStoragePath = byIdPath;
+        }
+        parentFolderId = (byId['parent_id'] ?? '').toString().trim();
+      }
+    }
+
+    if (resolvedDocId.isEmpty && resolvedStoragePath.isNotEmpty) {
+      final byPath = await _supabase
+          .from('documents')
+          .select('id,parent_id')
+          .eq('project_id', projectId)
+          .eq('file_url', resolvedStoragePath)
+          .limit(1)
+          .maybeSingle();
+      if (byPath != null) {
+        resolvedDocId = (byPath['id'] ?? '').toString().trim();
+        parentFolderId = (byPath['parent_id'] ?? '').toString().trim();
+      }
+    }
+
+    return {
+      'docId': resolvedDocId,
+      'storagePath': resolvedStoragePath,
+      'parentFolderId': parentFolderId,
+    };
+  }
+
+  Future<void> _deleteLayoutChildFolderIfEmpty({
+    required String projectId,
+    required String folderId,
+  }) async {
+    final trimmedFolderId = folderId.trim();
+    if (trimmedFolderId.isEmpty) return;
+
+    try {
+      final folderRow = await _supabase
+          .from('documents')
+          .select('id,type,parent_id')
+          .eq('id', trimmedFolderId)
+          .eq('project_id', projectId)
+          .maybeSingle();
+      if (folderRow == null) return;
+      if ((folderRow['type'] ?? '').toString().toLowerCase() != 'folder')
+        return;
+
+      final parentId = (folderRow['parent_id'] ?? '').toString().trim();
+      if (parentId.isEmpty) return;
+
+      final parentRow = await _supabase
+          .from('documents')
+          .select('id,name,parent_id,type')
+          .eq('id', parentId)
+          .eq('project_id', projectId)
+          .maybeSingle();
+      if (parentRow == null) return;
+      if ((parentRow['type'] ?? '').toString().toLowerCase() != 'folder')
+        return;
+      final parentName =
+          (parentRow['name'] ?? '').toString().trim().toLowerCase();
+      if (parentName != _layoutDocumentsFolderName.toLowerCase()) return;
+      final parentParentId = (parentRow['parent_id'] ?? '').toString().trim();
+      if (parentParentId.isNotEmpty) return;
+
+      final children = await _supabase
+          .from('documents')
+          .select('id')
+          .eq('project_id', projectId)
+          .eq('parent_id', trimmedFolderId)
+          .limit(1);
+      if (children is List && children.isNotEmpty) return;
+
+      await _supabase.from('documents').delete().eq('id', trimmedFolderId);
+    } catch (_) {}
   }
 
   Future<Map<String, dynamic>?> _findLatestAmenityLayoutDocumentRow({
@@ -2536,6 +2787,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       if (folderId == null || folderId.isEmpty) {
         throw Exception('Could not create/find Layouts folder');
       }
+      final layoutName =
+          (_layouts[layoutIndex]['name'] ?? '').toString().trim();
+      final layoutFolderId = await _ensureLayoutImageSubfolderId(
+        projectId: projectId,
+        layoutsFolderId: folderId,
+        layoutId: layoutId,
+        layoutName: layoutName,
+      );
+      if (layoutFolderId == null || layoutFolderId.isEmpty) {
+        throw Exception('Could not create/find layout folder');
+      }
 
       final uploadInput = html.FileUploadInputElement()
         ..multiple = false
@@ -2614,7 +2876,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       final storageFileName = _sanitizeStorageFileName(fileName);
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final storagePath =
-          '$projectId/$folderId/layout_$layoutId/$timestamp-$storageFileName';
+          '$projectId/$layoutFolderId/layout_$layoutId/$timestamp-$storageFileName';
       final contentType =
           file.type.isEmpty ? _getLayoutImageContentType(extension) : file.type;
 
@@ -2640,7 +2902,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             'name': fileName,
             'type': 'file',
             'extension': extension,
-            'parent_id': folderId,
+            'parent_id': layoutFolderId,
             'file_url': storagePath,
             'file_size': file.size,
           })
@@ -2744,15 +3006,9 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
       if (storagePath.isEmpty) {
         final layoutId = await _resolveLayoutIdForDocument(layoutIndex);
-        final folderId =
-            await _findRootDocumentsFolderIdByName(_layoutDocumentsFolderName);
-        if (layoutId != null &&
-            layoutId.isNotEmpty &&
-            folderId != null &&
-            folderId.isNotEmpty) {
+        if (layoutId != null && layoutId.isNotEmpty) {
           final latest = await _findLatestLayoutDocumentRow(
             projectId: projectId,
-            folderId: folderId,
             layoutId: layoutId,
           );
           if (latest != null) {
@@ -3291,6 +3547,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
 
       String storagePath = '';
       String docId = '';
+      String parentFolderId = '';
       if (isAmenityImage) {
         storagePath = _resolveDocumentStoragePath(_amenityLayoutImagePath);
         docId = _amenityLayoutImageDocId.trim();
@@ -3304,26 +3561,14 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             (_layouts[layoutIndex]['layoutImageDocId'] ?? '').toString().trim();
       }
 
-      if (storagePath.isEmpty && docId.isNotEmpty) {
-        final byId = await _supabase
-            .from('documents')
-            .select('file_url')
-            .eq('id', docId)
-            .maybeSingle();
-        storagePath = _resolveDocumentStoragePath(
-          (byId?['file_url'] ?? '').toString(),
-        );
-      }
-
-      if (docId.isEmpty && storagePath.isNotEmpty) {
-        final byPath = await _supabase
-            .from('documents')
-            .select('id')
-            .eq('project_id', projectId)
-            .eq('file_url', storagePath)
-            .maybeSingle();
-        docId = (byPath?['id'] ?? '').toString().trim();
-      }
+      final resolved = await _resolveDocumentDeletionTargets(
+        projectId: projectId,
+        docId: docId,
+        urlOrPath: storagePath,
+      );
+      storagePath = resolved['storagePath'] ?? '';
+      docId = resolved['docId'] ?? '';
+      parentFolderId = resolved['parentFolderId'] ?? '';
 
       if (storagePath.isNotEmpty) {
         try {
@@ -3340,6 +3585,11 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             .eq('project_id', projectId)
             .eq('file_url', storagePath);
       }
+
+      await _deleteLayoutChildFolderIfEmpty(
+        projectId: projectId,
+        folderId: parentFolderId,
+      );
 
       if (isAmenityImage) {
         if (mounted) {
@@ -3674,153 +3924,189 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
             }
 
             Future<_LayoutViewerCloseDecision?> showUnsavedEditsDialog() async {
+              var isSaving = false;
               final result = await showDialog<_LayoutViewerCloseDecision>(
                 context: dialogContext,
                 barrierDismissible: true,
                 barrierColor: Colors.black.withOpacity(0.5),
                 builder: (popupContext) {
-                  return Material(
-                    color: Colors.transparent,
-                    child: SafeArea(
-                      child: Align(
-                        alignment: Alignment.topCenter,
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 24),
-                          child: Container(
-                            width: 538,
-                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF8F9FA),
-                              borderRadius: BorderRadius.circular(8),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.25),
-                                  blurRadius: 2,
-                                  offset: const Offset(0, 0),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(
-                                      'Changes may not be saved',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.black,
-                                      ),
-                                    ),
-                                    GestureDetector(
-                                      onTap: () =>
-                                          Navigator.of(popupContext).pop(null),
-                                      child: const Icon(
-                                        Icons.close,
-                                        size: 22,
-                                        color: Color(0xFF0C8CE9),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'You have unsaved changes on this layout image.',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.8),
+                  return StatefulBuilder(
+                    builder: (context, setPopupState) => Material(
+                      color: Colors.transparent,
+                      child: SafeArea(
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 24),
+                            child: Container(
+                              width: 538,
+                              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF8F9FA),
+                                borderRadius: BorderRadius.circular(8),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.25),
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 0),
                                   ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Save before closing?',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.normal,
-                                    color: Colors.black.withOpacity(0.8),
-                                  ),
-                                ),
-                                const SizedBox(height: 16),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    GestureDetector(
-                                      onTap: () =>
-                                          Navigator.of(popupContext).pop(
-                                        _LayoutViewerCloseDecision.discard,
-                                      ),
-                                      child: Container(
-                                        height: 44,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.25),
-                                              blurRadius: 2,
-                                              offset: const Offset(0, 0),
-                                            ),
-                                          ],
+                                ],
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'Changes may not be saved',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.black,
                                         ),
-                                        child: Center(
-                                          child: Text(
-                                            'Discard',
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.normal,
-                                              color: const Color(0xFF0C8CE9),
+                                      ),
+                                      GestureDetector(
+                                        onTap: () {
+                                          if (isSaving) return;
+                                          Navigator.of(popupContext).pop(null);
+                                        },
+                                        child: const Icon(
+                                          Icons.close,
+                                          size: 22,
+                                          color: Color(0xFF0C8CE9),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'You have unsaved changes on this layout image.',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black.withOpacity(0.8),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Save before closing?',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.normal,
+                                      color: Colors.black.withOpacity(0.8),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      GestureDetector(
+                                        onTap: () {
+                                          if (isSaving) return;
+                                          Navigator.of(popupContext).pop(
+                                            _LayoutViewerCloseDecision.discard,
+                                          );
+                                        },
+                                        child: Container(
+                                          height: 44,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black
+                                                    .withOpacity(0.25),
+                                                blurRadius: 2,
+                                                offset: const Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Center(
+                                            child: Text(
+                                              'Discard',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.normal,
+                                                color: const Color(0xFF0C8CE9),
+                                              ),
                                             ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                    GestureDetector(
-                                      onTap: () =>
-                                          Navigator.of(popupContext).pop(
-                                        _LayoutViewerCloseDecision.save,
-                                      ),
-                                      child: Container(
-                                        height: 44,
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 4),
-                                        decoration: BoxDecoration(
-                                          color: Colors.white,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.25),
-                                              blurRadius: 2,
-                                              offset: const Offset(0, 0),
-                                            ),
-                                          ],
-                                        ),
-                                        child: Center(
-                                          child: Text(
-                                            'Save',
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.normal,
-                                              color: const Color(0xFF0C8CE9),
-                                            ),
+                                      GestureDetector(
+                                        onTap: () async {
+                                          if (isSaving) return;
+                                          setPopupState(() => isSaving = true);
+                                          await persistEditsIfNeeded();
+                                          if (!hasPendingEdits) {
+                                            if (popupContext.mounted) {
+                                              Navigator.of(popupContext).pop(
+                                                _LayoutViewerCloseDecision.save,
+                                              );
+                                            }
+                                            return;
+                                          }
+                                          if (popupContext.mounted) {
+                                            setPopupState(
+                                                () => isSaving = false);
+                                          }
+                                        },
+                                        child: Container(
+                                          height: 44,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black
+                                                    .withOpacity(0.25),
+                                                blurRadius: 2,
+                                                offset: const Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Center(
+                                            child: isSaving
+                                                ? const SizedBox(
+                                                    width: 16,
+                                                    height: 16,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      valueColor:
+                                                          AlwaysStoppedAnimation<
+                                                              Color>(
+                                                        Color(0xFF0C8CE9),
+                                                      ),
+                                                    ),
+                                                  )
+                                                : Text(
+                                                    'Save',
+                                                    style: GoogleFonts.inter(
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.normal,
+                                                      color: const Color(
+                                                          0xFF0C8CE9),
+                                                    ),
+                                                  ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  ],
-                                ),
-                              ],
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -3838,6 +4124,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   : layoutName.trim().isEmpty
                       ? 'NA'
                       : layoutName.trim();
+              final layoutNumberPrefix =
+                  !isAmenityImage && layoutIndex != null && layoutIndex >= 0
+                      ? '${layoutIndex + 1}. Layout:'
+                      : 'Layout:';
               final result = await showDialog<bool>(
                 context: dialogContext,
                 barrierDismissible: true,
@@ -3901,7 +4191,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                     ),
                                     children: [
                                       TextSpan(
-                                        text: '1. Layout:',
+                                        text: layoutNumberPrefix,
                                         style: GoogleFonts.inter(
                                           fontSize: 14,
                                           fontWeight: FontWeight.w500,
@@ -4661,14 +4951,17 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                       'assets/images/Layout_close.svg',
                                   onTap: () async {
                                     closeToolPickers();
+                                    if (!hasPendingEdits) {
+                                      if (dialogContext.mounted) {
+                                        Navigator.of(dialogContext).pop();
+                                      }
+                                      return;
+                                    }
                                     final closeDecision =
                                         await showUnsavedEditsDialog();
                                     if (closeDecision == null) return;
                                     if (closeDecision ==
-                                        _LayoutViewerCloseDecision.save) {
-                                      await persistEditsIfNeeded();
-                                      if (hasPendingEdits) return;
-                                    } else {
+                                        _LayoutViewerCloseDecision.discard) {
                                       skipPersistOnClose = true;
                                     }
                                     if (dialogContext.mounted) {
@@ -6071,8 +6364,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                             .copyWith(scrollbars: false),
                         child: ScrollbarTheme(
                           data: ScrollbarThemeData(
-                            crossAxisMargin: 0,
-                            mainAxisMargin: 0,
+                            crossAxisMargin: 8,
+                            mainAxisMargin: 8,
                             thickness: MaterialStateProperty.all(8),
                             thumbColor: MaterialStateProperty.resolveWith(
                               (states) {
@@ -9940,202 +10233,212 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       );
     }
 
-    return Scrollbar(
-      controller: _plotStatusTableScrollController,
-      thumbVisibility: true,
-      child: SingleChildScrollView(
+    return ScrollbarTheme(
+      data: const ScrollbarThemeData(
+        crossAxisMargin: 0,
+        mainAxisMargin: 0,
+      ),
+      child: Scrollbar(
         controller: _plotStatusTableScrollController,
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Sl. No. column
-            _buildColumn(
-              header: 'Sl. No.',
-              width: 70,
-              isFirst: true,
-              children: List.generate(filteredPlots.length, (index) {
-                return _buildCell(
-                  width: 70,
-                  content: Text(
-                    '${index + 1}',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      fontStyle: FontStyle.normal,
-                      color: Colors.black, // #000
-                      height: 1.0, // normal line-height
+        thumbVisibility: true,
+        child: SingleChildScrollView(
+          controller: _plotStatusTableScrollController,
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Sl. No. column
+              _buildColumn(
+                header: 'Sl. No.',
+                width: 70,
+                isFirst: true,
+                children: List.generate(filteredPlots.length, (index) {
+                  return _buildCell(
+                    width: 70,
+                    content: Text(
+                      '${index + 1}',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        fontStyle: FontStyle.normal,
+                        color: Colors.black, // #000
+                        height: 1.0, // normal line-height
+                      ),
                     ),
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-            // Layout column
-            _buildColumn(
-              header: 'Layout',
-              width: 186,
-              children: List.generate(filteredPlots.length, (index) {
-                final layout = filteredPlots[index]['layout'] as String? ?? '';
-                return _buildCell(
-                  width: 186,
-                  content: Text(
-                    layout.isEmpty ? '-' : layout,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+              // Layout column
+              _buildColumn(
+                header: 'Layout',
+                width: 186,
+                children: List.generate(filteredPlots.length, (index) {
+                  final layout =
+                      filteredPlots[index]['layout'] as String? ?? '';
+                  return _buildCell(
+                    width: 186,
+                    content: Text(
+                      layout.isEmpty ? '-' : layout,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-            // Plot Number column
-            _buildColumn(
-              header: 'Plot Number',
-              width: 215,
-              children: List.generate(filteredPlots.length, (index) {
-                final plotNumber =
-                    filteredPlots[index]['plotNumber'] as String? ?? '';
-                return _buildCell(
-                  width: 215,
-                  content: Text(
-                    plotNumber.isEmpty ? '-' : plotNumber,
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+              // Plot Number column
+              _buildColumn(
+                header: 'Plot Number',
+                width: 215,
+                children: List.generate(filteredPlots.length, (index) {
+                  final plotNumber =
+                      filteredPlots[index]['plotNumber'] as String? ?? '';
+                  return _buildCell(
+                    width: 215,
+                    content: Text(
+                      plotNumber.isEmpty ? '-' : plotNumber,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-            // Area column
-            _buildColumn(
-              header: 'Area ($_areaUnitSuffix)',
-              width: 180,
-              children: List.generate(filteredPlots.length, (index) {
-                final area = filteredPlots[index]['area'] as String? ?? '0.00';
-                return _buildCell(
-                  width: 180,
-                  content: Text(
-                    _formatAreaValue(area),
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+              // Area column
+              _buildColumn(
+                header: 'Area ($_areaUnitSuffix)',
+                width: 180,
+                children: List.generate(filteredPlots.length, (index) {
+                  final area =
+                      filteredPlots[index]['area'] as String? ?? '0.00';
+                  return _buildCell(
+                    width: 180,
+                    content: Text(
+                      _formatAreaValue(area),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-            // Purchase Rate column
-            _buildColumn(
-              header: 'Purchase Rate',
-              width: 215,
-              children: List.generate(filteredPlots.length, (index) {
-                final rate =
-                    filteredPlots[index]['purchaseRate'] as String? ?? '0.00';
-                return _buildCell(
-                  width: 215,
-                  content: Text(
-                    rate.isEmpty || rate == '0.00'
-                        ? '-'
-                        : '₹ ${_formatAmount(rate)}',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.normal,
-                      color: Colors.black,
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+              // Purchase Rate column
+              _buildColumn(
+                header: 'Purchase Rate',
+                width: 215,
+                children: List.generate(filteredPlots.length, (index) {
+                  final rate =
+                      filteredPlots[index]['purchaseRate'] as String? ?? '0.00';
+                  return _buildCell(
+                    width: 215,
+                    content: Text(
+                      rate.isEmpty || rate == '0.00'
+                          ? '-'
+                          : '₹ ${_formatAmount(rate)}',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.normal,
+                        color: Colors.black,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-            // Status column
-            _buildColumn(
-              header: 'Status',
-              width: 320,
-              isLast: true,
-              children: List.generate(filteredPlots.length, (index) {
-                final status = _parsePlotStatus(filteredPlots[index]['status']);
-                final statusColor = _getStatusColor(status);
-                final statusText = _getStatusString(status);
-                final statusBackgroundColor = _getStatusBackgroundColor(status);
-                return _buildCell(
-                  width: 320,
-                  content: Builder(
-                    builder: (builderContext) {
-                      final statusKey = GlobalKey();
-                      final iconKey = GlobalKey();
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+              // Status column
+              _buildColumn(
+                header: 'Status',
+                width: 320,
+                isLast: true,
+                children: List.generate(filteredPlots.length, (index) {
+                  final status =
+                      _parsePlotStatus(filteredPlots[index]['status']);
+                  final statusColor = _getStatusColor(status);
+                  final statusText = _getStatusString(status);
+                  final statusBackgroundColor =
+                      _getStatusBackgroundColor(status);
+                  return _buildCell(
+                    width: 320,
+                    content: Builder(
+                      builder: (builderContext) {
+                        final statusKey = GlobalKey();
+                        final iconKey = GlobalKey();
 
-                      // Read-only status display - no editing in table
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: statusBackgroundColor,
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.25),
-                              blurRadius: 2,
-                              offset: const Offset(0, 0),
-                              spreadRadius: 0,
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 16,
-                              height: 16,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
+                        // Read-only status display - no editing in table
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: statusBackgroundColor,
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 2,
+                                offset: const Offset(0, 0),
+                                spreadRadius: 0,
                               ),
-                              child: Center(
-                                child: Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: statusColor,
-                                    shape: BoxShape.circle,
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 16,
+                                height: 16,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Center(
+                                  child: Container(
+                                    width: 12,
+                                    height: 12,
+                                    decoration: BoxDecoration(
+                                      color: statusColor,
+                                      shape: BoxShape.circle,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              statusText,
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.inter(
-                                fontSize: 14,
-                                fontWeight: FontWeight.normal,
-                                fontStyle: FontStyle.normal,
-                                color: Colors.black, // #000
-                                height: 1.0, // normal line-height
+                              const SizedBox(width: 8),
+                              Text(
+                                statusText,
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.inter(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.normal,
+                                  fontStyle: FontStyle.normal,
+                                  color: Colors.black, // #000
+                                  height: 1.0, // normal line-height
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                  isLast: index == filteredPlots.length - 1,
-                );
-              }),
-            ),
-          ],
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    isLast: index == filteredPlots.length - 1,
+                  );
+                }),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -11582,38 +11885,44 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                 return SizedBox(
                   width: double.infinity,
                   height: scaledHeight,
-                  child: Scrollbar(
-                    controller: scrollController,
-                    thumbVisibility: true,
-                    child: SingleChildScrollView(
+                  child: ScrollbarTheme(
+                    data: const ScrollbarThemeData(
+                      crossAxisMargin: 0,
+                      mainAxisMargin: 0,
+                    ),
+                    child: Scrollbar(
                       controller: scrollController,
-                      scrollDirection: Axis.horizontal,
-                      physics: const BouncingScrollPhysics(),
-                      clipBehavior: Clip.hardEdge,
-                      child: Padding(
-                        padding: EdgeInsets.only(
-                          left:
-                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
-                          right: ((_tableZoomLevel - 1.0) * 10.0)
-                                  .clamp(0.0, 10.0) +
-                              ((_tableZoomLevel - 1.0) * 1350.0).clamp(0.0,
-                                  1350.0), // Extra right padding when zoomed to allow full scrolling to last column
-                          top:
-                              ((_tableZoomLevel - 1.0) * 10.0).clamp(0.0, 10.0),
-                          bottom: ((_tableZoomLevel - 1.0) * 10.0)
-                                  .clamp(0.0, 10.0) +
-                              ((_tableZoomLevel - 1.0) * 100.0).clamp(0.0,
-                                  100.0), // Extra bottom padding for scaled borders to prevent clipping
-                        ),
-                        child: Transform.scale(
-                          scale: _tableZoomLevel,
-                          alignment: Alignment.topLeft,
-                          child: SizedBox(
-                            height:
-                                baseHeight, // Use base height (same as when zoom = 1.0), Transform.scale will handle scaling
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: _buildLayoutTable(layoutIndex, plots),
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: scrollController,
+                        scrollDirection: Axis.horizontal,
+                        physics: const BouncingScrollPhysics(),
+                        clipBehavior: Clip.hardEdge,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: ((_tableZoomLevel - 1.0) * 10.0)
+                                .clamp(0.0, 10.0),
+                            right: ((_tableZoomLevel - 1.0) * 10.0)
+                                    .clamp(0.0, 10.0) +
+                                ((_tableZoomLevel - 1.0) * 1350.0).clamp(0.0,
+                                    1350.0), // Extra right padding when zoomed to allow full scrolling to last column
+                            top: ((_tableZoomLevel - 1.0) * 10.0)
+                                .clamp(0.0, 10.0),
+                            bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                    .clamp(0.0, 10.0) +
+                                ((_tableZoomLevel - 1.0) * 100.0).clamp(0.0,
+                                    100.0), // Extra bottom padding for scaled borders to prevent clipping
+                          ),
+                          child: Transform.scale(
+                            scale: _tableZoomLevel,
+                            alignment: Alignment.topLeft,
+                            child: SizedBox(
+                              height:
+                                  baseHeight, // Use base height (same as when zoom = 1.0), Transform.scale will handle scaling
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: _buildLayoutTable(layoutIndex, plots),
+                              ),
                             ),
                           ),
                         ),
@@ -11984,37 +12293,43 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                   child: SizedBox(
                     width: double.infinity,
                     height: scaledHeight,
-                    child: Scrollbar(
-                      controller: _amenityAreaTableScrollController,
-                      thumbVisibility: true,
-                      child: SingleChildScrollView(
+                    child: ScrollbarTheme(
+                      data: const ScrollbarThemeData(
+                        crossAxisMargin: 0,
+                        mainAxisMargin: 0,
+                      ),
+                      child: Scrollbar(
                         controller: _amenityAreaTableScrollController,
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(),
-                        clipBehavior: Clip.hardEdge,
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            left: ((_tableZoomLevel - 1.0) * 10.0)
-                                .clamp(0.0, 10.0),
-                            right: ((_tableZoomLevel - 1.0) * 10.0)
-                                    .clamp(0.0, 10.0) +
-                                ((_tableZoomLevel - 1.0) * 1350.0)
-                                    .clamp(0.0, 1350.0),
-                            top: ((_tableZoomLevel - 1.0) * 10.0)
-                                .clamp(0.0, 10.0),
-                            bottom: ((_tableZoomLevel - 1.0) * 10.0)
-                                    .clamp(0.0, 10.0) +
-                                ((_tableZoomLevel - 1.0) * 100.0)
-                                    .clamp(0.0, 100.0),
-                          ),
-                          child: Transform.scale(
-                            scale: _tableZoomLevel,
-                            alignment: Alignment.topLeft,
-                            child: SizedBox(
-                              height: baseHeight,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(8),
-                                child: _buildAmenityAreaTable(filteredAreas),
+                        thumbVisibility: true,
+                        child: SingleChildScrollView(
+                          controller: _amenityAreaTableScrollController,
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          clipBehavior: Clip.hardEdge,
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              left: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0),
+                              right: ((_tableZoomLevel - 1.0) * 10.0)
+                                      .clamp(0.0, 10.0) +
+                                  ((_tableZoomLevel - 1.0) * 1350.0)
+                                      .clamp(0.0, 1350.0),
+                              top: ((_tableZoomLevel - 1.0) * 10.0)
+                                  .clamp(0.0, 10.0),
+                              bottom: ((_tableZoomLevel - 1.0) * 10.0)
+                                      .clamp(0.0, 10.0) +
+                                  ((_tableZoomLevel - 1.0) * 100.0)
+                                      .clamp(0.0, 100.0),
+                            ),
+                            child: Transform.scale(
+                              scale: _tableZoomLevel,
+                              alignment: Alignment.topLeft,
+                              child: SizedBox(
+                                height: baseHeight,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: _buildAmenityAreaTable(filteredAreas),
+                                ),
                               ),
                             ),
                           ),

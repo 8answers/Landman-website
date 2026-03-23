@@ -1622,6 +1622,18 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen>
             ? ProjectSaveStatusType.saving
             : status;
     _handleSaveStatusChanged(normalizedStatus);
+    if (sourcePage == NavigationPage.documents &&
+        normalizedStatus == ProjectSaveStatusType.saved) {
+      // Documents mutations (delete/rename/move/upload) can affect Site/Amenity
+      // image metadata shown in Data Entry / Plot Status / Dashboard.
+      // These pages are retained in an IndexedStack, so force a fresh rebuild
+      // on next visit to avoid stale in-memory image state.
+      _setStateSafely(() {
+        _initializedRetainedPages.remove(NavigationPage.dataEntry);
+        _initializedRetainedPages.remove(NavigationPage.plotStatus);
+        _initializedRetainedPages.remove(NavigationPage.dashboard);
+      });
+    }
   }
 
   void _handleLogout() async {

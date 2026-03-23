@@ -14,6 +14,8 @@ import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/layout_storage_service.dart';
+import '../services/project_storage_service.dart';
 import '../widgets/search_highlight_text.dart';
 import '../widgets/project_save_status.dart';
 
@@ -89,12 +91,14 @@ class _DocumentsPageState extends State<DocumentsPage> {
       {}; // Track active uploads
   final List<Map<String, dynamic>> _completedUploads =
       []; // Track completed uploads
+  final ScrollController _contentScrollController = ScrollController();
   final ScrollController _breadcrumbScrollController = ScrollController();
   bool _showBreadcrumbHiddenPrefix = false;
   bool _showUploadingPopup = false; // Control uploading popup visibility
   bool _showUploadedPopup = false; // Control uploaded popup visibility
   bool _isSelectMode = false; // Track if we're in select mode
   final Set<String> _selectedDocumentIds = {}; // Track selected document IDs
+  final Set<String> _deletingFolderIds = <String>{};
   bool _isLayoutImageViewerOpen = false;
   String _activeLayoutImageUrl = '';
   String _activeLayoutImageStoragePath = '';
@@ -567,6 +571,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
 
   @override
   void dispose() {
+    _contentScrollController.dispose();
     _breadcrumbScrollController
         .removeListener(_updateBreadcrumbPrefixVisibility);
     _breadcrumbScrollController.dispose();
@@ -615,7 +620,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
   }
 
   void _deleteSelectedFiles() async {
+    widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saving);
     try {
+      final projectId = widget.projectId?.trim() ?? '';
       final protectedRootFolderIds = _documents
           .where(
             (doc) =>
@@ -634,18 +641,25 @@ class _DocumentsPageState extends State<DocumentsPage> {
         final doc = _documents.firstWhere((item) => item['id'] == docId,
             orElse: () => {});
         if (doc.isNotEmpty) {
-          // Delete file from storage if it has a URL
-          final fileUrl = doc['url'] as String?;
-          if (fileUrl != null && fileUrl.isNotEmpty) {
-            final path = Uri.parse(fileUrl).path.split('/documents/').last;
-            await _supabase.storage.from('documents').remove([path]);
+          final type = (doc['type'] ?? '').toString().toLowerCase();
+          if (type == 'file') {
+            await _deleteDocumentFileAndSync(
+              docId: docId,
+              urlOrPath: (doc['url'] ?? '').toString(),
+              emitStatus: false,
+              reconcileAfter: false,
+            );
+          } else {
+            await _deleteFolderWithIndicator(
+              folderId: docId,
+              emitStatus: false,
+            );
           }
         }
       }
 
-      // Delete from database
-      for (final docId in deletableIds) {
-        await _supabase.from('documents').delete().eq('id', docId);
+      if (projectId.isNotEmpty) {
+        await _reconcileImageMetadataAgainstExistingDocuments(projectId);
       }
 
       setState(() {
@@ -654,8 +668,800 @@ class _DocumentsPageState extends State<DocumentsPage> {
         }
         _exitSelectMode();
       });
+      widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saved);
     } catch (e) {
       debugPrint('Error deleting files: $e');
+      widget.onSaveStatusChanged?.call(ProjectSaveStatusType.connectionLost);
+    }
+  }
+
+  Future<void> _deleteFolderWithIndicator({
+    required String folderId,
+    bool emitStatus = true,
+  }) async {
+    final trimmedFolderId = folderId.trim();
+    if (trimmedFolderId.isEmpty) return;
+    if (_deletingFolderIds.contains(trimmedFolderId)) return;
+
+    if (mounted) {
+      setState(() {
+        _deletingFolderIds.add(trimmedFolderId);
+      });
+    } else {
+      _deletingFolderIds.add(trimmedFolderId);
+    }
+
+    try {
+      await _deleteFolderAndSync(
+        folderId: trimmedFolderId,
+        emitStatus: emitStatus,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _deletingFolderIds.remove(trimmedFolderId);
+        });
+      } else {
+        _deletingFolderIds.remove(trimmedFolderId);
+      }
+    }
+  }
+
+  Future<void> _deleteFolderAndSync({
+    required String folderId,
+    bool emitStatus = true,
+  }) async {
+    if (emitStatus) {
+      widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saving);
+    }
+    final projectId = widget.projectId?.trim();
+    final rootFolderId = folderId.trim();
+    if (projectId == null || projectId.isEmpty || rootFolderId.isEmpty) {
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.connectionLost);
+      }
+      return;
+    }
+
+    try {
+      final rows = await _supabase
+          .from('documents')
+          .select('id,type,parent_id,file_url,name')
+          .eq('project_id', projectId);
+      if (rows is! List || rows.isEmpty) {
+        if (emitStatus) {
+          widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saved);
+        }
+        return;
+      }
+
+      final docs = rows
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false);
+
+      final byParent = <String, List<Map<String, dynamic>>>{};
+      Map<String, dynamic>? rootRow;
+      final layoutIdsToClear = <String>{};
+      var clearAmenityImageMeta = false;
+      for (final row in docs) {
+        final id = (row['id'] ?? '').toString().trim();
+        if (id.isEmpty) continue;
+        if (id == rootFolderId) {
+          rootRow = row;
+        }
+        final parentId = (row['parent_id'] ?? '').toString().trim();
+        byParent.putIfAbsent(parentId, () => <Map<String, dynamic>>[]).add(row);
+      }
+      if (rootRow == null) {
+        if (emitStatus) {
+          widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saved);
+        }
+        return;
+      }
+
+      // Strong mapping: if a layout/amenity image path references this folder id,
+      // clear it even when descendant traversal/path parsing misses.
+      final folderToken = '/$rootFolderId/';
+      try {
+        final layoutRows = await _supabase
+            .from('layouts')
+            .select('id,layout_image_path')
+            .eq('project_id', projectId)
+            .limit(3000);
+        if (layoutRows is List) {
+          for (final raw in layoutRows) {
+            if (raw is! Map) continue;
+            final row = Map<String, dynamic>.from(raw);
+            final layoutId = (row['id'] ?? '').toString().trim();
+            if (layoutId.isEmpty) continue;
+            final imagePath = _resolveDocumentStoragePath(
+              (row['layout_image_path'] ?? '').toString(),
+            );
+            if (imagePath.isEmpty) continue;
+            if (imagePath.contains(folderToken)) {
+              layoutIdsToClear.add(layoutId);
+            }
+          }
+        }
+      } catch (_) {}
+      try {
+        final projectRow = await _supabase
+            .from('projects')
+            .select('amenity_layout_image_path')
+            .eq('id', projectId)
+            .maybeSingle();
+        final amenityPath = _resolveDocumentStoragePath(
+          (projectRow?['amenity_layout_image_path'] ?? '').toString(),
+        );
+        clearAmenityImageMeta =
+            amenityPath.isNotEmpty && amenityPath.contains(folderToken);
+      } catch (_) {}
+
+      final descendantIds = <String>{};
+      final folderDepth = <String, int>{rootFolderId: 0};
+      final queue = <String>[rootFolderId];
+      while (queue.isNotEmpty) {
+        final currentId = queue.removeAt(0);
+        if (!descendantIds.add(currentId)) continue;
+        final currentDepth = folderDepth[currentId] ?? 0;
+        final children = byParent[currentId] ?? const <Map<String, dynamic>>[];
+        for (final child in children) {
+          final childId = (child['id'] ?? '').toString().trim();
+          if (childId.isEmpty) continue;
+          final childType = (child['type'] ?? '').toString().toLowerCase();
+          if (childType == 'folder') {
+            folderDepth[childId] = currentDepth + 1;
+            queue.add(childId);
+          } else {
+            descendantIds.add(childId);
+            final storagePath = _resolveDocumentStoragePath(
+              (child['file_url'] ?? '').toString(),
+            );
+            final layoutId = _layoutIdFromStoragePath(storagePath);
+            if (layoutId != null && layoutId.isNotEmpty) {
+              layoutIdsToClear.add(layoutId);
+            }
+          }
+        }
+      }
+
+      // Always attempt a folder-name -> layout-id match for Layouts child folders.
+      // This guarantees metadata clear even if descendant file paths are legacy,
+      // malformed, or no longer include layout_<id>.
+      final rootParentId = (rootRow['parent_id'] ?? '').toString().trim();
+      final rootFolderName = (rootRow['name'] ?? '').toString().trim();
+      if (rootParentId.isNotEmpty && rootFolderName.isNotEmpty) {
+        try {
+          final parentRow = await _supabase
+              .from('documents')
+              .select('id,name,parent_id,type')
+              .eq('id', rootParentId)
+              .eq('project_id', projectId)
+              .maybeSingle();
+          final parentName =
+              (parentRow?['name'] ?? '').toString().trim().toLowerCase();
+          final parentIsRoot =
+              (parentRow?['parent_id'] ?? '').toString().trim().isEmpty;
+          final parentType =
+              (parentRow?['type'] ?? '').toString().trim().toLowerCase();
+          final isLayoutsRoot = parentType == 'folder' &&
+              parentIsRoot &&
+              parentName == _defaultLayoutsFolderName.toLowerCase();
+          if (isLayoutsRoot) {
+            final byName = await _supabase
+                .from('layouts')
+                .select('id')
+                .eq('project_id', projectId)
+                .eq('name', rootFolderName)
+                .limit(1)
+                .maybeSingle();
+            final byNameId = (byName?['id'] ?? '').toString().trim();
+            if (byNameId.isNotEmpty) {
+              layoutIdsToClear.add(byNameId);
+            }
+          }
+        } catch (_) {}
+      }
+
+      for (final row in docs) {
+        final id = (row['id'] ?? '').toString().trim();
+        if (!descendantIds.contains(id)) continue;
+        final type = (row['type'] ?? '').toString().toLowerCase();
+        if (type != 'file') continue;
+        await _deleteDocumentFileAndSync(
+          docId: id,
+          urlOrPath: (row['file_url'] ?? '').toString(),
+          emitStatus: false,
+          reconcileAfter: false,
+        );
+      }
+
+      final folderIds = descendantIds.where((id) {
+        final row = docs.firstWhere(
+          (item) => (item['id'] ?? '').toString().trim() == id,
+          orElse: () => <String, dynamic>{},
+        );
+        final type = (row['type'] ?? '').toString().toLowerCase();
+        return type == 'folder';
+      }).toList(growable: false);
+      folderIds
+          .sort((a, b) => (folderDepth[b] ?? 0).compareTo(folderDepth[a] ?? 0));
+
+      for (final id in folderIds) {
+        try {
+          await _supabase.from('documents').delete().eq('id', id);
+        } catch (_) {}
+      }
+
+      if (layoutIdsToClear.isNotEmpty) {
+        try {
+          final allFiles = await _supabase
+              .from('documents')
+              .select('id,file_url')
+              .eq('project_id', projectId)
+              .eq('type', 'file')
+              .order('created_at', ascending: false)
+              .limit(2000);
+          if (allFiles is List) {
+            for (final raw in allFiles) {
+              if (raw is! Map) continue;
+              final row = Map<String, dynamic>.from(raw);
+              final docId = (row['id'] ?? '').toString().trim();
+              final filePath = _resolveDocumentStoragePath(
+                  (row['file_url'] ?? '').toString());
+              if (docId.isEmpty || filePath.isEmpty) continue;
+              final layoutId = _layoutIdFromStoragePath(filePath);
+              if (layoutId == null || !layoutIdsToClear.contains(layoutId)) {
+                continue;
+              }
+              await _deleteDocumentFileAndSync(
+                docId: docId,
+                urlOrPath: filePath,
+                emitStatus: false,
+                reconcileAfter: false,
+              );
+            }
+          }
+        } catch (_) {}
+
+        try {
+          await _supabase
+              .from('layouts')
+              .update({
+                'layout_image_name': '',
+                'layout_image_path': '',
+                'layout_image_doc_id': '',
+                'layout_image_extension': '',
+              })
+              .eq('project_id', projectId)
+              .inFilter('id', layoutIdsToClear.toList(growable: false));
+        } catch (_) {}
+
+        try {
+          final localLayouts =
+              await LayoutStorageService.loadLayoutsData(projectKey: projectId);
+          if (localLayouts.isNotEmpty) {
+            var localChanged = false;
+            for (final layout in localLayouts) {
+              final id = (layout['id'] ?? '').toString().trim();
+              if (!layoutIdsToClear.contains(id)) continue;
+              layout['layoutImageName'] = '';
+              layout['layoutImagePath'] = '';
+              layout['layoutImageDocId'] = '';
+              layout['layoutImageExtension'] = '';
+              layout['layout_image_name'] = '';
+              layout['layout_image_path'] = '';
+              layout['layout_image_doc_id'] = '';
+              layout['layout_image_extension'] = '';
+              localChanged = true;
+            }
+            if (localChanged) {
+              await LayoutStorageService.saveLayoutsDataDirect(
+                localLayouts,
+                projectKey: projectId,
+              );
+            }
+          }
+        } catch (_) {}
+
+        ProjectStorageService.invalidateProjectCache(projectId);
+      }
+
+      if (clearAmenityImageMeta) {
+        try {
+          await _supabase.from('projects').update({
+            'amenity_layout_image_name': '',
+            'amenity_layout_image_path': '',
+            'amenity_layout_image_doc_id': '',
+            'amenity_layout_image_extension': '',
+          }).eq('id', projectId);
+        } catch (_) {}
+      }
+
+      await _reconcileImageMetadataAgainstExistingDocuments(projectId);
+
+      if (mounted) {
+        setState(() {
+          _documents.removeWhere(
+            (item) => descendantIds.contains((item['id'] ?? '').toString()),
+          );
+        });
+      } else {
+        _documents.removeWhere(
+          (item) => descendantIds.contains((item['id'] ?? '').toString()),
+        );
+      }
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saved);
+      }
+    } catch (e) {
+      debugPrint('Error deleting folder and syncing: $e');
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.connectionLost);
+      }
+    }
+  }
+
+  Future<Map<String, String>> _resolveDocumentDeletionTargets({
+    required String projectId,
+    required String docId,
+    required String urlOrPath,
+  }) async {
+    var resolvedDocId = docId.trim();
+    var resolvedStoragePath = _resolveDocumentStoragePath(urlOrPath);
+    var parentFolderId = '';
+
+    if (resolvedDocId.isNotEmpty) {
+      final byId = await _supabase
+          .from('documents')
+          .select('id,file_url,parent_id')
+          .eq('id', resolvedDocId)
+          .maybeSingle();
+      if (byId != null) {
+        resolvedDocId = (byId['id'] ?? resolvedDocId).toString().trim();
+        final byIdPath = _resolveDocumentStoragePath(
+          (byId['file_url'] ?? '').toString(),
+        );
+        if (byIdPath.isNotEmpty) {
+          resolvedStoragePath = byIdPath;
+        }
+        parentFolderId = (byId['parent_id'] ?? '').toString().trim();
+      }
+    }
+
+    if (resolvedDocId.isEmpty && resolvedStoragePath.isNotEmpty) {
+      final byPath = await _supabase
+          .from('documents')
+          .select('id,parent_id')
+          .eq('project_id', projectId)
+          .eq('file_url', resolvedStoragePath)
+          .limit(1)
+          .maybeSingle();
+      if (byPath != null) {
+        resolvedDocId = (byPath['id'] ?? '').toString().trim();
+        parentFolderId = (byPath['parent_id'] ?? '').toString().trim();
+      }
+    }
+
+    return {
+      'docId': resolvedDocId,
+      'storagePath': resolvedStoragePath,
+      'parentFolderId': parentFolderId,
+    };
+  }
+
+  Future<void> _clearLayoutAndAmenityMetaForDeletedImage({
+    required String projectId,
+    required String docId,
+    required String storagePath,
+  }) async {
+    if (docId.isNotEmpty) {
+      try {
+        await _supabase
+            .from('layouts')
+            .update({
+              'layout_image_name': '',
+              'layout_image_path': '',
+              'layout_image_doc_id': '',
+              'layout_image_extension': '',
+            })
+            .eq('project_id', projectId)
+            .eq('layout_image_doc_id', docId);
+      } catch (_) {}
+      try {
+        await _supabase
+            .from('projects')
+            .update({
+              'amenity_layout_image_name': '',
+              'amenity_layout_image_path': '',
+              'amenity_layout_image_doc_id': '',
+              'amenity_layout_image_extension': '',
+            })
+            .eq('id', projectId)
+            .eq('amenity_layout_image_doc_id', docId);
+      } catch (_) {}
+    }
+    if (storagePath.isNotEmpty) {
+      try {
+        await _supabase
+            .from('layouts')
+            .update({
+              'layout_image_name': '',
+              'layout_image_path': '',
+              'layout_image_doc_id': '',
+              'layout_image_extension': '',
+            })
+            .eq('project_id', projectId)
+            .eq('layout_image_path', storagePath);
+      } catch (_) {}
+      try {
+        await _supabase
+            .from('projects')
+            .update({
+              'amenity_layout_image_name': '',
+              'amenity_layout_image_path': '',
+              'amenity_layout_image_doc_id': '',
+              'amenity_layout_image_extension': '',
+            })
+            .eq('id', projectId)
+            .eq('amenity_layout_image_path', storagePath);
+      } catch (_) {}
+    }
+
+    try {
+      final localLayouts =
+          await LayoutStorageService.loadLayoutsData(projectKey: projectId);
+      if (localLayouts.isNotEmpty) {
+        final normalizedStoragePath = storagePath.trim();
+        final normalizedStoragePublicUrl = normalizedStoragePath.isEmpty
+            ? ''
+            : _resolveDocumentPublicUrl(normalizedStoragePath);
+        var localChanged = false;
+        for (final layout in localLayouts) {
+          final localDocId = (layout['layoutImageDocId'] ??
+                  layout['layout_image_doc_id'] ??
+                  '')
+              .toString()
+              .trim();
+          final localPathRaw =
+              (layout['layoutImagePath'] ?? layout['layout_image_path'] ?? '')
+                  .toString()
+                  .trim();
+          final localPathNormalized = _resolveDocumentStoragePath(localPathRaw);
+
+          final matchesDoc = docId.isNotEmpty && localDocId == docId;
+          final matchesPath = normalizedStoragePath.isNotEmpty &&
+              (localPathNormalized == normalizedStoragePath ||
+                  localPathRaw == normalizedStoragePath ||
+                  localPathRaw == normalizedStoragePublicUrl);
+          if (!matchesDoc && !matchesPath) continue;
+
+          layout['layoutImageName'] = '';
+          layout['layoutImagePath'] = '';
+          layout['layoutImageDocId'] = '';
+          layout['layoutImageExtension'] = '';
+          layout['layout_image_name'] = '';
+          layout['layout_image_path'] = '';
+          layout['layout_image_doc_id'] = '';
+          layout['layout_image_extension'] = '';
+          localChanged = true;
+        }
+        if (localChanged) {
+          await LayoutStorageService.saveLayoutsDataDirect(
+            localLayouts,
+            projectKey: projectId,
+          );
+        }
+      }
+    } catch (_) {}
+
+    ProjectStorageService.invalidateProjectCache(projectId);
+  }
+
+  Future<void> _reconcileImageMetadataAgainstExistingDocuments(
+    String projectId,
+  ) async {
+    final trimmedProjectId = projectId.trim();
+    if (trimmedProjectId.isEmpty) return;
+
+    try {
+      final fileRows = await _supabase
+          .from('documents')
+          .select('id,file_url')
+          .eq('project_id', trimmedProjectId)
+          .eq('type', 'file')
+          .limit(3000);
+
+      final existingDocIds = <String>{};
+      final existingStoragePaths = <String>{};
+      if (fileRows is List) {
+        for (final raw in fileRows) {
+          if (raw is! Map) continue;
+          final row = Map<String, dynamic>.from(raw);
+          final docId = (row['id'] ?? '').toString().trim();
+          final storagePath = _resolveDocumentStoragePath(
+            (row['file_url'] ?? '').toString(),
+          );
+          if (docId.isNotEmpty) existingDocIds.add(docId);
+          if (storagePath.isNotEmpty) existingStoragePaths.add(storagePath);
+        }
+      }
+
+      final staleLayoutIds = <String>{};
+      try {
+        final layouts = await _supabase
+            .from('layouts')
+            .select('id,layout_image_doc_id,layout_image_path')
+            .eq('project_id', trimmedProjectId)
+            .limit(2000);
+        if (layouts is List) {
+          for (final raw in layouts) {
+            if (raw is! Map) continue;
+            final row = Map<String, dynamic>.from(raw);
+            final layoutId = (row['id'] ?? '').toString().trim();
+            if (layoutId.isEmpty) continue;
+            final docId = (row['layout_image_doc_id'] ?? '').toString().trim();
+            final path = _resolveDocumentStoragePath(
+              (row['layout_image_path'] ?? '').toString(),
+            );
+            final hasMeta = docId.isNotEmpty || path.isNotEmpty;
+            if (!hasMeta) continue;
+            final missingDoc =
+                docId.isNotEmpty && !existingDocIds.contains(docId);
+            final missingPath =
+                path.isNotEmpty && !existingStoragePaths.contains(path);
+            if (missingDoc || missingPath) {
+              staleLayoutIds.add(layoutId);
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (staleLayoutIds.isNotEmpty) {
+        try {
+          await _supabase
+              .from('layouts')
+              .update({
+                'layout_image_name': '',
+                'layout_image_path': '',
+                'layout_image_doc_id': '',
+                'layout_image_extension': '',
+              })
+              .eq('project_id', trimmedProjectId)
+              .inFilter('id', staleLayoutIds.toList(growable: false));
+        } catch (_) {}
+      }
+
+      try {
+        final projectRow = await _supabase
+            .from('projects')
+            .select('amenity_layout_image_doc_id,amenity_layout_image_path')
+            .eq('id', trimmedProjectId)
+            .maybeSingle();
+        if (projectRow != null) {
+          final amenityDocId = (projectRow['amenity_layout_image_doc_id'] ?? '')
+              .toString()
+              .trim();
+          final amenityPath = _resolveDocumentStoragePath(
+            (projectRow['amenity_layout_image_path'] ?? '').toString(),
+          );
+          final hasAmenityMeta =
+              amenityDocId.isNotEmpty || amenityPath.isNotEmpty;
+          final missingAmenityDoc =
+              amenityDocId.isNotEmpty && !existingDocIds.contains(amenityDocId);
+          final missingAmenityPath = amenityPath.isNotEmpty &&
+              !existingStoragePaths.contains(amenityPath);
+          if (hasAmenityMeta && (missingAmenityDoc || missingAmenityPath)) {
+            try {
+              await _supabase.from('projects').update({
+                'amenity_layout_image_name': '',
+                'amenity_layout_image_path': '',
+                'amenity_layout_image_doc_id': '',
+                'amenity_layout_image_extension': '',
+              }).eq('id', trimmedProjectId);
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
+      try {
+        final localLayouts = await LayoutStorageService.loadLayoutsData(
+          projectKey: trimmedProjectId,
+        );
+        if (localLayouts.isNotEmpty) {
+          var changed = false;
+          for (final layout in localLayouts) {
+            final layoutId = (layout['id'] ?? '').toString().trim();
+            final localDocId = (layout['layoutImageDocId'] ??
+                    layout['layout_image_doc_id'] ??
+                    '')
+                .toString()
+                .trim();
+            final localPath = _resolveDocumentStoragePath(
+              (layout['layoutImagePath'] ?? layout['layout_image_path'] ?? '')
+                  .toString(),
+            );
+            final missingDoc =
+                localDocId.isNotEmpty && !existingDocIds.contains(localDocId);
+            final missingPath = localPath.isNotEmpty &&
+                !existingStoragePaths.contains(localPath);
+            final staleByLayoutId =
+                layoutId.isNotEmpty && staleLayoutIds.contains(layoutId);
+            if (!missingDoc && !missingPath && !staleByLayoutId) continue;
+            layout['layoutImageName'] = '';
+            layout['layoutImagePath'] = '';
+            layout['layoutImageDocId'] = '';
+            layout['layoutImageExtension'] = '';
+            layout['layout_image_name'] = '';
+            layout['layout_image_path'] = '';
+            layout['layout_image_doc_id'] = '';
+            layout['layout_image_extension'] = '';
+            changed = true;
+          }
+          if (changed) {
+            await LayoutStorageService.saveLayoutsDataDirect(
+              localLayouts,
+              projectKey: trimmedProjectId,
+            );
+          }
+        }
+      } catch (_) {}
+
+      ProjectStorageService.invalidateProjectCache(trimmedProjectId);
+    } catch (e) {
+      debugPrint('Image metadata reconciliation failed: $e');
+    }
+  }
+
+  Future<void> _deleteFolderIfEmptyAndLayoutChild({
+    required String projectId,
+    required String folderId,
+  }) async {
+    final trimmedFolderId = folderId.trim();
+    if (trimmedFolderId.isEmpty) return;
+
+    try {
+      final folderRow = await _supabase
+          .from('documents')
+          .select('id,type,parent_id')
+          .eq('id', trimmedFolderId)
+          .eq('project_id', projectId)
+          .maybeSingle();
+      if (folderRow == null) return;
+      if ((folderRow['type'] ?? '').toString().toLowerCase() != 'folder')
+        return;
+
+      final parentId = (folderRow['parent_id'] ?? '').toString().trim();
+      if (parentId.isEmpty) return;
+
+      final parentRow = await _supabase
+          .from('documents')
+          .select('id,name,parent_id,type')
+          .eq('id', parentId)
+          .eq('project_id', projectId)
+          .maybeSingle();
+      if (parentRow == null) return;
+      if ((parentRow['type'] ?? '').toString().toLowerCase() != 'folder')
+        return;
+      final parentName =
+          (parentRow['name'] ?? '').toString().trim().toLowerCase();
+      if (parentName != _defaultLayoutsFolderName.toLowerCase()) return;
+      final parentParentId = (parentRow['parent_id'] ?? '').toString().trim();
+      if (parentParentId.isNotEmpty) return;
+
+      final children = await _supabase
+          .from('documents')
+          .select('id')
+          .eq('project_id', projectId)
+          .eq('parent_id', trimmedFolderId)
+          .limit(1);
+      if (children is List && children.isNotEmpty) return;
+
+      await _supabase.from('documents').delete().eq('id', trimmedFolderId);
+      if (mounted) {
+        setState(() {
+          _documents.removeWhere(
+            (item) => (item['id'] ?? '').toString() == trimmedFolderId,
+          );
+        });
+      } else {
+        _documents.removeWhere(
+          (item) => (item['id'] ?? '').toString() == trimmedFolderId,
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _deleteDocumentFileAndSync({
+    required String docId,
+    required String urlOrPath,
+    bool emitStatus = true,
+    bool reconcileAfter = true,
+  }) async {
+    if (emitStatus) {
+      widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saving);
+    }
+    final projectId = widget.projectId?.trim();
+    if (projectId == null || projectId.isEmpty) {
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.connectionLost);
+      }
+      return;
+    }
+
+    try {
+      final resolved = await _resolveDocumentDeletionTargets(
+        projectId: projectId,
+        docId: docId,
+        urlOrPath: urlOrPath,
+      );
+      final resolvedDocId = resolved['docId'] ?? '';
+      final resolvedStoragePath = resolved['storagePath'] ?? '';
+      final parentFolderId = resolved['parentFolderId'] ?? '';
+
+      if (resolvedStoragePath.isNotEmpty) {
+        try {
+          await _supabase.storage
+              .from('documents')
+              .remove([resolvedStoragePath]);
+        } catch (_) {}
+      }
+
+      if (resolvedDocId.isNotEmpty) {
+        await _supabase.from('documents').delete().eq('id', resolvedDocId);
+      } else if (resolvedStoragePath.isNotEmpty) {
+        await _supabase
+            .from('documents')
+            .delete()
+            .eq('project_id', projectId)
+            .eq('file_url', resolvedStoragePath);
+      }
+
+      await _clearLayoutAndAmenityMetaForDeletedImage(
+        projectId: projectId,
+        docId: resolvedDocId,
+        storagePath: resolvedStoragePath,
+      );
+      await _deleteFolderIfEmptyAndLayoutChild(
+        projectId: projectId,
+        folderId: parentFolderId,
+      );
+      if (reconcileAfter) {
+        await _reconcileImageMetadataAgainstExistingDocuments(projectId);
+      }
+
+      if (mounted) {
+        setState(() {
+          _documents.removeWhere((item) {
+            final itemId = (item['id'] ?? '').toString().trim();
+            final itemPath = _resolveDocumentStoragePath(
+              (item['url'] ?? '').toString(),
+            );
+            return (resolvedDocId.isNotEmpty && itemId == resolvedDocId) ||
+                (resolvedStoragePath.isNotEmpty &&
+                    itemPath == resolvedStoragePath);
+          });
+        });
+      } else {
+        _documents.removeWhere((item) {
+          final itemId = (item['id'] ?? '').toString().trim();
+          final itemPath = _resolveDocumentStoragePath(
+            (item['url'] ?? '').toString(),
+          );
+          return (resolvedDocId.isNotEmpty && itemId == resolvedDocId) ||
+              (resolvedStoragePath.isNotEmpty &&
+                  itemPath == resolvedStoragePath);
+        });
+      }
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.saved);
+      }
+    } catch (e) {
+      debugPrint('Error deleting document file and syncing: $e');
+      if (emitStatus) {
+        widget.onSaveStatusChanged?.call(ProjectSaveStatusType.connectionLost);
+      }
     }
   }
 
@@ -1306,6 +2112,12 @@ class _DocumentsPageState extends State<DocumentsPage> {
     return raw;
   }
 
+  String? _layoutIdFromStoragePath(String storagePath) {
+    final match = RegExp(r'/layout_([^/]+)/').firstMatch(storagePath.trim());
+    final extracted = (match?.group(1) ?? '').trim();
+    return extracted.isEmpty ? null : extracted;
+  }
+
   String _resolveDocumentPublicUrl(String urlOrPath) {
     final path = _resolveDocumentStoragePath(urlOrPath);
     if (path.isEmpty) return '';
@@ -1465,26 +2277,29 @@ class _DocumentsPageState extends State<DocumentsPage> {
       String storagePath =
           _resolveDocumentStoragePath(_activeLayoutImageStoragePath);
       String docId = _activeLayoutImageDocId.trim();
+      String parentFolderId = '';
 
       if (storagePath.isEmpty && docId.isNotEmpty) {
         final byId = await _supabase
             .from('documents')
-            .select('file_url')
+            .select('id,file_url,parent_id')
             .eq('id', docId)
             .maybeSingle();
         storagePath = _resolveDocumentStoragePath(
           (byId?['file_url'] ?? '').toString(),
         );
+        parentFolderId = (byId?['parent_id'] ?? '').toString().trim();
       }
 
       if (docId.isEmpty && storagePath.isNotEmpty) {
         final byPath = await _supabase
             .from('documents')
-            .select('id')
+            .select('id,parent_id')
             .eq('project_id', projectId)
             .eq('file_url', storagePath)
             .maybeSingle();
         docId = (byPath?['id'] ?? '').toString().trim();
+        parentFolderId = (byPath?['parent_id'] ?? '').toString().trim();
       }
 
       if (storagePath.isNotEmpty) {
@@ -1516,6 +2331,18 @@ class _DocumentsPageState extends State<DocumentsPage> {
               .eq('project_id', projectId)
               .eq('layout_image_doc_id', docId);
         } catch (_) {}
+        try {
+          await _supabase
+              .from('projects')
+              .update({
+                'amenity_layout_image_name': '',
+                'amenity_layout_image_path': '',
+                'amenity_layout_image_doc_id': '',
+                'amenity_layout_image_extension': '',
+              })
+              .eq('id', projectId)
+              .eq('amenity_layout_image_doc_id', docId);
+        } catch (_) {}
       }
       if (storagePath.isNotEmpty) {
         try {
@@ -1530,7 +2357,23 @@ class _DocumentsPageState extends State<DocumentsPage> {
               .eq('project_id', projectId)
               .eq('layout_image_path', storagePath);
         } catch (_) {}
+        try {
+          await _supabase
+              .from('projects')
+              .update({
+                'amenity_layout_image_name': '',
+                'amenity_layout_image_path': '',
+                'amenity_layout_image_doc_id': '',
+                'amenity_layout_image_extension': '',
+              })
+              .eq('id', projectId)
+              .eq('amenity_layout_image_path', storagePath);
+        } catch (_) {}
       }
+      await _deleteFolderIfEmptyAndLayoutChild(
+        projectId: projectId,
+        folderId: parentFolderId,
+      );
 
       if (mounted) {
         setState(() {
@@ -3887,6 +4730,14 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                     _isPinnedRootFolder(doc);
                                             final docId =
                                                 (doc['id'] ?? '').toString();
+                                            final isDeletingFolder =
+                                                (doc['type'] ?? 'folder')
+                                                            .toString() ==
+                                                        'folder' &&
+                                                    _deletingFolderIds
+                                                        .contains(docId);
+                                            final isBusyDoc = isUploadingDoc ||
+                                                isDeletingFolder;
                                             final isSelected =
                                                 _selectedDocumentIds
                                                     .contains(docId);
@@ -3910,7 +4761,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                               behavior:
                                                   HitTestBehavior.deferToChild,
                                               onTap: () {
-                                                if (isUploadingDoc) return;
+                                                if (isBusyDoc) return;
                                                 if (_isSelectMode &&
                                                     isProtectedRootFolder) {
                                                   return;
@@ -3949,7 +4800,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                   children: [
                                                     IgnorePointer(
                                                       ignoring: _isSelectMode ||
-                                                          isUploadingDoc,
+                                                          isBusyDoc,
                                                       child: (doc['type'] ??
                                                                       'folder')
                                                                   .toString() ==
@@ -3984,6 +4835,8 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                       .toString()
                                                                   : '',
                                                               folderId: docId,
+                                                              isDeleting:
+                                                                  isDeletingFolder,
                                                               autoRename:
                                                                   _newlyCreatedFolderId ==
                                                                       docId,
@@ -4026,22 +4879,10 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                   return;
                                                                 }
                                                                 try {
-                                                                  await _supabase
-                                                                      .from(
-                                                                          'documents')
-                                                                      .delete()
-                                                                      .eq('id',
-                                                                          docId);
-                                                                  setState(() {
-                                                                    _documents.removeWhere(
-                                                                        (item) =>
-                                                                            item['id'] ==
-                                                                            docId);
-                                                                    _documents.removeWhere(
-                                                                        (item) =>
-                                                                            item['parentId'] ==
-                                                                            docId);
-                                                                  });
+                                                                  await _deleteFolderWithIndicator(
+                                                                    folderId:
+                                                                        docId,
+                                                                  );
                                                                 } catch (e) {
                                                                   debugPrint(
                                                                       'Error deleting folder: $e');
@@ -4209,39 +5050,13 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                               onDelete:
                                                                   () async {
                                                                 try {
-                                                                  final fileUrl =
-                                                                      doc['url']
-                                                                          as String?;
-                                                                  if (fileUrl !=
-                                                                          null &&
-                                                                      fileUrl
-                                                                          .isNotEmpty) {
-                                                                    final path = Uri.parse(
-                                                                            fileUrl)
-                                                                        .path
-                                                                        .split(
-                                                                            '/documents/')
-                                                                        .last;
-                                                                    await _supabase
-                                                                        .storage
-                                                                        .from(
-                                                                            'documents')
-                                                                        .remove([
-                                                                      path
-                                                                    ]);
-                                                                  }
-                                                                  await _supabase
-                                                                      .from(
-                                                                          'documents')
-                                                                      .delete()
-                                                                      .eq('id',
-                                                                          docId);
-                                                                  setState(() {
-                                                                    _documents.removeWhere(
-                                                                        (item) =>
-                                                                            item['id'] ==
-                                                                            docId);
-                                                                  });
+                                                                  await _deleteDocumentFileAndSync(
+                                                                    docId:
+                                                                        docId,
+                                                                    urlOrPath: (doc['url'] ??
+                                                                            '')
+                                                                        .toString(),
+                                                                  );
                                                                 } catch (e) {
                                                                   debugPrint(
                                                                       'Error deleting file: $e');
@@ -4506,7 +5321,40 @@ class _DocumentsPageState extends State<DocumentsPage> {
                             ),
                           );
                         }
-                        return SingleChildScrollView(child: content);
+                        return ScrollConfiguration(
+                          behavior: ScrollConfiguration.of(context)
+                              .copyWith(scrollbars: false),
+                          child: ScrollbarTheme(
+                            data: ScrollbarThemeData(
+                              crossAxisMargin: 8,
+                              mainAxisMargin: 8,
+                              thickness: MaterialStateProperty.all(8),
+                              thumbColor: MaterialStateProperty.resolveWith(
+                                (states) {
+                                  if (states.contains(MaterialState.hovered) ||
+                                      states.contains(MaterialState.dragged)) {
+                                    return const Color(0xFF4A4A4A);
+                                  }
+                                  return const Color(0x7A5C5C5C);
+                                },
+                              ),
+                              thumbVisibility: MaterialStateProperty.all(true),
+                              radius: const Radius.circular(4),
+                              minThumbLength: 233,
+                            ),
+                            child: Scrollbar(
+                              controller: _contentScrollController,
+                              thumbVisibility: true,
+                              trackVisibility: false,
+                              interactive: true,
+                              child: SingleChildScrollView(
+                                controller: _contentScrollController,
+                                clipBehavior: Clip.hardEdge,
+                                child: content,
+                              ),
+                            ),
+                          ),
+                        );
                       },
                     ),
             ),
@@ -4685,6 +5533,7 @@ class DocumentCard extends StatefulWidget {
   final bool autoRename;
   final bool isSelected;
   final bool isSelectMode;
+  final bool isDeleting;
   final ValueChanged<String> onRename;
   final VoidCallback onDownload;
   final VoidCallback onDelete;
@@ -4703,6 +5552,7 @@ class DocumentCard extends StatefulWidget {
     this.autoRename = false,
     this.isSelected = false,
     this.isSelectMode = false,
+    this.isDeleting = false,
     required this.onRename,
     required this.onDownload,
     required this.onDelete,
@@ -4777,6 +5627,7 @@ class _DocumentCardState extends State<DocumentCard> {
   }
 
   void _handleTap() {
+    if (widget.isDeleting) return;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final lastTapMs = _lastTapTimestampMs;
     _lastTapTimestampMs = nowMs;
@@ -4823,12 +5674,16 @@ class _DocumentCardState extends State<DocumentCard> {
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         behavior: HitTestBehavior.deferToChild,
-        onTap: _handleTap,
-        onDoubleTap: () {
-          setState(() => _isDoubleClicked = true);
-          widget.onOpenFolder();
-        },
-        onDoubleTapCancel: () => setState(() => _isDoubleClicked = false),
+        onTap: widget.isDeleting ? null : _handleTap,
+        onDoubleTap: widget.isDeleting
+            ? null
+            : () {
+                setState(() => _isDoubleClicked = true);
+                widget.onOpenFolder();
+              },
+        onDoubleTapCancel: widget.isDeleting
+            ? null
+            : () => setState(() => _isDoubleClicked = false),
         child: Container(
           width: 170,
           height: 180,
@@ -4857,12 +5712,21 @@ class _DocumentCardState extends State<DocumentCard> {
                       width: 64,
                       height: 52,
                       child: Center(
-                        child: SvgPicture.asset(
-                          'assets/images/add_folderr.svg',
-                          width: 44,
-                          height: 52,
-                          fit: BoxFit.contain,
-                        ),
+                        child: widget.isDeleting
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Color(0xFF0C8CE9),
+                                ),
+                              )
+                            : SvgPicture.asset(
+                                'assets/images/add_folderr.svg',
+                                width: 44,
+                                height: 52,
+                                fit: BoxFit.contain,
+                              ),
                       ),
                     ),
                   ),
@@ -4975,230 +5839,255 @@ class _DocumentCardState extends State<DocumentCard> {
                   color: Colors.transparent,
                   child: !widget.showActions
                       ? const SizedBox.shrink()
-                      : widget.isSelectMode
-                          ? Container(
+                      : widget.isDeleting
+                          ? const SizedBox(
                               width: 32,
                               height: 32,
-                              alignment: Alignment.center,
-                              child: _threeDotsIcon(),
-                            )
-                          : Theme(
-                              data: Theme.of(context).copyWith(
-                                splashFactory: NoSplash.splashFactory,
-                                highlightColor: Colors.transparent,
-                                splashColor: Colors.transparent,
+                              child: Center(
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFF0C8CE9),
+                                  ),
+                                ),
                               ),
-                              child: PopupMenuButton<_DocumentCardAction>(
-                                tooltip: '',
-                                padding: EdgeInsets.zero,
-                                position: PopupMenuPosition.under,
-                                child: Container(
+                            )
+                          : widget.isSelectMode
+                              ? Container(
                                   width: 32,
                                   height: 32,
                                   alignment: Alignment.center,
-                                  child: MouseRegion(
-                                    cursor: SystemMouseCursors.click,
-                                    child: _threeDotsIcon(),
+                                  child: _threeDotsIcon(),
+                                )
+                              : Theme(
+                                  data: Theme.of(context).copyWith(
+                                    splashFactory: NoSplash.splashFactory,
+                                    highlightColor: Colors.transparent,
+                                    splashColor: Colors.transparent,
                                   ),
-                                ),
-                                offset: Offset(_popupShiftX(context), 0),
-                                color: Colors.transparent,
-                                elevation: 0,
-                                shadowColor: Colors.transparent,
-                                enableFeedback: false,
-                                onSelected: (action) {
-                                  switch (action) {
-                                    case _DocumentCardAction.rename:
-                                      _beginRename();
-                                      break;
-                                    case _DocumentCardAction.download:
-                                      widget.onDownload();
-                                      break;
-                                    case _DocumentCardAction.delete:
-                                      widget.onDelete();
-                                      break;
-                                  }
-                                },
-                                itemBuilder: (context) =>
-                                    <PopupMenuEntry<_DocumentCardAction>>[
-                                  PopupMenuItem(
-                                    enabled: false,
+                                  child: PopupMenuButton<_DocumentCardAction>(
+                                    tooltip: '',
                                     padding: EdgeInsets.zero,
+                                    position: PopupMenuPosition.under,
                                     child: Container(
-                                      width: 197,
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFF8F9FA),
-                                        borderRadius: BorderRadius.circular(8),
-                                        boxShadow: const [
-                                          BoxShadow(
-                                            color: Color(0x80000000),
-                                            blurRadius: 2,
-                                            offset: Offset(0, 0),
-                                          ),
-                                        ],
-                                      ),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          InkWell(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            onTap: () {
-                                              Navigator.of(context).pop();
-                                              _beginRename();
-                                            },
-                                            child: Container(
-                                              height: 36,
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 16,
-                                                      vertical: 4),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white,
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                boxShadow: const [
-                                                  BoxShadow(
-                                                    color: Color(0x40000000),
-                                                    blurRadius: 2,
-                                                    offset: Offset(0, 0),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: Row(
-                                                mainAxisAlignment:
-                                                    MainAxisAlignment
-                                                        .spaceBetween,
-                                                children: [
-                                                  Text(
-                                                    'Rename',
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  SvgPicture.asset(
-                                                    'assets/images/rename.svg',
-                                                    width: 20,
-                                                    height: 20,
-                                                    fit: BoxFit.contain,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 10),
-                                          InkWell(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            onTap: () {
-                                              Navigator.of(context).pop();
-                                              widget.onDownload();
-                                            },
-                                            child: Container(
-                                              height: 36,
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 16,
-                                                      vertical: 4),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white,
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                boxShadow: const [
-                                                  BoxShadow(
-                                                    color: Color(0x40000000),
-                                                    blurRadius: 2,
-                                                    offset: Offset(0, 0),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: Row(
-                                                mainAxisAlignment:
-                                                    MainAxisAlignment
-                                                        .spaceBetween,
-                                                children: [
-                                                  Text(
-                                                    'Download',
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.black,
-                                                    ),
-                                                  ),
-                                                  SvgPicture.asset(
-                                                    'assets/images/Download_all.svg',
-                                                    width: 16,
-                                                    height: 16,
-                                                    fit: BoxFit.contain,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(height: 10),
-                                          InkWell(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            onTap: () {
-                                              Navigator.of(context).pop();
-                                              widget.onDelete();
-                                            },
-                                            child: Container(
-                                              height: 36,
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      horizontal: 16,
-                                                      vertical: 4),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white,
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                boxShadow: const [
-                                                  BoxShadow(
-                                                    color: Color(0x40000000),
-                                                    blurRadius: 2,
-                                                    offset: Offset(0, 0),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: Row(
-                                                mainAxisAlignment:
-                                                    MainAxisAlignment
-                                                        .spaceBetween,
-                                                children: [
-                                                  Text(
-                                                    'Delete Folder',
-                                                    style: GoogleFonts.inter(
-                                                      fontSize: 14,
-                                                      fontWeight:
-                                                          FontWeight.normal,
-                                                      color: Colors.red,
-                                                    ),
-                                                  ),
-                                                  SvgPicture.asset(
-                                                    'assets/images/delete_folder.svg',
-                                                    width: 13,
-                                                    height: 16,
-                                                    fit: BoxFit.contain,
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                        ],
+                                      width: 32,
+                                      height: 32,
+                                      alignment: Alignment.center,
+                                      child: MouseRegion(
+                                        cursor: SystemMouseCursors.click,
+                                        child: _threeDotsIcon(),
                                       ),
                                     ),
+                                    offset: Offset(_popupShiftX(context), 0),
+                                    color: Colors.transparent,
+                                    elevation: 0,
+                                    shadowColor: Colors.transparent,
+                                    enableFeedback: false,
+                                    onSelected: (action) {
+                                      switch (action) {
+                                        case _DocumentCardAction.rename:
+                                          _beginRename();
+                                          break;
+                                        case _DocumentCardAction.download:
+                                          widget.onDownload();
+                                          break;
+                                        case _DocumentCardAction.delete:
+                                          widget.onDelete();
+                                          break;
+                                      }
+                                    },
+                                    itemBuilder: (context) =>
+                                        <PopupMenuEntry<_DocumentCardAction>>[
+                                      PopupMenuItem(
+                                        enabled: false,
+                                        padding: EdgeInsets.zero,
+                                        child: Container(
+                                          width: 197,
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF8F9FA),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                            boxShadow: const [
+                                              BoxShadow(
+                                                color: Color(0x80000000),
+                                                blurRadius: 2,
+                                                offset: Offset(0, 0),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              InkWell(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                onTap: () {
+                                                  Navigator.of(context).pop();
+                                                  _beginRename();
+                                                },
+                                                child: Container(
+                                                  height: 36,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            8),
+                                                    boxShadow: const [
+                                                      BoxShadow(
+                                                        color:
+                                                            Color(0x40000000),
+                                                        blurRadius: 2,
+                                                        offset: Offset(0, 0),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisAlignment:
+                                                        MainAxisAlignment
+                                                            .spaceBetween,
+                                                    children: [
+                                                      Text(
+                                                        'Rename',
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                      SvgPicture.asset(
+                                                        'assets/images/rename.svg',
+                                                        width: 20,
+                                                        height: 20,
+                                                        fit: BoxFit.contain,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 10),
+                                              InkWell(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                onTap: () {
+                                                  Navigator.of(context).pop();
+                                                  widget.onDownload();
+                                                },
+                                                child: Container(
+                                                  height: 36,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            8),
+                                                    boxShadow: const [
+                                                      BoxShadow(
+                                                        color:
+                                                            Color(0x40000000),
+                                                        blurRadius: 2,
+                                                        offset: Offset(0, 0),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisAlignment:
+                                                        MainAxisAlignment
+                                                            .spaceBetween,
+                                                    children: [
+                                                      Text(
+                                                        'Download',
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.black,
+                                                        ),
+                                                      ),
+                                                      SvgPicture.asset(
+                                                        'assets/images/Download_all.svg',
+                                                        width: 16,
+                                                        height: 16,
+                                                        fit: BoxFit.contain,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(height: 10),
+                                              InkWell(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                onTap: () {
+                                                  Navigator.of(context).pop();
+                                                  widget.onDelete();
+                                                },
+                                                child: Container(
+                                                  height: 36,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                      horizontal: 16,
+                                                      vertical: 4),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            8),
+                                                    boxShadow: const [
+                                                      BoxShadow(
+                                                        color:
+                                                            Color(0x40000000),
+                                                        blurRadius: 2,
+                                                        offset: Offset(0, 0),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisAlignment:
+                                                        MainAxisAlignment
+                                                            .spaceBetween,
+                                                    children: [
+                                                      Text(
+                                                        'Delete Folder',
+                                                        style:
+                                                            GoogleFonts.inter(
+                                                          fontSize: 14,
+                                                          fontWeight:
+                                                              FontWeight.normal,
+                                                          color: Colors.red,
+                                                        ),
+                                                      ),
+                                                      SvgPicture.asset(
+                                                        'assets/images/delete_folder.svg',
+                                                        width: 13,
+                                                        height: 16,
+                                                        fit: BoxFit.contain,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
-                            ),
+                                ),
                 ),
               ),
             ],
