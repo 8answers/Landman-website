@@ -2679,20 +2679,23 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     }
     widget.onSaveStatusChanged?.call(ProjectSaveStatusType.loading);
 
-    // Load the persisted flag from local storage
-    final prefs = await SharedPreferences.getInstance();
+    // Load local fallback flags. DB-backed flags are resolved after project
+    // fetch so these survive browser storage clears.
+    final localPrefs = await SharedPreferences.getInstance();
     final persistedFlag =
-        prefs.getBool('project_${widget.projectId}_has_loaded_once') ?? false;
-    final hideDefaultNonSellable = prefs
+        localPrefs.getBool('project_${widget.projectId}_has_loaded_once') ??
+            false;
+    final localHideDefaultNonSellable = localPrefs
             .getBool('project_${widget.projectId}_hide_default_non_sellable') ??
         false;
-    final hideDefaultAmenity =
-        prefs.getBool('project_${widget.projectId}_hide_default_amenity') ??
+    final localHideDefaultAmenity =
+        localPrefs.getBool('project_${widget.projectId}_hide_default_amenity') ??
             false;
     final persistedAmenityExpanded =
-        prefs.getBool('project_${widget.projectId}_amenity_area_expanded');
+        localPrefs.getBool('project_${widget.projectId}_amenity_area_expanded');
     final persistedNonSellableExpanded =
-        prefs.getBool('project_${widget.projectId}_non_sellable_area_expanded');
+        localPrefs
+            .getBool('project_${widget.projectId}_non_sellable_area_expanded');
     _hasLoadedDataOnce =
         persistedFlag || _projectsLoadedThisSession.contains(widget.projectId);
     // Always restore to the user's last expansion state.
@@ -2700,7 +2703,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     _isAmenityAreaExpanded = persistedAmenityExpanded ?? true;
     _isNonSellableAreaExpanded = persistedNonSellableExpanded ?? true;
     print(
-        '_loadProjectData: Loaded _hasLoadedDataOnce=$_hasLoadedDataOnce, hideDefaultNonSellable=$hideDefaultNonSellable, hideDefaultAmenity=$hideDefaultAmenity from local storage');
+        '_loadProjectData: Loaded _hasLoadedDataOnce=$_hasLoadedDataOnce, localHideDefaultNonSellable=$localHideDefaultNonSellable, localHideDefaultAmenity=$localHideDefaultAmenity from local storage');
 
     try {
       // Load area unit preference
@@ -2714,6 +2717,43 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
           .select()
           .eq('id', widget.projectId!)
           .single();
+      final projectMap = Map<String, dynamic>.from(project as Map);
+      bool readProjectBoolFlag(String key, bool fallback) {
+        if (!projectMap.containsKey(key)) return fallback;
+        final dynamic value = projectMap[key];
+        if (value is bool) return value;
+        if (value is num) return value != 0;
+        if (value is String) {
+          final normalized = value.trim().toLowerCase();
+          if (normalized == 'true' || normalized == '1') return true;
+          if (normalized == 'false' || normalized == '0') return false;
+        }
+        return fallback;
+      }
+      final hideDefaultNonSellable = readProjectBoolFlag(
+        'hide_default_non_sellable_template',
+        localHideDefaultNonSellable,
+      );
+      final hideDefaultAmenity = readProjectBoolFlag(
+        'hide_default_amenity_template',
+        localHideDefaultAmenity,
+      );
+      if (hideDefaultNonSellable != localHideDefaultNonSellable) {
+        unawaited(
+          localPrefs.setBool(
+            'project_${widget.projectId}_hide_default_non_sellable',
+            hideDefaultNonSellable,
+          ),
+        );
+      }
+      if (hideDefaultAmenity != localHideDefaultAmenity) {
+        unawaited(
+          localPrefs.setBool(
+            'project_${widget.projectId}_hide_default_amenity',
+            hideDefaultAmenity,
+          ),
+        );
+      }
       final remoteProjectUpdatedMs = DateTime.tryParse(
             (project['updated_at'] ?? '').toString(),
           )?.millisecondsSinceEpoch ??
@@ -3980,6 +4020,16 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     if (projectId == null || projectId.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('project_${projectId}_hide_default_non_sellable', hide);
+    try {
+      await _supabase
+          .from('projects')
+          .update({'hide_default_non_sellable_template': hide})
+          .eq('id', projectId);
+    } catch (error) {
+      debugPrint(
+        '_setHideDefaultNonSellableTemplate: failed to persist remotely: $error',
+      );
+    }
   }
 
   Future<void> _setHideDefaultAmenityTemplate(bool hide) async {
@@ -3987,6 +4037,16 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     if (projectId == null || projectId.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('project_${projectId}_hide_default_amenity', hide);
+    try {
+      await _supabase
+          .from('projects')
+          .update({'hide_default_amenity_template': hide})
+          .eq('id', projectId);
+    } catch (error) {
+      debugPrint(
+        '_setHideDefaultAmenityTemplate: failed to persist remotely: $error',
+      );
+    }
   }
 
   Future<void> _persistAreaSectionExpansionState({
@@ -13230,7 +13290,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                                                                             });
 
                                                                                             if (_nonSellableAreas.isEmpty) {
-                                                                                              _setHideDefaultNonSellableTemplate(true);
+                                                                                              unawaited(_setHideDefaultNonSellableTemplate(true));
                                                                                             }
                                                                                             _onDataChanged();
                                                                                           },
