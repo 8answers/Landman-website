@@ -24,6 +24,30 @@ class _StartupWebsiteViewState extends State<StartupWebsiteView> {
     if (_hasRedirected) return;
     _hasRedirected = true;
 
+    final baseUri = Uri.base;
+    final queryParams = baseUri.queryParameters;
+    final hashValue = html.window.location.hash;
+    final hashQuery = hashValue.startsWith('#') ? hashValue.substring(1) : '';
+    final hashParams = Uri.splitQueryString(
+      hashQuery.contains('=') ? hashQuery : '',
+    );
+    final hasAuthFlowParams = queryParams.containsKey('code') ||
+        queryParams.containsKey('state') ||
+        queryParams.containsKey('access_token') ||
+        queryParams.containsKey('refresh_token') ||
+        queryParams.containsKey('id_token') ||
+        queryParams.containsKey('auth') ||
+        queryParams.containsKey('invite') ||
+        queryParams.containsKey('projectId') ||
+        queryParams.containsKey('inv') ||
+        queryParams.containsKey('inviteToken') ||
+        hashParams.containsKey('access_token') ||
+        hashParams.containsKey('refresh_token') ||
+        hashParams.containsKey('id_token');
+    if (hasAuthFlowParams) {
+      return;
+    }
+
     final currentPath = html.window.location.pathname ?? '';
     if (currentPath.contains(_landingPathEncoded) ||
         currentPath.contains(_landingPathDecoded)) {
@@ -46,10 +70,7 @@ class _StartupWebsiteViewState extends State<StartupWebsiteView> {
       appBasePath = '$appBasePath/';
     }
 
-    final currentSearch = html.window.location.search;
-    final currentHash = html.window.location.hash;
-    final startupUrl =
-        '${appBasePath}website_8answers%20copy%202/index.html$currentSearch$currentHash';
+    final startupUrl = '${appBasePath}website_8answers%20copy%202/index.html';
     html.window.location.replace(startupUrl);
   }
 

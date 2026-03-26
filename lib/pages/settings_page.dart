@@ -1760,7 +1760,7 @@ class _SettingsPageState extends State<SettingsPage> {
         }
         if (response.status == 401) {
           backendFailureReason =
-              'Unauthorized (401): Please sign in again. If this continues, disable JWT verification for the function or ensure Authorization header is passed.';
+              'Unauthorized (401): Please sign in again. If this continues, ensure your session is valid and the Authorization header is being sent.';
         } else if (data is Map &&
             (data['error'] ?? '').toString().trim().isNotEmpty) {
           final rawBackendError = (data['error'] ?? '').toString().trim();
@@ -1777,7 +1777,7 @@ class _SettingsPageState extends State<SettingsPage> {
         final rawError = error.toString();
         if (rawError.contains('401')) {
           backendFailureReason =
-              'Unauthorized (401): Please sign in again. If this continues, disable JWT verification for the function or ensure Authorization header is passed.';
+              'Unauthorized (401): Please sign in again. If this continues, ensure your session is valid and the Authorization header is being sent.';
         } else {
           backendFailureReason =
               'Failed to reach send-project-invite-email: $rawError';

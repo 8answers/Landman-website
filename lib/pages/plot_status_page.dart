@@ -2112,23 +2112,52 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   String _resolveDocumentStoragePath(String urlOrPath) {
     final raw = urlOrPath.trim();
     if (raw.isEmpty) return '';
-    if (!raw.startsWith('http')) return raw;
-    final parts = raw.split('/documents/');
-    if (parts.length > 1) {
-      return parts.sublist(1).join('/documents/').trim();
+    final lowerRaw = raw.toLowerCase();
+    final isHttpUrl =
+        lowerRaw.startsWith('http://') || lowerRaw.startsWith('https://');
+    if (!isHttpUrl) return raw;
+
+    try {
+      final uri = Uri.parse(raw);
+      final index = uri.pathSegments.indexOf('documents');
+      if (index >= 0 && index + 1 < uri.pathSegments.length) {
+        final extracted = Uri.decodeComponent(
+          uri.pathSegments.sublist(index + 1).join('/'),
+        ).trim();
+        if (extracted.isNotEmpty) return extracted;
+      }
+    } catch (_) {}
+
+    final markerIndex = lowerRaw.indexOf('/documents/');
+    if (markerIndex >= 0) {
+      var extracted = raw.substring(markerIndex + '/documents/'.length);
+      final queryIndex = extracted.indexOf('?');
+      if (queryIndex >= 0) {
+        extracted = extracted.substring(0, queryIndex);
+      }
+      final fragmentIndex = extracted.indexOf('#');
+      if (fragmentIndex >= 0) {
+        extracted = extracted.substring(0, fragmentIndex);
+      }
+      return Uri.decodeComponent(extracted).trim();
     }
-    return raw;
+    return '';
   }
 
-  String _resolveDocumentPublicUrl(String storagePathOrUrl) {
+  Future<String> _resolveDocumentPublicUrl(String storagePathOrUrl) async {
     final raw = storagePathOrUrl.trim();
     if (raw.isEmpty) return '';
     final resolvedStoragePath = _resolveDocumentStoragePath(raw);
     if (resolvedStoragePath.isEmpty) return '';
-    if (resolvedStoragePath.startsWith('http')) return resolvedStoragePath;
-    return _supabase.storage
-        .from('documents')
-        .getPublicUrl(resolvedStoragePath);
+    if (resolvedStoragePath.startsWith('http')) return '';
+    try {
+      final signedUrl = await _supabase.storage
+          .from('documents')
+          .createSignedUrl(resolvedStoragePath, 3600);
+      return signedUrl.trim();
+    } catch (_) {
+      return '';
+    }
   }
 
   String? _layoutIdFromStoragePath(String storagePath) {
@@ -2752,7 +2781,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     if (baseStoragePath.isEmpty) {
       throw Exception('No layout image storage path found.');
     }
-    final baseImageUrl = _resolveDocumentPublicUrl(baseStoragePath);
+    final baseImageUrl = await _resolveDocumentPublicUrl(baseStoragePath);
     if (baseImageUrl.isEmpty) {
       throw Exception('Could not resolve layout image URL.');
     }
@@ -2861,7 +2890,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     if (baseStoragePath.isEmpty) {
       throw Exception('No layout image storage path found.');
     }
-    final baseImageUrl = _resolveDocumentPublicUrl(baseStoragePath);
+    final baseImageUrl = await _resolveDocumentPublicUrl(baseStoragePath);
     if (baseImageUrl.isEmpty) {
       throw Exception('Could not resolve layout image URL.');
     }
@@ -3221,7 +3250,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       }
 
       final normalizedStoragePath = _resolveDocumentStoragePath(storagePath);
-      final finalUrl = _resolveDocumentPublicUrl(normalizedStoragePath);
+      final finalUrl = await _resolveDocumentPublicUrl(normalizedStoragePath);
       if (finalUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -3261,7 +3290,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
               .toString()
               .trim();
       if (!mounted) {
-        html.window.open(finalUrl, '_blank');
+        html.window.open(finalUrl, '_blank', 'noopener,noreferrer');
         return;
       }
       _showLayoutImageViewerDialog(
@@ -3525,7 +3554,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       }
 
       final normalizedStoragePath = _resolveDocumentStoragePath(storagePath);
-      final finalUrl = _resolveDocumentPublicUrl(normalizedStoragePath);
+      final finalUrl = await _resolveDocumentPublicUrl(normalizedStoragePath);
       if (finalUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -3557,7 +3586,7 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       );
 
       if (!mounted) {
-        html.window.open(finalUrl, '_blank');
+        html.window.open(finalUrl, '_blank', 'noopener,noreferrer');
         return;
       }
       _showLayoutImageViewerDialog(
@@ -5287,13 +5316,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                     .toString()
                                                 : '');
                                         final latestUrl =
-                                            _resolveDocumentPublicUrl(
-                                                latestStoragePath);
+                                            await _resolveDocumentPublicUrl(
+                                          latestStoragePath,
+                                        );
                                         html.window.open(
                                           latestUrl.isEmpty
                                               ? imageUrl
                                               : latestUrl,
                                           '_blank',
+                                          'noopener,noreferrer',
                                         );
                                       },
                                       width: bottomActionIconWidth,
@@ -5317,13 +5348,15 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
                                                     .toString()
                                                 : '');
                                         final latestUrl =
-                                            _resolveDocumentPublicUrl(
-                                                latestStoragePath);
+                                            await _resolveDocumentPublicUrl(
+                                          latestStoragePath,
+                                        );
                                         html.window.open(
                                           latestUrl.isEmpty
                                               ? imageUrl
                                               : latestUrl,
                                           '_blank',
+                                          'noopener,noreferrer',
                                         );
                                       },
                                       width: bottomActionIconWidth,

@@ -218,10 +218,52 @@
           });
         };
 
-        if (document.readyState === "loading") {
-          document.addEventListener("DOMContentLoaded", bindGoogleButton);
-        } else {
+        const canonicalizeSigninRoute = () => {
+          const currentPath = window.location.pathname || "/";
+          const lowerPath = currentPath.toLowerCase();
+          const encodedSigninPath = "/website_8answers%20copy%202/signin.html";
+          const decodedSigninPath = "/website_8answers copy 2/signin.html";
+          const isLegacySigninPath =
+            lowerPath.endsWith(encodedSigninPath.toLowerCase()) ||
+            lowerPath.endsWith(decodedSigninPath.toLowerCase());
+          if (!isLegacySigninPath) return;
+
+          const pageUrl = new URL(window.location.href);
+          const relativeLinks = document.querySelectorAll('a[href^="./"]');
+          relativeLinks.forEach((link) => {
+            const href = (link.getAttribute("href") || "").trim();
+            if (!href) return;
+            try {
+              const targetUrl = new URL(href, pageUrl);
+              link.setAttribute("href", targetUrl.toString());
+            } catch (_) {
+              // Ignore malformed hrefs.
+            }
+          });
+
+          try {
+            const canonicalUrl = new URL(window.location.href);
+            canonicalUrl.pathname = "/Signin";
+            canonicalUrl.hash = "";
+            window.history.replaceState(
+              window.history.state,
+              "",
+              canonicalUrl.toString(),
+            );
+          } catch (_) {
+            // Ignore history API failures.
+          }
+        };
+
+        const initializeSigninPage = () => {
           bindGoogleButton();
+          canonicalizeSigninRoute();
+        };
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", initializeSigninPage);
+        } else {
+          initializeSigninPage();
         }
       })();
     </script>

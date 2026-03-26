@@ -4708,19 +4708,51 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     }
   }
 
-  String _resolveExpenseDocumentPublicUrl(String urlOrPath) {
+  Future<String> _resolveExpenseDocumentPublicUrl(String urlOrPath) async {
     final raw = urlOrPath.trim();
     if (raw.isEmpty) return '';
 
-    if (raw.startsWith('http')) {
-      final parts = raw.split('/documents/');
-      if (parts.length > 1 && parts[1].isNotEmpty) {
-        return _supabase.storage.from('documents').getPublicUrl(parts[1]);
-      }
-      return raw;
-    }
+    final lowerRaw = raw.toLowerCase();
+    final isHttpUrl =
+        lowerRaw.startsWith('http://') || lowerRaw.startsWith('https://');
 
-    return _supabase.storage.from('documents').getPublicUrl(raw);
+    var storagePath = raw;
+    if (isHttpUrl) {
+      storagePath = '';
+      try {
+        final uri = Uri.parse(raw);
+        final index = uri.pathSegments.indexOf('documents');
+        if (index >= 0 && index + 1 < uri.pathSegments.length) {
+          storagePath = Uri.decodeComponent(
+            uri.pathSegments.sublist(index + 1).join('/'),
+          ).trim();
+        }
+      } catch (_) {}
+      if (storagePath.isEmpty) {
+        final markerIndex = lowerRaw.indexOf('/documents/');
+        if (markerIndex >= 0) {
+          storagePath = raw.substring(markerIndex + '/documents/'.length);
+          final queryIndex = storagePath.indexOf('?');
+          if (queryIndex >= 0) {
+            storagePath = storagePath.substring(0, queryIndex);
+          }
+          final fragmentIndex = storagePath.indexOf('#');
+          if (fragmentIndex >= 0) {
+            storagePath = storagePath.substring(0, fragmentIndex);
+          }
+          storagePath = Uri.decodeComponent(storagePath).trim();
+        }
+      }
+    }
+    if (storagePath.isEmpty || storagePath.startsWith('http')) return '';
+    try {
+      final signedUrl = await _supabase.storage
+          .from('documents')
+          .createSignedUrl(storagePath, 3600);
+      return signedUrl.trim();
+    } catch (_) {
+      return '';
+    }
   }
 
   String _resolveExpenseDocumentPreviewUrl({
@@ -4830,7 +4862,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     final blob = html.Blob(<Object>[htmlWrapper], 'text/html');
     final blobUrl = html.Url.createObjectUrlFromBlob(blob);
     final viewerUrl = '$blobUrl#$encodedName';
-    html.window.open(viewerUrl, '_blank');
+    html.window.open(viewerUrl, '_blank', 'noopener,noreferrer');
     Future<void>.delayed(const Duration(minutes: 2), () {
       html.Url.revokeObjectUrl(blobUrl);
     });
@@ -4839,12 +4871,36 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
   String _resolveDocumentStoragePath(String urlOrPath) {
     final raw = urlOrPath.trim();
     if (raw.isEmpty) return '';
-    if (!raw.startsWith('http')) return raw;
-    final parts = raw.split('/documents/');
-    if (parts.length > 1) {
-      return parts.sublist(1).join('/documents/').trim();
+    final lowerRaw = raw.toLowerCase();
+    final isHttpUrl =
+        lowerRaw.startsWith('http://') || lowerRaw.startsWith('https://');
+    if (!isHttpUrl) return raw;
+
+    try {
+      final uri = Uri.parse(raw);
+      final index = uri.pathSegments.indexOf('documents');
+      if (index >= 0 && index + 1 < uri.pathSegments.length) {
+        final extracted = Uri.decodeComponent(
+          uri.pathSegments.sublist(index + 1).join('/'),
+        ).trim();
+        if (extracted.isNotEmpty) return extracted;
+      }
+    } catch (_) {}
+
+    final markerIndex = lowerRaw.indexOf('/documents/');
+    if (markerIndex >= 0) {
+      var extracted = raw.substring(markerIndex + '/documents/'.length);
+      final queryIndex = extracted.indexOf('?');
+      if (queryIndex >= 0) {
+        extracted = extracted.substring(0, queryIndex);
+      }
+      final fragmentIndex = extracted.indexOf('#');
+      if (fragmentIndex >= 0) {
+        extracted = extracted.substring(0, fragmentIndex);
+      }
+      return Uri.decodeComponent(extracted).trim();
     }
-    return raw;
+    return '';
   }
 
   Future<void> _openExpenseDocumentForRow(int index) async {
@@ -4935,7 +4991,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
 
       final normalizedStoragePath = _resolveDocumentStoragePath(storagePath);
       storagePath = normalizedStoragePath;
-      final finalUrl = _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
+      final finalUrl =
+          await _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
       if (finalUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -5767,7 +5824,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
 
       final normalizedStoragePath = _resolveDocumentStoragePath(storagePath);
       storagePath = normalizedStoragePath;
-      final finalUrl = _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
+      final finalUrl =
+          await _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
       if (finalUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -6074,7 +6132,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
 
       final normalizedStoragePath = _resolveDocumentStoragePath(storagePath);
       storagePath = normalizedStoragePath;
-      final finalUrl = _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
+      final finalUrl =
+          await _resolveExpenseDocumentPublicUrl(normalizedStoragePath);
       if (finalUrl.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -6207,7 +6266,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       } catch (_) {}
     }
     final resolvedUrl =
-        _resolveExpenseDocumentPublicUrl(_activeLayoutImageStoragePath);
+        await _resolveExpenseDocumentPublicUrl(_activeLayoutImageStoragePath);
     final imageUrl =
         resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
     if (imageUrl.isEmpty) return;
@@ -6287,7 +6346,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
       } catch (_) {}
     }
     final resolvedUrl =
-        _resolveExpenseDocumentPublicUrl(_activeLayoutImageStoragePath);
+        await _resolveExpenseDocumentPublicUrl(_activeLayoutImageStoragePath);
     final downloadUrl =
         resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
     if (downloadUrl.isEmpty) return;
@@ -7061,7 +7120,8 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     if (baseStoragePath.isEmpty) {
       throw Exception('No layout image storage path found.');
     }
-    final baseImageUrl = _resolveExpenseDocumentPublicUrl(baseStoragePath);
+    final baseImageUrl =
+        await _resolveExpenseDocumentPublicUrl(baseStoragePath);
     if (baseImageUrl.isEmpty) {
       throw Exception('Could not resolve layout image URL.');
     }
@@ -16330,7 +16390,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   final link = locationValue.trim();
                   final uri = Uri.tryParse(link);
                   final validMapPattern = RegExp(
-                      r'^(https?://)?(www\.)?(google\.com/maps|goo\.gl/maps|maps\.app\.goo\.gl|share\.google/)[\w\-]+',
+                      r'^https://(www\.)?(google\.com/maps|goo\.gl/maps|maps\.app\.goo\.gl|share\.google/)[\w\-]+',
                       caseSensitive: false);
                   final isGoogleSearchLocation = uri != null &&
                       uri.host.contains('google.com') &&
@@ -16379,8 +16439,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                             bool isValidLocation = false;
                             if (link.isNotEmpty &&
                                 uri != null &&
-                                (uri.scheme == 'http' ||
-                                    uri.scheme == 'https') &&
+                                uri.scheme == 'https' &&
                                 uri.host.isNotEmpty) {
                               if (isGoogleSearchLocation ||
                                   isMapsAppGooGl ||
@@ -16423,8 +16482,11 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                                       padding: const EdgeInsets.only(left: 0),
                                       child: GestureDetector(
                                         onTap: isValid
-                                            ? () =>
-                                                html.window.open(link, '_blank')
+                                            ? () => html.window.open(
+                                                  link,
+                                                  '_blank',
+                                                  'noopener,noreferrer',
+                                                )
                                             : null,
                                         child: Container(
                                           width: 40,
@@ -16485,7 +16547,11 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                               padding: const EdgeInsets.only(left: 0),
                               child: GestureDetector(
                                 onTap: isValidLocation
-                                    ? () => html.window.open(link, '_blank')
+                                    ? () => html.window.open(
+                                          link,
+                                          '_blank',
+                                          'noopener,noreferrer',
+                                        )
                                     : null,
                                 child: Container(
                                   width: 40,
@@ -16587,8 +16653,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
     bool isLocationField = isLocation;
     String locationValue = controller.text;
     bool isValidLocation = isLocationField &&
-        (locationValue.startsWith('https://www.google.com/maps') ||
-            locationValue.startsWith('http://www.google.com/maps'));
+        locationValue.startsWith('https://www.google.com/maps');
 
     final isProjectNameEmpty = isProjectName && controller.text.trim().isEmpty;
     final showInvalidShadow = showInvalidBoxShadow || isProjectNameEmpty;

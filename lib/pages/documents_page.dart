@@ -1138,7 +1138,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
         final normalizedStoragePath = storagePath.trim();
         final normalizedStoragePublicUrl = normalizedStoragePath.isEmpty
             ? ''
-            : _resolveDocumentPublicUrl(normalizedStoragePath);
+            : await _resolveDocumentPublicUrl(normalizedStoragePath);
         var localChanged = false;
         for (final layout in localLayouts) {
           final localDocId = (layout['layoutImageDocId'] ??
@@ -2156,12 +2156,36 @@ class _DocumentsPageState extends State<DocumentsPage> {
   String _resolveDocumentStoragePath(String urlOrPath) {
     final raw = urlOrPath.trim();
     if (raw.isEmpty) return '';
-    if (!raw.startsWith('http')) return raw;
-    final parts = raw.split('/documents/');
-    if (parts.length > 1) {
-      return parts.sublist(1).join('/documents/').trim();
+    final lowerRaw = raw.toLowerCase();
+    final isHttpUrl =
+        lowerRaw.startsWith('http://') || lowerRaw.startsWith('https://');
+    if (!isHttpUrl) return raw;
+
+    try {
+      final uri = Uri.parse(raw);
+      final index = uri.pathSegments.indexOf('documents');
+      if (index >= 0 && index + 1 < uri.pathSegments.length) {
+        final extracted = Uri.decodeComponent(
+          uri.pathSegments.sublist(index + 1).join('/'),
+        ).trim();
+        if (extracted.isNotEmpty) return extracted;
+      }
+    } catch (_) {}
+
+    final markerIndex = lowerRaw.indexOf('/documents/');
+    if (markerIndex >= 0) {
+      var extracted = raw.substring(markerIndex + '/documents/'.length);
+      final queryIndex = extracted.indexOf('?');
+      if (queryIndex >= 0) {
+        extracted = extracted.substring(0, queryIndex);
+      }
+      final fragmentIndex = extracted.indexOf('#');
+      if (fragmentIndex >= 0) {
+        extracted = extracted.substring(0, fragmentIndex);
+      }
+      return Uri.decodeComponent(extracted).trim();
     }
-    return raw;
+    return '';
   }
 
   String? _layoutIdFromStoragePath(String storagePath) {
@@ -2170,14 +2194,24 @@ class _DocumentsPageState extends State<DocumentsPage> {
     return extracted.isEmpty ? null : extracted;
   }
 
-  String _resolveDocumentPublicUrl(String urlOrPath) {
+  Future<String> _resolveDocumentPublicUrl(String urlOrPath) async {
     final path = _resolveDocumentStoragePath(urlOrPath);
     if (path.isEmpty) return '';
-    if (path.startsWith('http')) return path;
-    return _supabase.storage.from('documents').getPublicUrl(path);
+    if (path.startsWith('http')) return '';
+    try {
+      final signedUrl =
+          await _supabase.storage.from('documents').createSignedUrl(path, 3600);
+      return signedUrl.trim();
+    } catch (_) {
+      return '';
+    }
   }
 
   void _openDocumentFile(Map<String, dynamic> doc) {
+    unawaited(_openDocumentFileAsync(doc));
+  }
+
+  Future<void> _openDocumentFileAsync(Map<String, dynamic> doc) async {
     final urlOrPath = (doc['url'] ?? '').toString().trim();
     if (urlOrPath.isEmpty) return;
     final extension = _resolveDocumentExtension(doc);
@@ -2185,9 +2219,9 @@ class _DocumentsPageState extends State<DocumentsPage> {
       _openLayoutImageViewerForDocument(doc);
       return;
     }
-    final finalUrl = _resolveDocumentPublicUrl(urlOrPath);
+    final finalUrl = await _resolveDocumentPublicUrl(urlOrPath);
     if (finalUrl.isNotEmpty) {
-      html.window.open(finalUrl, '_blank');
+      html.window.open(finalUrl, '_blank', 'noopener,noreferrer');
     }
   }
 
@@ -2208,7 +2242,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
       } catch (_) {}
     }
     final resolvedUrl =
-        _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
+        await _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
     final imageUrl =
         resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
     if (imageUrl.isEmpty) return;
@@ -2288,7 +2322,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
       } catch (_) {}
     }
     final resolvedUrl =
-        _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
+        await _resolveDocumentPublicUrl(_activeLayoutImageStoragePath);
     final downloadUrl =
         resolvedUrl.isNotEmpty ? resolvedUrl : _activeLayoutImageUrl.trim();
     if (downloadUrl.isEmpty) return;
@@ -2476,10 +2510,16 @@ class _DocumentsPageState extends State<DocumentsPage> {
   }
 
   void _openLayoutImageViewerForDocument(Map<String, dynamic> doc) {
+    unawaited(_openLayoutImageViewerForDocumentAsync(doc));
+  }
+
+  Future<void> _openLayoutImageViewerForDocumentAsync(
+    Map<String, dynamic> doc,
+  ) async {
     final urlOrPath = (doc['url'] ?? '').toString().trim();
     if (urlOrPath.isEmpty) return;
     final storagePath = _resolveDocumentStoragePath(urlOrPath);
-    final finalUrl = _resolveDocumentPublicUrl(storagePath);
+    final finalUrl = await _resolveDocumentPublicUrl(storagePath);
     if (finalUrl.isEmpty) return;
 
     setState(() {
@@ -2576,7 +2616,7 @@ class _DocumentsPageState extends State<DocumentsPage> {
       );
     }
     if (storagePath.isEmpty) throw Exception('No storage path found.');
-    final baseUrl = _resolveDocumentPublicUrl(storagePath);
+    final baseUrl = await _resolveDocumentPublicUrl(storagePath);
     if (baseUrl.isEmpty) throw Exception('Could not resolve source image.');
 
     final editedBytes = await _renderLayoutViewerCompositePng(
@@ -5059,18 +5099,26 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                     Archive();
                                                                 for (final file
                                                                     in files) {
-                                                                  final fileUrl =
-                                                                      file['url']
-                                                                          as String?;
+                                                                  final filePath =
+                                                                      (file['url'] ??
+                                                                              '')
+                                                                          .toString()
+                                                                          .trim();
                                                                   final fileName =
                                                                       file['name']
                                                                               as String? ??
                                                                           'file';
-                                                                  if (fileUrl !=
-                                                                          null &&
-                                                                      fileUrl
-                                                                          .isNotEmpty) {
+                                                                  if (filePath
+                                                                      .isNotEmpty) {
                                                                     try {
+                                                                      final fileUrl =
+                                                                          await _resolveDocumentPublicUrl(
+                                                                        filePath,
+                                                                      );
+                                                                      if (fileUrl
+                                                                          .isEmpty) {
+                                                                        continue;
+                                                                      }
                                                                       final response = await html.HttpRequest.request(
                                                                           fileUrl,
                                                                           responseType:
@@ -5214,13 +5262,23 @@ class _DocumentsPageState extends State<DocumentsPage> {
                                                                 final fileName =
                                                                     doc['name'] ??
                                                                         'file';
-                                                                final fileUrl =
-                                                                    doc['url']
-                                                                        as String?;
-                                                                if (fileUrl !=
-                                                                        null &&
-                                                                    fileUrl
-                                                                        .isNotEmpty) {
+                                                                final storagePath =
+                                                                    (doc['url'] ??
+                                                                            '')
+                                                                        .toString()
+                                                                        .trim();
+                                                                if (storagePath
+                                                                    .isNotEmpty) {
+                                                                  final fileUrl =
+                                                                      await _resolveDocumentPublicUrl(
+                                                                    storagePath,
+                                                                  );
+                                                                  if (fileUrl
+                                                                      .isEmpty) {
+                                                                    debugPrint(
+                                                                        'Could not resolve signed URL for $fileName');
+                                                                    return;
+                                                                  }
                                                                   debugPrint(
                                                                       'Download file: $fileName from $fileUrl');
                                                                   final anchor = html

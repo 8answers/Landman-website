@@ -461,7 +461,26 @@
       (() => {
         const currentSearch = window.location.search || "";
         const currentHash = window.location.hash || "";
+        const currentPath = window.location.pathname || "/";
+        const pageUrl = new URL(window.location.href);
+        const sectionRoutePath = {
+          features: "/Features",
+          about: "/About",
+          contact: "/Contact",
+        };
         const params = new URLSearchParams(currentSearch);
+        const normalizePath = (value) => {
+          let normalized = (value || "/").trim() || "/";
+          try {
+            normalized = decodeURIComponent(normalized);
+          } catch (_) {
+            // Keep original path value.
+          }
+          if (normalized.length > 1 && normalized.endsWith("/")) {
+            normalized = normalized.slice(0, -1);
+          }
+          return normalized.toLowerCase();
+        };
         const decodeBase64Url = (value) => {
           const normalized = (value || "").trim();
           if (!normalized) return "";
@@ -524,36 +543,102 @@
             // Ignore storage failures.
           }
         }
-        if (!currentSearch && !currentHash) return;
 
-        const authLinks = document.querySelectorAll(
-          'a[href="./signin.html"], a[href="./signup.html"]',
-        );
-        authLinks.forEach((link) => {
+        const relativeLinks = document.querySelectorAll('a[href^="./"]');
+        relativeLinks.forEach((link) => {
+          const href = (link.getAttribute("href") || "").trim();
+          if (!href) return;
           try {
-            const targetUrl = new URL(link.getAttribute("href"), window.location.href);
-            targetUrl.search = currentSearch;
-            targetUrl.hash = currentHash;
+            const targetUrl = new URL(href, pageUrl);
             link.setAttribute("href", targetUrl.toString());
           } catch (_) {
             // Ignore malformed hrefs.
           }
         });
+
+        if (currentSearch || currentHash) {
+          const authLinks = document.querySelectorAll(
+            'a[href$="/signin.html"], a[href$="/signup.html"]',
+          );
+          const filteredParams = new URLSearchParams(currentSearch);
+          [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "code",
+            "state",
+          ].forEach((key) => filteredParams.delete(key));
+          const sanitizedSearch = filteredParams.toString();
+          authLinks.forEach((link) => {
+            try {
+              const targetUrl = new URL(link.getAttribute("href"), pageUrl);
+              targetUrl.search = sanitizedSearch ? `?${sanitizedSearch}` : "";
+              targetUrl.hash = "";
+              link.setAttribute("href", targetUrl.toString());
+            } catch (_) {
+              // Ignore malformed hrefs.
+            }
+          });
+        }
+
+        const sectionFromHash = currentHash.replace(/^#/, "").trim().toLowerCase();
+        const normalizedPath = normalizePath(currentPath);
+        const sectionFromPath = normalizedPath.replace(/^\//, "").trim().toLowerCase();
+        const activeSectionId = sectionRoutePath[sectionFromHash]
+          ? sectionFromHash
+          : sectionRoutePath[sectionFromPath]
+            ? sectionFromPath
+            : "";
+        const lowerPath = currentPath.toLowerCase();
+        const encodedHomePath = "/website_8answers%20copy%202/index.html";
+        const decodedHomePath = "/website_8answers copy 2/index.html";
+        const isLandingHomePath =
+          lowerPath.endsWith(encodedHomePath.toLowerCase()) ||
+          lowerPath.endsWith(decodedHomePath.toLowerCase());
+        if (!isLandingHomePath && !activeSectionId) return;
+
+        try {
+          const canonicalUrl = new URL(window.location.href);
+          canonicalUrl.pathname = activeSectionId
+            ? sectionRoutePath[activeSectionId]
+            : "/";
+          canonicalUrl.hash = "";
+          window.history.replaceState(
+            window.history.state,
+            "",
+            canonicalUrl.toString(),
+          );
+        } catch (_) {
+          // Ignore history API failures.
+        }
       })();
 
       (() => {
         const hasHashTarget = Boolean(window.location.hash);
+        let normalizedPath = (window.location.pathname || "/").toLowerCase();
+        try {
+          normalizedPath = decodeURIComponent(normalizedPath).toLowerCase();
+        } catch (_) {
+          // Keep original path value.
+        }
+        if (normalizedPath.length > 1 && normalizedPath.endsWith("/")) {
+          normalizedPath = normalizedPath.slice(0, -1);
+        }
+        const hasSectionRoute =
+          normalizedPath === "/features" ||
+          normalizedPath === "/about" ||
+          normalizedPath === "/contact";
 
         if ("scrollRestoration" in history) {
           history.scrollRestoration = "manual";
         }
 
-        if (!hasHashTarget) {
+        if (!hasHashTarget && !hasSectionRoute) {
           window.scrollTo(0, 0);
         }
 
         window.addEventListener("pageshow", () => {
-          if (!hasHashTarget) {
+          if (!hasHashTarget && !hasSectionRoute) {
             window.scrollTo(0, 0);
           }
         });
@@ -631,16 +716,105 @@
       })();
 
       (() => {
-        const aboutLink = document.getElementById("nav-about-link");
-        const aboutSection = document.getElementById("about");
-        if (!aboutLink || !aboutSection) return;
+        const sectionRoutePath = {
+          features: "/Features",
+          about: "/About",
+          contact: "/Contact",
+        };
 
-        aboutLink.addEventListener("click", (event) => {
-          event.preventDefault();
-          aboutSection.scrollIntoView({
-            behavior: "smooth",
-            block: "center"
+        const normalizePath = (value) => {
+          let normalized = (value || "/").trim() || "/";
+          try {
+            normalized = decodeURIComponent(normalized);
+          } catch (_) {
+            // Keep original path value.
+          }
+          if (normalized.length > 1 && normalized.endsWith("/")) {
+            normalized = normalized.slice(0, -1);
+          }
+          return normalized.toLowerCase();
+        };
+
+        const resolveSectionId = () => {
+          const hashSection = (window.location.hash || "")
+            .replace(/^#/, "")
+            .trim()
+            .toLowerCase();
+          if (sectionRoutePath[hashSection]) return hashSection;
+          const pathSection = normalizePath(window.location.pathname || "/")
+            .replace(/^\//, "")
+            .trim()
+            .toLowerCase();
+          if (sectionRoutePath[pathSection]) return pathSection;
+          return "";
+        };
+
+        const scrollToSection = (sectionId, behavior) => {
+          if (!sectionId) return false;
+          const section = document.getElementById(sectionId);
+          if (!section) return false;
+          section.scrollIntoView({
+            behavior,
+            block: sectionId === "about" ? "center" : "start",
           });
+          return true;
+        };
+
+        const updateSectionUrl = (sectionId, replaceHistory) => {
+          const path = sectionRoutePath[sectionId];
+          if (!path) return;
+          const targetUrl = new URL(window.location.href);
+          targetUrl.pathname = path;
+          targetUrl.hash = "";
+          if (replaceHistory) {
+            window.history.replaceState(
+              window.history.state,
+              "",
+              targetUrl.toString(),
+            );
+          } else {
+            window.history.pushState(
+              window.history.state,
+              "",
+              targetUrl.toString(),
+            );
+          }
+        };
+
+        document.querySelectorAll("a[href]").forEach((link) => {
+          const href = (link.getAttribute("href") || "").trim();
+          if (!href.includes("#")) return;
+          let sectionId = "";
+          try {
+            sectionId = (new URL(href, window.location.href).hash || "")
+              .replace(/^#/, "")
+              .trim()
+              .toLowerCase();
+          } catch (_) {
+            sectionId = href.replace(/^.*#/, "").trim().toLowerCase();
+          }
+          if (!sectionRoutePath[sectionId]) return;
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            scrollToSection(sectionId, "smooth");
+            updateSectionUrl(sectionId, false);
+          });
+        });
+
+        const initialSectionId = resolveSectionId();
+        if (initialSectionId) {
+          window.requestAnimationFrame(() => {
+            scrollToSection(initialSectionId, "auto");
+          });
+        }
+
+        window.addEventListener("popstate", () => {
+          const sectionId = resolveSectionId();
+          if (sectionId) {
+            scrollToSection(sectionId, "auto");
+            return;
+          }
+          window.scrollTo(0, 0);
         });
       })();
     </script>

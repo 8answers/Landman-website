@@ -10510,23 +10510,52 @@ class _DashboardPageState extends State<DashboardPage> {
   String _resolveDocumentStoragePath(String urlOrPath) {
     final raw = urlOrPath.trim();
     if (raw.isEmpty) return '';
-    if (!raw.startsWith('http')) return raw;
-    final parts = raw.split('/documents/');
-    if (parts.length > 1) {
-      return parts.sublist(1).join('/documents/').trim();
+    final lowerRaw = raw.toLowerCase();
+    final isHttpUrl =
+        lowerRaw.startsWith('http://') || lowerRaw.startsWith('https://');
+    if (!isHttpUrl) return raw;
+
+    try {
+      final uri = Uri.parse(raw);
+      final index = uri.pathSegments.indexOf('documents');
+      if (index >= 0 && index + 1 < uri.pathSegments.length) {
+        final extracted = Uri.decodeComponent(
+          uri.pathSegments.sublist(index + 1).join('/'),
+        ).trim();
+        if (extracted.isNotEmpty) return extracted;
+      }
+    } catch (_) {}
+
+    final markerIndex = lowerRaw.indexOf('/documents/');
+    if (markerIndex >= 0) {
+      var extracted = raw.substring(markerIndex + '/documents/'.length);
+      final queryIndex = extracted.indexOf('?');
+      if (queryIndex >= 0) {
+        extracted = extracted.substring(0, queryIndex);
+      }
+      final fragmentIndex = extracted.indexOf('#');
+      if (fragmentIndex >= 0) {
+        extracted = extracted.substring(0, fragmentIndex);
+      }
+      return Uri.decodeComponent(extracted).trim();
     }
-    return raw;
+    return '';
   }
 
-  String _resolveDocumentPublicUrl(String storagePathOrUrl) {
+  Future<String> _resolveDocumentPublicUrl(String storagePathOrUrl) async {
     final raw = storagePathOrUrl.trim();
     if (raw.isEmpty) return '';
     final resolvedStoragePath = _resolveDocumentStoragePath(raw);
     if (resolvedStoragePath.isEmpty) return '';
-    if (resolvedStoragePath.startsWith('http')) return resolvedStoragePath;
-    return _supabase.storage
-        .from('documents')
-        .getPublicUrl(resolvedStoragePath);
+    if (resolvedStoragePath.startsWith('http')) return '';
+    try {
+      final signedUrl = await _supabase.storage
+          .from('documents')
+          .createSignedUrl(resolvedStoragePath, 3600);
+      return signedUrl.trim();
+    } catch (_) {
+      return '';
+    }
   }
 
   Future<void> _openLayoutImageViewerForDashboard(
@@ -10555,7 +10584,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
     if (layoutImagePath.isEmpty) return;
-    final publicUrl = _resolveDocumentPublicUrl(layoutImagePath);
+    final publicUrl = await _resolveDocumentPublicUrl(layoutImagePath);
     if (publicUrl.isEmpty || !mounted) return;
 
     showDialog<void>(

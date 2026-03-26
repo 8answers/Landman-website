@@ -22,6 +22,12 @@ Set these for your Supabase project:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
+- `MAIL_TOKEN_ENCRYPTION_KEY` (long random secret used to encrypt refresh tokens at rest)
+
+### Optional security config
+
+- `ALLOWED_ORIGINS` (comma-separated allowlist, e.g. `https://app.example.com,https://staging.example.com`)
+- `APP_BASE_URL` (single fallback origin when `ALLOWED_ORIGINS` is not set)
 
 ### Deploy
 
@@ -34,9 +40,13 @@ Set these for your Supabase project:
    - `supabase secrets set SUPABASE_SERVICE_ROLE_KEY=...`
    - `supabase secrets set GOOGLE_OAUTH_CLIENT_ID=...`
    - `supabase secrets set GOOGLE_OAUTH_CLIENT_SECRET=...`
+   - `supabase secrets set MAIL_TOKEN_ENCRYPTION_KEY=...`
+   - `supabase secrets set ALLOWED_ORIGINS=https://<your-app-domain>`
 
 3. Deploy function:
    - `supabase functions deploy send-project-invite-email`
+
+4. Run the migration that creates `invite_email_audit` before using the function.
 
 ### Test
 

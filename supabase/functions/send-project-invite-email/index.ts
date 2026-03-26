@@ -1,12 +1,18 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.8";
 
-const corsHeaders: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Content-Type": "application/json",
-};
+const MAX_EMAILS_PER_10_MINUTES = 20;
+const REFRESH_TOKEN_PREFIX = "enc:v1:";
+
+const configuredAllowedOrigins = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter((origin) => origin.length > 0);
+const fallbackAllowedOrigin = (Deno.env.get("APP_BASE_URL") ?? "").trim();
+
+let cachedTokenCryptoKey: CryptoKey | null = null;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 type InvitePayload = {
   to?: string;
@@ -27,10 +33,50 @@ type GoogleTokenResponse = {
   error_description?: string;
 };
 
-function jsonResponse(status: number, data: Record<string, unknown>): Response {
+function getAllowedOrigin(requestOrigin: string): string {
+  const origin = requestOrigin.trim();
+  if (!origin) return "";
+
+  if (configuredAllowedOrigins.length > 0) {
+    if (
+      configuredAllowedOrigins.includes("*") ||
+      configuredAllowedOrigins.includes(origin)
+    ) {
+      return origin;
+    }
+    return "";
+  }
+
+  if (fallbackAllowedOrigin && origin === fallbackAllowedOrigin) {
+    return origin;
+  }
+
+  return "";
+}
+
+function buildCorsHeaders(requestOrigin: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Headers":
+      "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Content-Type": "application/json",
+    "Vary": "Origin",
+  };
+  const allowedOrigin = getAllowedOrigin(requestOrigin);
+  if (allowedOrigin) {
+    headers["Access-Control-Allow-Origin"] = allowedOrigin;
+  }
+  return headers;
+}
+
+function jsonResponse(
+  status: number,
+  data: Record<string, unknown>,
+  requestOrigin: string,
+): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: corsHeaders,
+    headers: buildCorsHeaders(requestOrigin),
   });
 }
 
@@ -40,6 +86,48 @@ function normalizeEmail(value: string | undefined): string {
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function normalizeInviteRole(value: string | undefined): string {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "partner":
+    case "project_manager":
+    case "agent":
+    case "admin":
+      return (value ?? "").trim().toLowerCase();
+    default:
+      return "";
+  }
+}
+
+function sanitizeHeaderValue(value: string | undefined, maxLength: number): string {
+  return (value ?? "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeInviteUrl(value: string | undefined): string {
+  const raw = (value ?? "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "https:") return parsed.toString();
+    if (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+    ) {
+      return parsed.toString();
+    }
+    return "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function clampBodyText(value: string | undefined): string {
+  return (value ?? "").trim().slice(0, 6000);
 }
 
 function escapeHtml(input: string): string {
@@ -65,11 +153,87 @@ function toBase64Url(raw: string): string {
     .replace(/=+$/, "");
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function getTokenCryptoKey(secret: string): Promise<CryptoKey> {
+  if (cachedTokenCryptoKey) return cachedTokenCryptoKey;
+  const secretHash = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
+  cachedTokenCryptoKey = await crypto.subtle.importKey(
+    "raw",
+    secretHash,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+  return cachedTokenCryptoKey;
+}
+
+async function encryptRefreshToken(
+  token: string,
+  secret: string,
+): Promise<string> {
+  const key = await getTokenCryptoKey(secret);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(token),
+  );
+  const payload = bytesToBase64(new Uint8Array(encrypted));
+  return `${REFRESH_TOKEN_PREFIX}${bytesToBase64(iv)}.${payload}`;
+}
+
+async function decryptRefreshToken(
+  storedValue: string,
+  secret: string,
+): Promise<string> {
+  const trimmed = storedValue.trim();
+  if (!trimmed) return "";
+  if (!trimmed.startsWith(REFRESH_TOKEN_PREFIX)) {
+    // Backward compatibility for legacy plaintext rows.
+    return trimmed;
+  }
+
+  const encoded = trimmed.slice(REFRESH_TOKEN_PREFIX.length);
+  const splitIndex = encoded.indexOf(".");
+  if (splitIndex <= 0 || splitIndex >= encoded.length - 1) {
+    throw new Error("invalid_encrypted_token_format");
+  }
+  const ivEncoded = encoded.slice(0, splitIndex);
+  const payloadEncoded = encoded.slice(splitIndex + 1);
+
+  const iv = base64ToBytes(ivEncoded);
+  const payload = base64ToBytes(payloadEncoded);
+  const key = await getTokenCryptoKey(secret);
+
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    payload,
+  );
+  return decoder.decode(decrypted).trim();
+}
+
 async function exchangeRefreshTokenForAccessToken(args: {
   refreshToken: string;
   googleClientId: string;
   googleClientSecret: string;
-}): Promise<{ accessToken?: string; error?: string; details?: unknown }> {
+}): Promise<{ accessToken?: string; error?: string }> {
   const form = new URLSearchParams({
     client_id: args.googleClientId,
     client_secret: args.googleClientSecret,
@@ -93,32 +257,43 @@ async function exchangeRefreshTokenForAccessToken(args: {
     if (!response.ok || !data?.access_token) {
       return {
         error: "Failed to exchange Gmail refresh token",
-        details: {
-          status: response.status,
-          response: data,
-        },
       };
     }
 
     return { accessToken: data.access_token };
-  } catch (error) {
+  } catch (_) {
     return {
       error: "Failed to reach Google token endpoint",
-      details: error instanceof Error ? error.message : "unknown_error",
     };
   }
 }
 
 Deno.serve(async (req: Request) => {
+  const requestOrigin = req.headers.get("origin") ?? "";
+  const allowedOrigin = getAllowedOrigin(requestOrigin);
+
   if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+    if (requestOrigin && !allowedOrigin) {
+      return new Response("forbidden", {
+        status: 403,
+        headers: buildCorsHeaders(requestOrigin),
+      });
+    }
+    return new Response("ok", { headers: buildCorsHeaders(requestOrigin) });
+  }
+
+  if (requestOrigin && !allowedOrigin) {
+    return jsonResponse(403, {
+      success: false,
+      error: "Origin not allowed",
+    }, requestOrigin);
   }
 
   if (req.method !== "POST") {
     return jsonResponse(405, {
       success: false,
       error: "Method not allowed",
-    });
+    }, requestOrigin);
   }
 
   let payload: InvitePayload;
@@ -128,7 +303,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(400, {
       success: false,
       error: "Invalid JSON payload",
-    });
+    }, requestOrigin);
   }
 
   const to = normalizeEmail(payload.to);
@@ -136,33 +311,52 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(400, {
       success: false,
       error: "Missing or invalid recipient email",
-    });
+    }, requestOrigin);
   }
 
-  const subject = (payload.subject ?? "Project Access Request").trim();
-  const textBody = (payload.body ?? "").trim();
-  const directAuthUrl = (payload.directAuthUrl ?? "").trim();
-  const signInUrl = (payload.signInUrl ?? "").trim();
-  const projectRole = (payload.projectRole ?? "").trim();
-  const projectName = (payload.projectName ?? "").trim();
+  const projectId = (payload.projectId ?? "").trim();
+  const projectRole = normalizeInviteRole(payload.projectRole);
+  if (!projectId || !projectRole) {
+    return jsonResponse(400, {
+      success: false,
+      error: "Missing or invalid project context",
+    }, requestOrigin);
+  }
+
+  const subject = sanitizeHeaderValue(
+    payload.subject ?? "Project Access Request",
+    180,
+  );
+  const textBody = clampBodyText(payload.body);
+  const directAuthUrl = normalizeInviteUrl(payload.directAuthUrl);
+  const signInUrl = normalizeInviteUrl(payload.signInUrl);
+  const projectName = sanitizeHeaderValue(payload.projectName, 200);
   const payloadRefreshToken = (payload.gmailRefreshToken ?? "").trim();
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
   const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const googleClientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID") ?? "";
   const googleClientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET") ?? "";
+  const mailTokenEncryptionKey =
+    Deno.env.get("MAIL_TOKEN_ENCRYPTION_KEY") ?? "";
 
   if (!supabaseUrl || !supabaseServiceRoleKey) {
     return jsonResponse(500, {
       success: false,
       error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env",
-    });
+    }, requestOrigin);
   }
   if (!googleClientId || !googleClientSecret) {
     return jsonResponse(500, {
       success: false,
       error: "Missing GOOGLE_OAUTH_CLIENT_ID or GOOGLE_OAUTH_CLIENT_SECRET env",
-    });
+    }, requestOrigin);
+  }
+  if (!mailTokenEncryptionKey.trim()) {
+    return jsonResponse(500, {
+      success: false,
+      error: "Missing MAIL_TOKEN_ENCRYPTION_KEY env",
+    }, requestOrigin);
   }
 
   const userJwt = getBearerToken(req);
@@ -170,7 +364,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(401, {
       success: false,
       error: "Missing bearer token",
-    });
+    }, requestOrigin);
   }
 
   const serviceClient = createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -186,8 +380,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(401, {
       success: false,
       error: "Unauthorized user token",
-      details: userResult.error?.message ?? null,
-    });
+    }, requestOrigin);
   }
 
   const senderEmail = normalizeEmail(user.email ?? "");
@@ -195,10 +388,108 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(400, {
       success: false,
       error: "Sender account does not have a valid email",
-    });
+    }, requestOrigin);
+  }
+
+  const projectRow = await serviceClient
+    .from("projects")
+    .select("id, user_id")
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (projectRow.error || !projectRow.data) {
+    return jsonResponse(403, {
+      success: false,
+      error: "Project not found or inaccessible",
+    }, requestOrigin);
+  }
+
+  const isOwner = ((projectRow.data.user_id ?? "").toString().trim() === user.id);
+  if (!isOwner) {
+    const roleRow = await serviceClient
+      .from("project_members")
+      .select("role, status")
+      .eq("project_id", projectId)
+      .eq("user_id", user.id)
+      .limit(1)
+      .maybeSingle();
+
+    const memberRole = (roleRow.data?.role ?? "").toString().trim().toLowerCase();
+    const memberStatus =
+      (roleRow.data?.status ?? "").toString().trim().toLowerCase();
+    const canSend =
+      !roleRow.error &&
+      memberStatus == "active" &&
+      (memberRole == "admin" || memberRole == "project_manager");
+
+    if (!canSend) {
+      return jsonResponse(403, {
+        success: false,
+        error: "You do not have permission to send invites for this project",
+      }, requestOrigin);
+    }
+  }
+
+  const inviteRow = await serviceClient
+    .from("project_access_invites")
+    .select("id, status")
+    .eq("project_id", projectId)
+    .eq("invited_email", to)
+    .eq("role", projectRole)
+    .order("requested_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (inviteRow.error || !inviteRow.data) {
+    return jsonResponse(403, {
+      success: false,
+      error: "Invite row not found for this recipient/role",
+    }, requestOrigin);
+  }
+
+  const inviteStatus = (inviteRow.data.status ?? "").toString().trim().toLowerCase();
+  if (inviteStatus === "revoked" || inviteStatus === "expired") {
+    return jsonResponse(400, {
+      success: false,
+      error: "Invite is no longer active",
+    }, requestOrigin);
+  }
+
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const recentSendCount = await serviceClient
+    .from("invite_email_audit")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .gte("sent_at", tenMinutesAgo);
+
+  if (recentSendCount.error) {
+    return jsonResponse(500, {
+      success: false,
+      error: "Invite audit table is unavailable",
+    }, requestOrigin);
+  }
+
+  if ((recentSendCount.count ?? 0) >= MAX_EMAILS_PER_10_MINUTES) {
+    return jsonResponse(429, {
+      success: false,
+      error: "Rate limit exceeded. Please wait before sending more invites.",
+    }, requestOrigin);
   }
 
   if (payloadRefreshToken) {
+    let encryptedRefreshToken = "";
+    try {
+      encryptedRefreshToken = await encryptRefreshToken(
+        payloadRefreshToken,
+        mailTokenEncryptionKey,
+      );
+    } catch (_) {
+      return jsonResponse(500, {
+        success: false,
+        error: "Failed to encrypt Gmail sender token",
+      }, requestOrigin);
+    }
+
     const upsertResult = await serviceClient
       .from("user_mail_provider_tokens")
       .upsert(
@@ -206,7 +497,7 @@ Deno.serve(async (req: Request) => {
           user_id: user.id,
           provider: "google",
           sender_email: senderEmail,
-          refresh_token: payloadRefreshToken,
+          refresh_token: encryptedRefreshToken,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,provider" },
@@ -218,8 +509,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse(500, {
         success: false,
         error: "Failed to store sender Gmail token",
-        details: upsertResult.error.message,
-      });
+      }, requestOrigin);
     }
   }
 
@@ -234,23 +524,45 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(500, {
       success: false,
       error: "Failed to load sender Gmail token",
-      details: tokenResult.error.message,
-    });
+    }, requestOrigin);
   }
 
-  const storedRefreshToken = (tokenResult.data?.refresh_token ?? "").toString().trim();
-  const senderEmailFromToken = normalizeEmail(tokenResult.data?.sender_email ?? senderEmail);
+  const storedRefreshToken =
+    (tokenResult.data?.refresh_token ?? "").toString().trim();
+  const senderEmailFromToken =
+    normalizeEmail(tokenResult.data?.sender_email ?? senderEmail);
 
   if (!storedRefreshToken) {
     return jsonResponse(400, {
       success: false,
       error:
         "No Gmail sender token found for this account. Sign out and sign in with Google again to grant Gmail send access.",
-    });
+    }, requestOrigin);
+  }
+
+  let decryptedRefreshToken = "";
+  try {
+    decryptedRefreshToken = await decryptRefreshToken(
+      storedRefreshToken,
+      mailTokenEncryptionKey,
+    );
+  } catch (_) {
+    return jsonResponse(500, {
+      success: false,
+      error: "Stored Gmail sender token could not be decrypted",
+    }, requestOrigin);
+  }
+
+  if (!decryptedRefreshToken) {
+    return jsonResponse(400, {
+      success: false,
+      error:
+        "No Gmail sender token found for this account. Sign out and sign in with Google again to grant Gmail send access.",
+    }, requestOrigin);
   }
 
   const exchanged = await exchangeRefreshTokenForAccessToken({
-    refreshToken: storedRefreshToken,
+    refreshToken: decryptedRefreshToken,
     googleClientId,
     googleClientSecret,
   });
@@ -259,10 +571,10 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(502, {
       success: false,
       error: exchanged.error ?? "Failed to authorize Gmail sender",
-      details: exchanged.details ?? null,
-    });
+    }, requestOrigin);
   }
 
+  const safeSubject = sanitizeHeaderValue(subject, 180) || "Project Access Request";
   const htmlBody =
     `<div style="font-family: Arial, sans-serif; line-height: 1.5;">` +
     `<p>You have been invited to access this project${projectRole ? ` as <b>${escapeHtml(projectRole)}</b>` : ""}.</p>` +
@@ -279,9 +591,9 @@ Deno.serve(async (req: Request) => {
     `</div>`;
 
   const mime = [
-    `From: ${senderEmailFromToken}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `From: ${sanitizeHeaderValue(senderEmailFromToken, 254)}`,
+    `To: ${sanitizeHeaderValue(to, 254)}`,
+    `Subject: ${safeSubject}`,
     "MIME-Version: 1.0",
     "Content-Type: text/html; charset=UTF-8",
     "",
@@ -303,29 +615,37 @@ Deno.serve(async (req: Request) => {
       },
     );
 
-    const gmailData = await gmailResponse.json().catch(() => null);
+    const gmailData = await gmailResponse.json().catch(() => null) as
+      | { id?: string }
+      | null;
 
     if (!gmailResponse.ok) {
       return jsonResponse(502, {
         success: false,
         error: "Gmail API rejected request",
         providerStatus: gmailResponse.status,
-        providerResponse: gmailData,
-      });
+      }, requestOrigin);
     }
+
+    await serviceClient.from("invite_email_audit").insert({
+      user_id: user.id,
+      project_id: projectId,
+      invited_email: to,
+      role: projectRole,
+      sent_at: new Date().toISOString(),
+    });
 
     return jsonResponse(200, {
       success: true,
       sent: true,
       provider: "gmail",
       senderEmail: senderEmailFromToken,
-      providerResponse: gmailData,
-    });
-  } catch (error) {
+      providerMessageId: (gmailData?.id ?? "").toString(),
+    }, requestOrigin);
+  } catch (_) {
     return jsonResponse(500, {
       success: false,
       error: "Failed to send invite email via Gmail",
-      details: error instanceof Error ? error.message : "unknown_error",
-    });
+    }, requestOrigin);
   }
 });

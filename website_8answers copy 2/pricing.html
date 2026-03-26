@@ -89,6 +89,43 @@
     </footer>
     <script>
       (() => {
+        const currentPath = window.location.pathname || "/";
+        const lowerPath = currentPath.toLowerCase();
+        const encodedPricingPath = "/website_8answers%20copy%202/pricing.html";
+        const decodedPricingPath = "/website_8answers copy 2/pricing.html";
+        const isLegacyPricingPath =
+          lowerPath.endsWith(encodedPricingPath.toLowerCase()) ||
+          lowerPath.endsWith(decodedPricingPath.toLowerCase());
+        if (!isLegacyPricingPath) return;
+
+        const pageUrl = new URL(window.location.href);
+        const relativeLinks = document.querySelectorAll('a[href^="./"]');
+        relativeLinks.forEach((link) => {
+          const href = (link.getAttribute("href") || "").trim();
+          if (!href) return;
+          try {
+            const targetUrl = new URL(href, pageUrl);
+            link.setAttribute("href", targetUrl.toString());
+          } catch (_) {
+            // Ignore malformed hrefs.
+          }
+        });
+
+        try {
+          const canonicalUrl = new URL(window.location.href);
+          canonicalUrl.pathname = "/Pricing";
+          canonicalUrl.hash = "";
+          window.history.replaceState(
+            window.history.state,
+            "",
+            canonicalUrl.toString(),
+          );
+        } catch (_) {
+          // Ignore history API failures.
+        }
+      })();
+
+      (() => {
         const burgerButton = document.getElementById("burger-toggle");
         const mobileMenu = document.getElementById("mobile-menu");
         if (!burgerButton || !mobileMenu) return;

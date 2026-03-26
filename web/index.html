@@ -24,8 +24,17 @@
   <script>
     (function () {
       var pathname = window.location.pathname || '/';
+      var currentSearch = window.location.search || '';
+      var currentHash = window.location.hash || '';
       var params = new URLSearchParams(window.location.search || '');
+      var hashParams = new URLSearchParams(
+        currentHash.startsWith('#') ? currentHash.substring(1) : ''
+      );
       var hasCodeCallback = params.has('code') && params.has('state');
+      var hasHashAuthTokens =
+        hashParams.has('access_token') ||
+        hashParams.has('refresh_token') ||
+        hashParams.has('id_token');
       var decodeSafely = function (value) {
         try {
           return decodeURIComponent(value || '');
@@ -57,7 +66,7 @@
         (params.get('projectId') || '').trim() !== '' ||
         (params.get('inv') || params.get('inviteToken') || '').trim() !== '';
       var hasAuthFlowParams =
-        hasGoogleAuthParam || hasCodeCallback || hasInviteContext;
+        hasGoogleAuthParam || hasCodeCallback || hasInviteContext || hasHashAuthTokens;
       var isLandingPath =
         pathname.indexOf('/website_8answers%20copy%202/') !== -1 ||
         pathname.indexOf('/website_8answers copy 2/') !== -1;
