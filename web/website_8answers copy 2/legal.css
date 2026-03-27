@@ -133,6 +133,40 @@ a {
   width: 128px;
 }
 
+.btn-lang {
+  width: auto;
+  min-width: 180px;
+  border: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.lang-toggle {
+  gap: 10px;
+  font-size: 19.2px;
+}
+
+.lang-option,
+.lang-divider {
+  line-height: 1;
+  font-size: inherit;
+  font-family: inherit;
+  font-weight: inherit;
+}
+
+.lang-option {
+  color: #7f7f7f;
+}
+
+.lang-divider {
+  color: #7f7f7f;
+}
+
+.lang-toggle.is-en .lang-option-en,
+.lang-toggle.is-hi .lang-option-hi {
+  color: var(--primary);
+}
+
 .legal-main {
   padding-top: 32px;
   padding-bottom: 32px;
@@ -203,6 +237,10 @@ a {
 
   .btn-sm {
     font-size: 22px;
+  }
+
+  .lang-toggle {
+    font-size: 17.6px;
   }
 
   .legal-content {

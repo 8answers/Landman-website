@@ -30,7 +30,7 @@ flutter:
   assets:
     - assets/images/
     - assets/icons/
-    - website_8answers copy 2/
+    - web/website_8answers copy 2/
 
   # Lottie animations
   # Add Lottie asset JSON files under assets/images/

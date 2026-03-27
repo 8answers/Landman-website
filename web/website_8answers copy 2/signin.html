@@ -189,8 +189,24 @@
 
         const bindGoogleButton = () => {
           const button = document.getElementById("continue-with-google");
+          const consentCheckbox = document.getElementById("consent-checkbox");
           if (!button) return;
+
+          const updateButtonState = () => {
+            if (!consentCheckbox) {
+              button.disabled = false;
+              return;
+            }
+            button.disabled = !consentCheckbox.checked;
+          };
+
+          updateButtonState();
+          if (consentCheckbox) {
+            consentCheckbox.addEventListener("change", updateButtonState);
+          }
+
           button.addEventListener("click", () => {
+            if (button.disabled) return;
             const authUrl = new URL(
               resolveAppBasePath(),
               window.location.origin,
@@ -292,7 +308,19 @@
       <section class="signin-panel">
         <div class="signin-card">
           <h1>Sign In</h1>
-          <button type="button" class="btn-google" id="continue-with-google">
+          <div class="terms-block">
+            <label class="consent-row" for="consent-checkbox">
+              <input type="checkbox" id="consent-checkbox" />
+              <span class="consent-copy">
+                I agree to the <a href="./terms.html">Terms &amp; Conditions</a> and
+                <a href="./privacy.html">Privacy Policy</a>, consent to the processing of my
+                personal data as described therein, and confirm that I am 18 years or older or
+                using this platform with parental/guardian consent.
+              </span>
+            </label>
+          </div>
+
+          <button type="button" class="btn-google" id="continue-with-google" disabled>
             <img
               src="./assets/6b4e9b37-09de-422d-b91f-3116395884de.svg"
               alt=""
@@ -300,11 +328,6 @@
             />
             <span>Continue with Google</span>
           </button>
-
-          <div class="terms-block">
-            <p class="terms-copy">By continuing, you agree to our</p>
-            <a href="./terms.html" class="terms-link">Terms &amp; Conditions and Privacy Policy.</a>
-          </div>
 
           <div class="divider" aria-hidden="true">
             <span></span>
