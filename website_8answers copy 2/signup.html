@@ -15,10 +15,13 @@
     <script>
       (() => {
         const signInUrl = new URL("./signin.html", window.location.href);
-        const currentSearch = window.location.search || "";
-        const currentHash = window.location.hash || "";
-        signInUrl.search = currentSearch;
-        signInUrl.hash = currentHash;
+        const params = new URLSearchParams(window.location.search || "");
+        ["access_token", "refresh_token", "id_token", "code", "state"].forEach(
+          (key) => params.delete(key),
+        );
+        const sanitizedSearch = params.toString();
+        signInUrl.search = sanitizedSearch ? `?${sanitizedSearch}` : "";
+        signInUrl.hash = "";
         window.location.replace(signInUrl.toString());
       })();
 
@@ -26,8 +29,13 @@
         const enforceDesktopOnly = () => {
           if (window.innerWidth < 770) {
             const homeUrl = new URL("./index.html", window.location.href);
-            homeUrl.search = window.location.search || "";
-            homeUrl.hash = window.location.hash || "";
+            const params = new URLSearchParams(window.location.search || "");
+            ["access_token", "refresh_token", "id_token", "code", "state"].forEach(
+              (key) => params.delete(key),
+            );
+            const sanitizedSearch = params.toString();
+            homeUrl.search = sanitizedSearch ? `?${sanitizedSearch}` : "";
+            homeUrl.hash = "";
             window.location.replace(homeUrl.toString());
           }
         };
