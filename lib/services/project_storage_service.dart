@@ -508,6 +508,7 @@ class ProjectStorageService {
     List<Map<String, dynamic>>? partners,
     List<Map<String, dynamic>>? expenses,
     List<Map<String, dynamic>>? layouts,
+    bool partialLayoutsSync = false,
     List<Map<String, dynamic>>? projectManagers,
     List<Map<String, dynamic>>? agents,
   }) async {
@@ -665,7 +666,11 @@ class ProjectStorageService {
       if (layouts != null) {
         attemptedSectionSaves++;
         try {
-          await _saveLayoutsAndPlots(projectId, layouts);
+          await _saveLayoutsAndPlots(
+            projectId,
+            layouts,
+            partialSync: partialLayoutsSync,
+          );
           successfulSectionSaves++;
         } catch (e) {
           sectionErrors.add('layouts: $e');
@@ -1093,9 +1098,8 @@ class ProjectStorageService {
   }
 
   static Future<void> _saveLayoutsAndPlots(
-    String projectId,
-    List<Map<String, dynamic>> layouts,
-  ) async {
+      String projectId, List<Map<String, dynamic>> layouts,
+      {bool partialSync = false}) async {
     final errors = <String>[];
     final supportsBuyerContactNumber =
         await _supportsBuyerContactNumberColumn();
@@ -1463,9 +1467,8 @@ class ProjectStorageService {
         }
       }
 
-      // Delete plots only when this layout saved cleanly.
-      // If any plot failed to save, skip deletion to prevent accidental data loss.
-      if (!layoutHadPlotSaveError && hasIncomingNonEmptyPlots) {
+      // Full sync deletes missing plots. Partial sync skips deletes by design.
+      if (!partialSync && !layoutHadPlotSaveError && hasIncomingNonEmptyPlots) {
         for (final existingPlot in existingPlots) {
           final existingPlotId = (existingPlot['id'] ?? '').toString();
           if (existingPlotId.isNotEmpty &&
@@ -1480,7 +1483,7 @@ class ProjectStorageService {
       } else if (!hasIncomingNonEmptyPlots) {
         _log(
             '_saveLayoutsAndPlots: Skipping plot deletions for layout "$layoutName" because incoming payload has no non-empty plot numbers');
-      } else {
+      } else if (!partialSync) {
         final msg =
             '_saveLayoutsAndPlots: Skipping plot deletions for layout "$layoutName" due to save errors';
         _log(msg);
@@ -1488,24 +1491,27 @@ class ProjectStorageService {
       }
     }
 
-    // Delete layouts that are no longer in the data
-    final currentLayoutNames = layouts
-        .map((l) => (l['name'] ?? '').toString().trim())
-        .where((n) => n.isNotEmpty)
-        .toSet();
-    final layoutsToDelete = existingLayoutMap.entries
-        .where((e) => !currentLayoutNames.contains(e.key))
-        .map((e) => e.value)
-        .toList();
+    if (!partialSync) {
+      // Delete layouts that are no longer in the full payload.
+      final currentLayoutNames = layouts
+          .map((l) => (l['name'] ?? '').toString().trim())
+          .where((n) => n.isNotEmpty)
+          .toSet();
+      final layoutsToDelete = existingLayoutMap.entries
+          .where((e) => !currentLayoutNames.contains(e.key))
+          .map((e) => e.value)
+          .toList();
 
-    _log('_saveLayoutsAndPlots: Current layout names: $currentLayoutNames');
-    _log('_saveLayoutsAndPlots: Existing layout map: $existingLayoutMap');
-    _log('_saveLayoutsAndPlots: Layouts to delete: ${layoutsToDelete.length}');
+      _log('_saveLayoutsAndPlots: Current layout names: $currentLayoutNames');
+      _log('_saveLayoutsAndPlots: Existing layout map: $existingLayoutMap');
+      _log(
+          '_saveLayoutsAndPlots: Layouts to delete: ${layoutsToDelete.length}');
 
-    if (layoutsToDelete.isNotEmpty) {
-      for (var layoutId in layoutsToDelete) {
-        _log('Deleting layout: $layoutId');
-        await _supabase.from('layouts').delete().eq('id', layoutId);
+      if (layoutsToDelete.isNotEmpty) {
+        for (var layoutId in layoutsToDelete) {
+          _log('Deleting layout: $layoutId');
+          await _supabase.from('layouts').delete().eq('id', layoutId);
+        }
       }
     }
 

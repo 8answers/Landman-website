@@ -210,6 +210,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   bool _invalidEditDialogResetScheduled = false;
   StreamSubscription<html.Event>? _onlineSubscription;
   static const Duration _layoutSaveDebounceDelay = Duration(milliseconds: 350);
+  final Map<String, String> _lastSyncedLayoutSignatures = <String, String>{};
+  final Map<String, String> _lastSyncedPlotSignatures = <String, String>{};
 
   // Plot data structure
   List<Map<String, dynamic>> _allPlots = [];
@@ -394,6 +396,147 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         _layoutPressedZoomKeys.remove(key);
       }
     });
+  }
+
+  String _normalizeSignatureText(dynamic value) {
+    return (value ?? '').toString().trim();
+  }
+
+  String _normalizeSignatureNumeric(dynamic value) {
+    final raw = _normalizeSignatureText(value)
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .replaceAll(' ', '');
+    if (raw.isEmpty) return '';
+    final parsed = double.tryParse(raw);
+    if (parsed == null) return raw.toLowerCase();
+    return parsed.toStringAsFixed(4);
+  }
+
+  String _normalizeSignatureStatus(dynamic value) {
+    final status = value is PlotStatus ? value : _parsePlotStatus(value);
+    return _plotStatusToDatabaseValue(status);
+  }
+
+  String _normalizePaymentsSignature(dynamic value) {
+    final payments = value is List ? value : const <dynamic>[];
+    final normalized = payments.map((payment) {
+      if (payment is Map) {
+        final entries = payment.entries.toList()
+          ..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+        return <String, String>{
+          for (final entry in entries)
+            entry.key.toString(): _normalizeSignatureText(entry.value),
+        };
+      }
+      return <String, String>{
+        'value': _normalizeSignatureText(payment),
+      };
+    }).toList(growable: false);
+    return jsonEncode(normalized);
+  }
+
+  String _layoutSignatureKey(Map<String, dynamic> layout) {
+    final id = _normalizeSignatureText(layout['id']);
+    if (id.isNotEmpty) return 'id:$id';
+    final name = _normalizeSignatureText(layout['name']).toLowerCase();
+    return 'name:$name';
+  }
+
+  String _plotSignatureKey(
+    String layoutKey,
+    Map<String, dynamic> plot,
+    int fallbackIndex,
+  ) {
+    final id = _normalizeSignatureText(plot['id']);
+    if (id.isNotEmpty) return 'id:$id';
+    final plotNumber =
+        _normalizeSignatureText(plot['plotNumber']).toLowerCase();
+    if (plotNumber.isNotEmpty) return '$layoutKey|plot:$plotNumber';
+    return '$layoutKey|idx:$fallbackIndex';
+  }
+
+  String _buildLayoutSignature(Map<String, dynamic> layout) {
+    return [
+      _normalizeSignatureText(layout['name']).toLowerCase(),
+      _normalizeSignatureText(layout['layoutImageName']),
+      _normalizeSignatureText(layout['layoutImagePath']),
+      _normalizeSignatureText(layout['layoutImageDocId']),
+      _normalizeSignatureText(layout['layoutImageExtension']).toLowerCase(),
+    ].join('|');
+  }
+
+  String _buildPlotSignature(Map<String, dynamic> plot) {
+    return [
+      _normalizeSignatureText(plot['plotNumber']).toLowerCase(),
+      _normalizeSignatureNumeric(plot['area']),
+      _normalizeSignatureNumeric(plot['purchaseRate']),
+      _normalizeSignatureNumeric(plot['totalPlotCost']),
+      _normalizeSignatureStatus(plot['status']),
+      _normalizeSignatureNumeric(plot['salePrice']),
+      _normalizeSignatureText(plot['buyerName']).toLowerCase(),
+      _normalizeSignatureText(plot['buyerContactNumber']),
+      _normalizeSignatureText(plot['agent']).toLowerCase(),
+      _normalizeSignatureText(plot['saleDate']),
+      _normalizePaymentsSignature(plot['payments']),
+    ].join('|');
+  }
+
+  void _captureRemoteLayoutSignatures(List<Map<String, dynamic>> layouts) {
+    _lastSyncedLayoutSignatures.clear();
+    _lastSyncedPlotSignatures.clear();
+    for (final layout in layouts) {
+      final layoutKey = _layoutSignatureKey(layout);
+      _lastSyncedLayoutSignatures[layoutKey] = _buildLayoutSignature(layout);
+      final plots = layout['plots'] as List<dynamic>? ?? const <dynamic>[];
+      for (var plotIndex = 0; plotIndex < plots.length; plotIndex++) {
+        final plotRaw = plots[plotIndex];
+        if (plotRaw is! Map) continue;
+        final plot = Map<String, dynamic>.from(plotRaw);
+        final plotKey = _plotSignatureKey(layoutKey, plot, plotIndex);
+        _lastSyncedPlotSignatures[plotKey] = _buildPlotSignature(plot);
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> _buildLayoutsDeltaForRemoteSave(
+    List<Map<String, dynamic>> layouts,
+  ) {
+    final hasBaseline = _lastSyncedLayoutSignatures.isNotEmpty ||
+        _lastSyncedPlotSignatures.isNotEmpty;
+    if (!hasBaseline) {
+      return layouts;
+    }
+
+    final changedLayouts = <Map<String, dynamic>>[];
+    for (final layout in layouts) {
+      final layoutKey = _layoutSignatureKey(layout);
+      final layoutSignature = _buildLayoutSignature(layout);
+      final layoutChanged =
+          _lastSyncedLayoutSignatures[layoutKey] != layoutSignature;
+      final plots = layout['plots'] as List<dynamic>? ?? const <dynamic>[];
+      final changedPlots = <Map<String, dynamic>>[];
+
+      for (var plotIndex = 0; plotIndex < plots.length; plotIndex++) {
+        final plotRaw = plots[plotIndex];
+        if (plotRaw is! Map) continue;
+        final plot = Map<String, dynamic>.from(plotRaw);
+        final plotKey = _plotSignatureKey(layoutKey, plot, plotIndex);
+        final plotSignature = _buildPlotSignature(plot);
+        if (_lastSyncedPlotSignatures[plotKey] != plotSignature) {
+          changedPlots.add(plot);
+        }
+      }
+
+      if (!layoutChanged && changedPlots.isEmpty) continue;
+
+      changedLayouts.add({
+        ...layout,
+        'plots': changedPlots,
+      });
+    }
+
+    return changedLayouts;
   }
 
   bool get _isEditingAmenityArea =>
@@ -1535,9 +1678,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
 
     // Convert layout data from Site section format to plot status format
+    final convertedLayouts = _convertLayoutsData(sourceLayouts);
     setState(() {
       _storedAgents = agents;
-      _layouts = _convertLayoutsData(sourceLayouts);
+      _layouts = convertedLayouts;
       _amenityAreas = _convertAmenityAreasData(sourceAmenityAreas);
       _amenityLayoutImageName = amenityLayoutImageName;
       _amenityLayoutImagePath = amenityLayoutImagePath;
@@ -1581,6 +1725,10 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
         unawaited(_persistActiveContentTab(PlotStatusContentTab.site));
       }
     });
+
+    if (!_hasUnsavedChanges) {
+      _captureRemoteLayoutSignatures(convertedLayouts);
+    }
 
     if (projectId != null && projectId.isNotEmpty) {
       await _syncAmenityLayoutImageFromDocumentsIfMissing(
@@ -1938,14 +2086,22 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     var savedSuccessfully = false;
     if (widget.projectId != null && widget.projectId!.isNotEmpty) {
       try {
-        _setSaveStatus(ProjectSaveStatusType.saving);
-        await ProjectStorageService.saveProjectData(
-          projectId: widget.projectId!,
-          projectName: '', // Not updating project name
-          layouts: layoutsToSave,
-        );
+        final deltaLayouts = _buildLayoutsDeltaForRemoteSave(layoutsToSave);
+        if (deltaLayouts.isNotEmpty) {
+          _setSaveStatus(ProjectSaveStatusType.saving);
+          await ProjectStorageService.saveProjectData(
+            projectId: widget.projectId!,
+            projectName: '', // Not updating project name
+            layouts: deltaLayouts,
+            partialLayoutsSync: true,
+          );
+        } else {
+          print(
+              '🔷 _saveLayoutsData: No remote layout/plot changes detected, skipping network save');
+        }
         await _markRemoteSaveTimestamp();
         _markLocalSaveCompleted();
+        _captureRemoteLayoutSignatures(layoutsToSave);
         savedSuccessfully = true;
       } catch (e) {
         print('Error saving plot status to Supabase: $e');
