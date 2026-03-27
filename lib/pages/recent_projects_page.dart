@@ -164,7 +164,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
       barrierColor: Colors.black.withOpacity(0.35),
       builder: (dialogContext) {
         final media = MediaQuery.of(dialogContext).size;
-        final width = math.min(685.0, media.width - 24);
+        final width = math.min(760.0, media.width - 24);
         final height = math.min(874.0, media.height - 24);
         return Dialog(
           insetPadding: const EdgeInsets.all(12),
@@ -233,9 +233,6 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                       fontWeight: FontWeight.w400,
                       color: Colors.black.withOpacity(0.8),
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.fade,
-                    softWrap: false,
                   ),
                   const SizedBox(height: 24),
                   Row(
@@ -577,7 +574,7 @@ class _RecentProjectsPageState extends State<RecentProjectsPage> {
                       ),
                     ),
                     Text(
-                      '₹1,00,00,005',
+                      '₹1,00,00,000.02',
                       style: GoogleFonts.inter(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,

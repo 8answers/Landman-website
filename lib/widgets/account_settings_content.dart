@@ -568,126 +568,136 @@ class _AccountSettingsContentState extends State<AccountSettingsContent> {
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isCompact = screenWidth < 768;
-    final scaleMetrics = AppScaleMetrics.of(context);
-    final designViewportWidth =
-        scaleMetrics?.designViewportWidth ?? screenWidth;
-    final extraRightWidth = designViewportWidth > screenWidth
-        ? (designViewportWidth - screenWidth)
-        : 0.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final screenWidth = constraints.maxWidth;
+        final isCompact = screenWidth < 768;
+        final scaleMetrics = AppScaleMetrics.of(context);
+        final extraRightWidth = scaleMetrics?.rightOverflowWidth ?? 0.0;
 
-    final user = Supabase.instance.client.auth.currentUser;
-    final userEmail = user?.email?.trim().isNotEmpty == true
-        ? user!.email!.trim()
-        : 'landmanpro@login.com';
+        final user = Supabase.instance.client.auth.currentUser;
+        final userEmail = user?.email?.trim().isNotEmpty == true
+            ? user!.email!.trim()
+            : 'landmanpro@login.com';
 
-    final horizontalPadding = isCompact ? 16.0 : 24.0;
+        final horizontalPadding = isCompact ? 16.0 : 24.0;
 
-    return Container(
-      color: Colors.white,
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 24, bottom: 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Account Settings',
-                        style: GoogleFonts.inter(
-                          fontSize: isCompact ? 30 : 32,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.black,
-                          height: 1.25,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Manage your account information and security',
-                        style: GoogleFonts.inter(
-                          fontSize: isCompact ? 18 : 20,
-                          fontWeight: FontWeight.w400,
-                          color: Colors.black.withValues(alpha: 0.8),
-                          height: 1.2,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  height: 32,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    clipBehavior: Clip.none,
-                    children: [
-                      Positioned(
-                        left: 0,
-                        right: -extraRightWidth,
-                        bottom: 0,
-                        child: Container(
-                          height: 0.5,
-                          color: const Color(0xFF5C5C5C),
-                        ),
-                      ),
-                      Row(
+        return Container(
+          color: Colors.white,
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 24, bottom: 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding:
+                          EdgeInsets.symmetric(horizontal: horizontalPadding),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          SizedBox(width: horizontalPadding),
-                          _buildTabItem(
-                            label: 'Login Details',
-                            isActive: _selectedTab ==
-                                _AccountSettingsTab.loginDetails,
-                            showWarningBadge: false,
-                            onTap: () {
-                              _setSelectedTab(_AccountSettingsTab.loginDetails);
-                            },
+                          Text(
+                            'Account Settings',
+                            style: GoogleFonts.inter(
+                              fontSize: isCompact ? 30 : 32,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black,
+                              height: 1.25,
+                            ),
                           ),
-                          const SizedBox(width: 36),
-                          _buildTabItem(
-                            label: 'Report Identity Settings',
-                            isActive: _selectedTab ==
-                                _AccountSettingsTab.reportIdentitySettings,
-                            showWarningBadge: _hasReportIdentityWarnings,
-                            onTap: () {
-                              _setSelectedTab(
-                                _AccountSettingsTab.reportIdentitySettings,
-                              );
-                            },
+                          const SizedBox(height: 8),
+                          Text(
+                            'Manage your account information and security',
+                            style: GoogleFonts.inter(
+                              fontSize: isCompact ? 18 : 20,
+                              fontWeight: FontWeight.w400,
+                              color: Colors.black.withValues(alpha: 0.8),
+                              height: 1.2,
+                            ),
                           ),
                         ],
                       ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(height: 24),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 32,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        clipBehavior: Clip.none,
+                        children: [
+                          Positioned(
+                            left: 0,
+                            right: -extraRightWidth,
+                            bottom: 0,
+                            child: Container(
+                              height: 0.5,
+                              color: const Color(0xFF5C5C5C),
+                            ),
+                          ),
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                SizedBox(width: horizontalPadding),
+                                _buildTabItem(
+                                  label: 'Login Details',
+                                  isActive: _selectedTab ==
+                                      _AccountSettingsTab.loginDetails,
+                                  showWarningBadge: false,
+                                  onTap: () {
+                                    _setSelectedTab(
+                                        _AccountSettingsTab.loginDetails);
+                                  },
+                                ),
+                                const SizedBox(width: 36),
+                                _buildTabItem(
+                                  label: 'Report Identity Settings',
+                                  isActive: _selectedTab ==
+                                      _AccountSettingsTab
+                                          .reportIdentitySettings,
+                                  showWarningBadge: _hasReportIdentityWarnings,
+                                  onTap: () {
+                                    _setSelectedTab(
+                                      _AccountSettingsTab
+                                          .reportIdentitySettings,
+                                    );
+                                  },
+                                ),
+                                SizedBox(width: horizontalPadding),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 40),
+                    Padding(
+                      padding: EdgeInsets.only(
+                        left: horizontalPadding,
+                        right: horizontalPadding,
+                      ),
+                      child: _selectedTab == _AccountSettingsTab.loginDetails
+                          ? _buildLoginDetailsContent(
+                              context,
+                              userEmail: userEmail,
+                              isCompact: isCompact,
+                            )
+                          : _buildReportIdentityContent(
+                              context,
+                              isCompact: isCompact,
+                            ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 40),
-                Padding(
-                  padding: EdgeInsets.only(
-                    left: horizontalPadding,
-                    right: horizontalPadding,
-                  ),
-                  child: _selectedTab == _AccountSettingsTab.loginDetails
-                      ? _buildLoginDetailsContent(
-                          context,
-                          userEmail: userEmail,
-                          isCompact: isCompact,
-                        )
-                      : _buildReportIdentityContent(context,
-                          isCompact: isCompact),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 

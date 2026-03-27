@@ -121,118 +121,138 @@ class _HelpPageState extends State<HelpPage> {
 
   @override
   Widget build(BuildContext context) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isCompact = screenWidth < 768;
-    final scaleMetrics = AppScaleMetrics.of(context);
-    final designViewportWidth =
-        scaleMetrics?.designViewportWidth ?? screenWidth;
-    final extraRightWidth = designViewportWidth > screenWidth
-        ? (designViewportWidth - screenWidth)
-        : 0.0;
-    final horizontalPadding = isCompact ? 16.0 : 24.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final screenWidth = constraints.maxWidth;
+        final isCompact = screenWidth < 768;
+        final scaleMetrics = AppScaleMetrics.of(context);
+        final extraRightWidth = scaleMetrics?.rightOverflowWidth ?? 0.0;
+        final horizontalPadding = isCompact ? 16.0 : 24.0;
 
-    return Container(
-      color: Colors.white,
-      child: Padding(
-        padding: const EdgeInsets.only(top: 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'How can we help you?',
-                    style: GoogleFonts.inter(
-                      fontSize: isCompact ? 30 : 32,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
-                      height: 1.25,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Find guidance on using the platform, understanding reports, and resolving common issues.',
-                    style: GoogleFonts.inter(
-                      fontSize: isCompact ? 18 : 20,
-                      fontWeight: FontWeight.w400,
-                      color: Colors.black.withValues(alpha: 0.8),
-                      height: 1.2,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              height: 32,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Positioned(
-                    left: 0,
-                    right: -extraRightWidth,
-                    bottom: 0,
-                    child: Container(
-                      height: 0.5,
-                      color: const Color(0xFF5C5C5C),
-                    ),
-                  ),
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        SizedBox(width: horizontalPadding),
-                        _buildTabItem(
-                          label: 'Calculation Methods',
-                          tab: _HelpTab.calculationMethods,
+        return Container(
+          color: Colors.white,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'How can we help you?',
+                        style: GoogleFonts.inter(
+                          fontSize: isCompact ? 30 : 32,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black,
+                          height: 1.25,
                         ),
-                        const SizedBox(width: 36),
-                        _buildTabItem(
-                          label: 'Indicators',
-                          tab: _HelpTab.indicators,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Find guidance on using the platform, understanding reports, and resolving common issues.',
+                        style: GoogleFonts.inter(
+                          fontSize: isCompact ? 18 : 20,
+                          fontWeight: FontWeight.w400,
+                          color: Colors.black.withValues(alpha: 0.8),
+                          height: 1.2,
                         ),
-                        const SizedBox(width: 36),
-                        _buildTabItem(
-                          label: 'Contact',
-                          tab: _HelpTab.contact,
-                        ),
-                        SizedBox(width: horizontalPadding),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ScrollbarTheme(
-                data: ScrollbarThemeData(
-                  thickness: WidgetStateProperty.all(8),
-                  thumbVisibility: WidgetStateProperty.all(true),
-                  radius: const Radius.circular(4),
-                  minThumbLength: 233,
-                ),
-                child: Scrollbar(
-                  controller: _scrollController,
-                  child: SingleChildScrollView(
-                    controller: _scrollController,
-                    clipBehavior: Clip.hardEdge,
-                    padding: EdgeInsets.only(
-                      top: 24,
-                      left: horizontalPadding,
-                      right: horizontalPadding,
-                      bottom: 24,
-                    ),
-                    child: _buildSelectedTabContent(isCompact: isCompact),
+                      ),
+                    ],
                   ),
                 ),
-              ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  height: 32,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Positioned(
+                        left: 0,
+                        right: -extraRightWidth,
+                        bottom: 0,
+                        child: Container(
+                          height: 0.5,
+                          color: const Color(0xFF5C5C5C),
+                        ),
+                      ),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            SizedBox(width: horizontalPadding),
+                            _buildTabItem(
+                              label: 'Calculation Methods',
+                              tab: _HelpTab.calculationMethods,
+                            ),
+                            const SizedBox(width: 36),
+                            _buildTabItem(
+                              label: 'Indicators',
+                              tab: _HelpTab.indicators,
+                            ),
+                            const SizedBox(width: 36),
+                            _buildTabItem(
+                              label: 'Contact',
+                              tab: _HelpTab.contact,
+                            ),
+                            SizedBox(width: horizontalPadding),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final viewportWidth =
+                          constraints.maxWidth + extraRightWidth;
+                      final viewportHeight = constraints.maxHeight;
+                      return OverflowBox(
+                        alignment: Alignment.topLeft,
+                        minWidth: viewportWidth,
+                        maxWidth: viewportWidth,
+                        minHeight: viewportHeight,
+                        maxHeight: viewportHeight,
+                        child: SizedBox(
+                          width: viewportWidth,
+                          height: viewportHeight,
+                          child: ScrollbarTheme(
+                            data: ScrollbarThemeData(
+                              thickness: WidgetStateProperty.all(8),
+                              thumbVisibility: WidgetStateProperty.all(true),
+                              radius: const Radius.circular(4),
+                              minThumbLength: 233,
+                            ),
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              child: SingleChildScrollView(
+                                controller: _scrollController,
+                                clipBehavior: Clip.hardEdge,
+                                padding: EdgeInsets.only(
+                                  top: 24,
+                                  left: horizontalPadding,
+                                  right: horizontalPadding,
+                                  bottom: 24,
+                                ),
+                                child: _buildSelectedTabContent(
+                                  isCompact: isCompact,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -361,6 +381,8 @@ class _HelpPageState extends State<HelpPage> {
             denominator: 'Total Expenses',
             showTimes100: true,
           ),
+          const SizedBox(height: 24),
+          _buildCalculationNoteContent(),
         ],
       ),
     );
@@ -449,6 +471,420 @@ class _HelpPageState extends State<HelpPage> {
           ),
           const SizedBox(height: 2),
           _buildFormulaText(denominator),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalculationNoteContent() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE1E1E1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Calculation note',
+            style: GoogleFonts.inter(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: Colors.black,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'All values are computed with high precision internally.',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w400,
+              color: Colors.black.withValues(alpha: 0.8),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Display rounding may cause small differences between individual plot totals and the system total.',
+            style: GoogleFonts.inter(
+              fontSize: 14,
+              fontWeight: FontWeight.w400,
+              color: Colors.black.withValues(alpha: 0.8),
+            ),
+          ),
+          const SizedBox(height: 16),
+          _buildCalculationNoteExampleCard(),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              _buildCalculationNoteBadge(
+                label: 'Area (sqm) values',
+                value: '3 decimal places',
+              ),
+              _buildCalculationNoteBadge(
+                label: 'Rupee (₹) values',
+                value: '2 decimal places',
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0C8CE9),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.info_outline,
+                  color: Colors.white,
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'This difference occurs due to rounding at the display level. The system aims to keep totals as close as possible to the actual expense.',
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalculationNoteExampleCard() {
+    final borderColor = Colors.black.withValues(alpha: 0.55);
+    final rowLabelStyle = GoogleFonts.inter(
+      fontSize: 14,
+      fontWeight: FontWeight.w400,
+      color: Colors.black.withValues(alpha: 0.8),
+    );
+    final rowValueStyle = GoogleFonts.inter(
+      fontSize: 14,
+      fontWeight: FontWeight.w700,
+      color: Colors.black.withValues(alpha: 0.8),
+    );
+    const displayBlue = Color(0xFF0C8CE9);
+
+    Widget simpleSplitRow({
+      required String leftA,
+      required String rightA,
+      required String leftB,
+      required String rightB,
+      Color rightBColor = const Color(0xFF0C8CE9),
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(leftA, style: rowLabelStyle)),
+                Text(rightA, style: rowValueStyle),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(child: Text(leftB, style: rowLabelStyle)),
+                Text(
+                  rightB,
+                  style: rowValueStyle.copyWith(color: rightBColor),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget cellText(
+      String value, {
+      bool blue = false,
+      bool bold = false,
+      TextAlign align = TextAlign.center,
+      double size = 14,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Text(
+          value,
+          style: GoogleFonts.inter(
+            fontSize: size,
+            fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+            color: blue ? displayBlue : Colors.black.withValues(alpha: 0.8),
+          ),
+          textAlign: align,
+        ),
+      );
+    }
+
+    final plotRows = <List<String>>[
+      [
+        'Plot 1',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 1,486,666.6666…',
+        '₹ 14,86,666.67',
+      ],
+      [
+        'Plot 2',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 1,486,666.6666…',
+        '₹ 14,86,666.67',
+      ],
+      [
+        'Plot 3',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 1,486,666.6666…',
+        '₹ 14,86,666.67',
+      ],
+      [
+        'Plot 4',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 1,486,666.6666…',
+        '₹ 14,86,666.67',
+      ],
+      [
+        'Plot 5',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 1,486,666.6666…',
+        '₹ 14,86,666.67',
+      ],
+      [
+        'Plot 6',
+        '223',
+        '6,666.6666...',
+        '6,666.67',
+        '₹ 25,66,666.6666…',
+        '₹ 25,66,666.67',
+      ],
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor, width: 0.5),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: borderColor, width: 0.5),
+              ),
+            ),
+            child: Text(
+              'Example',
+              style: GoogleFonts.inter(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: Colors.black.withValues(alpha: 0.8),
+              ),
+            ),
+          ),
+          simpleSplitRow(
+            leftA: 'Total area',
+            rightA: '1,500 sqm',
+            leftB: 'Total expense',
+            rightB: '₹ 1,00,00,000',
+            rightBColor: Colors.black.withValues(alpha: 0.8),
+          ),
+          Container(height: 0.5, color: borderColor),
+          simpleSplitRow(
+            leftA: 'Actual all-in cost',
+            rightA: '₹/sqm 6,666.666666...',
+            leftB: 'Displayed as',
+            rightB: '₹/sqm 6,666.67',
+          ),
+          Container(height: 0.5, color: borderColor),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+            child: Text(
+              'Plot Cost Table',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: Colors.black.withValues(alpha: 0.8),
+              ),
+            ),
+          ),
+          Container(height: 0.5, color: borderColor),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 740),
+              child: Table(
+                defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                columnWidths: const <int, TableColumnWidth>{
+                  0: FlexColumnWidth(1.0),
+                  1: FlexColumnWidth(1.0),
+                  2: FlexColumnWidth(1.8),
+                  3: FlexColumnWidth(1.5),
+                  4: FlexColumnWidth(2.6),
+                  5: FlexColumnWidth(2.1),
+                },
+                border: TableBorder(
+                  left: BorderSide(color: borderColor, width: 0.5),
+                  right: BorderSide(color: borderColor, width: 0.5),
+                  horizontalInside: BorderSide(color: borderColor, width: 0.5),
+                  verticalInside: BorderSide(color: borderColor, width: 0.5),
+                ),
+                children: [
+                  TableRow(
+                    decoration: const BoxDecoration(color: Color(0xFFEBEBEB)),
+                    children: [
+                      cellText('Plot'),
+                      cellText('Area\n(sqm)'),
+                      cellText('Actual\nAll-in Cost\n(₹/sqm)', size: 13),
+                      cellText(
+                        'Displayed\nAll-in Cost\n(₹/sqm)',
+                        blue: true,
+                        size: 13,
+                      ),
+                      cellText('Actual\nPlot Cost'),
+                      cellText('Displayed\nPlot Cost', blue: true),
+                    ],
+                  ),
+                  ...plotRows.map(
+                    (row) => TableRow(
+                      children: [
+                        cellText(row[0]),
+                        cellText(row[1]),
+                        cellText(row[2]),
+                        cellText(row[3], blue: true),
+                        cellText(row[4]),
+                        cellText(row[5], blue: true),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Container(height: 0.5, color: borderColor),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Manual Sum [Displayed Plot Cost]',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black.withValues(alpha: 0.8),
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '₹1,00,00,000.02',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'System total [Displayed Plot Cost]',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black.withValues(alpha: 0.8),
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '₹1,00,00,000',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: displayBlue,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCalculationNoteBadge({
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 170),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0C8CE9).withValues(alpha: 0.25),
+            blurRadius: 2,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: Colors.black,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: const Color(0xFF0C8CE9),
+            ),
+          ),
         ],
       ),
     );
