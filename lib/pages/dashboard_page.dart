@@ -14297,7 +14297,9 @@ class _DashboardPageState extends State<DashboardPage> {
         child: Align(
           alignment: Alignment.centerLeft,
           child: Text(
-            fixedFee != null ? _formatCurrencyNumber(fixedFee) : '₹ 0.00',
+            fixedFee != null
+                ? '₹ ${_formatCurrencyNumber(fixedFee)}'
+                : '₹ 0.00',
             style: GoogleFonts.inter(
               fontSize: 14,
               fontWeight: FontWeight.normal,
@@ -14320,7 +14322,7 @@ class _DashboardPageState extends State<DashboardPage> {
               alignment: Alignment.centerLeft,
               child: Text(
                 monthlyFee != null
-                    ? _formatCurrencyNumber(monthlyFee)
+                    ? '₹ ${_formatCurrencyNumber(monthlyFee)}'
                     : '₹ 0.00',
                 style: GoogleFonts.inter(
                   fontSize: 14,
@@ -16211,7 +16213,9 @@ class _DashboardPageState extends State<DashboardPage> {
         child: Align(
           alignment: Alignment.centerLeft,
           child: Text(
-            fixedFee != null ? _formatCurrencyNumber(fixedFee) : '₹ 0.00',
+            fixedFee != null
+                ? '₹ ${_formatCurrencyNumber(fixedFee)}'
+                : '₹ 0.00',
             style: GoogleFonts.inter(
               fontSize: 14,
               fontWeight: FontWeight.normal,
@@ -16234,7 +16238,7 @@ class _DashboardPageState extends State<DashboardPage> {
               alignment: Alignment.centerLeft,
               child: Text(
                 monthlyFee != null
-                    ? _formatCurrencyNumber(monthlyFee)
+                    ? '₹ ${_formatCurrencyNumber(monthlyFee)}'
                     : '₹ 0.00',
                 style: GoogleFonts.inter(
                   fontSize: 14,
