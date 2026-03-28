@@ -4572,7 +4572,7 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _formatNumberNoDecimals(totalRevenue),
+                  _formatNumberWithDecimals(totalRevenue, 2),
                   style: GoogleFonts.inter(
                     fontSize: 20,
                     fontWeight: FontWeight.w400,
@@ -4797,6 +4797,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     value: totalRevenue,
                     footerText:
                         '$soldPlots plots and $soldAmenityPlots amenity plot sold',
+                    valueDecimals: 2,
                   ),
                   const SizedBox(width: 16),
                   _buildSalesHighlightCard(
@@ -4819,6 +4820,7 @@ class _DashboardPageState extends State<DashboardPage> {
     required String title,
     required double value,
     required String footerText,
+    int valueDecimals = 0,
   }) {
     final valueStyle = GoogleFonts.inter(
       fontSize: 20,
@@ -4862,7 +4864,9 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _formatNumberNoDecimals(value),
+                  valueDecimals > 0
+                      ? _formatNumberWithDecimals(value, valueDecimals)
+                      : _formatNumberNoDecimals(value),
                   style: valueStyle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -6854,6 +6858,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   height: 130,
                   titleMaxLines: 1,
                   footerMaxLines: 2,
+                  valueDecimals: 2,
                 ),
               ],
             ),
