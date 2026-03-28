@@ -283,6 +283,8 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
   String _areaUnit = AreaUnitService.defaultUnit;
   bool get _isSqm => AreaUnitUtils.isSqm(_areaUnit);
   String get _areaUnitSuffix => AreaUnitUtils.unitSuffix(_isSqm);
+  String? _plotsBuyerContactColumnName;
+  bool _plotsBuyerContactColumnChecked = false;
   String? _amenityBuyerContactColumnName;
   bool _amenityBuyerContactColumnChecked = false;
   static const String _layoutDocumentsFolderName = 'Layouts';
@@ -561,6 +563,27 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
     }
     _amenityBuyerContactColumnChecked = true;
     return _amenityBuyerContactColumnName;
+  }
+
+  Future<String?> _resolvePlotsBuyerContactColumnName() async {
+    if (_plotsBuyerContactColumnChecked) {
+      return _plotsBuyerContactColumnName;
+    }
+    const candidates = <String>[
+      'buyer_contact_number',
+      'buyer_mobile_number',
+    ];
+    for (final column in candidates) {
+      try {
+        await _supabase.from('plots').select(column).limit(1);
+        _plotsBuyerContactColumnName = column;
+        break;
+      } catch (_) {
+        // Try next candidate.
+      }
+    }
+    _plotsBuyerContactColumnChecked = true;
+    return _plotsBuyerContactColumnName;
   }
 
   bool get _hasAmenityAreaData {
@@ -1368,19 +1391,19 @@ class _PlotStatusPageState extends State<PlotStatusPage> {
       return List<Map<String, dynamic>>.from(rows);
     }
 
+    const baseSelectClause =
+        'id, layout_id, plot_number, area, all_in_cost_per_sqft, total_plot_cost, status, sale_price, buyer_name, sale_date, agent_name, payments';
+    final contactColumn = await _resolvePlotsBuyerContactColumnName();
+    final resolvedSelectClause = contactColumn == null
+        ? baseSelectClause
+        : '$baseSelectClause, $contactColumn';
+
     try {
-      return await run(
-          'id, layout_id, plot_number, area, all_in_cost_per_sqft, total_plot_cost, status, sale_price, buyer_name, buyer_contact_number, buyer_mobile_number, sale_date, agent_name, payments');
-    } catch (_) {
-      try {
-        return await run(
-            'id, layout_id, plot_number, area, all_in_cost_per_sqft, total_plot_cost, status, sale_price, buyer_name, buyer_contact_number, sale_date, agent_name, payments');
-      } catch (e) {
-        print(
-            'PlotStatusPage: Plot extended select failed, using fallback: $e');
-        return await run(
-            'id, layout_id, plot_number, area, all_in_cost_per_sqft, total_plot_cost, status, sale_price, buyer_name, sale_date, agent_name, payments');
-      }
+      return await run(resolvedSelectClause);
+    } catch (e) {
+      print(
+          'PlotStatusPage: Plot select failed for "$resolvedSelectClause", using fallback: $e');
+      return await run(baseSelectClause);
     }
   }
 

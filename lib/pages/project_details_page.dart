@@ -3297,6 +3297,10 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
                   ? _formatMoneyDecimal(plot['sale_price'])
                   : null,
               'buyerName': (plot['buyer_name'] ?? '').toString(),
+              'buyerContactNumber': (plot['buyer_contact_number'] ??
+                      plot['buyer_mobile_number'] ??
+                      '')
+                  .toString(),
               'saleDate': _formatDateFromDatabase(plot['sale_date']),
               'agent': (plot['agent_name'] ?? '').toString(),
               'partners': plotPartners
